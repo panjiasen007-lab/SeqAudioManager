@@ -1,0 +1,43 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ---- Nuitka / 打包产物 ----
+*.build/
+*.dist/
+*.onefile-build/
+seqaudio.build/
+# 保留 build.py 打包脚本
+
+# ---- 运行时产物 ----
+_backup/
+*.seqaudio.tmp
+*.seqaudio.log
+logs/
+cache/
+config.local.json
+
+# ---- 测试临时文件 ----
+tests/_tmp/
+assets/_tmp/
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 运行时数据（配置/缓存/备份，随机器不同）
+/data/
