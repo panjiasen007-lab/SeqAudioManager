@@ -8,7 +8,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import APP_NAME, __version__
@@ -63,10 +63,12 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     except Exception:
         pass
 
-    font = QFont("Microsoft YaHei UI")
-    font.setPixelSize(13)
-    font.setHintingPreference(QFont.PreferFullHinting)
-    app.setFont(font)
+    # 先注册随包的开源字体（Noto Sans SC / JetBrains Mono），
+    # 再设默认字体 —— 顺序反了会拿到系统默认字体，QSS 里写的族名也就白写了
+    from .ui import fonts
+
+    fonts.load_application_fonts()
+    app.setFont(fonts.ui_font(13))
     app.setStyleSheet(QSS)
 
     from .core.paths import asset_path
@@ -154,6 +156,70 @@ def _selftest_file(target: str) -> int:
     return 0
 
 
+def _uninstall_flow() -> int:
+    """`--uninstall`：由「应用和功能」或开始菜单调用。
+
+    两段询问：先确认要卸载，再单独问 data/ 怎么处理 —— 备份目录里可能是用户
+    唯一的母带副本，绝不能在"卸载程序"这一步顺手删掉。
+    """
+    from PySide6.QtWidgets import QMessageBox as Box
+
+    from .core.paths import app_dir
+    from .core.uninstall import install_dir_from_registry, run_uninstall
+
+    app = create_app([])
+    install_dir = install_dir_from_registry() or app_dir()
+
+    box = Box()
+    box.setWindowTitle("卸载音序管家")
+    box.setIcon(Box.Question)
+    box.setText("确定要卸载音序管家吗？")
+    box.setInformativeText(f"安装位置：{install_dir}\n\n卸载会删除程序文件、快捷方式与注册表项。")
+    yes = box.addButton("卸载", Box.DestructiveRole)
+    no = box.addButton("取消", Box.RejectRole)
+    box.setDefaultButton(no)
+    box.exec()
+    if box.clickedButton() is not yes:
+        return 0
+
+    data_dir = install_dir / "data"
+    keep_data = True
+    if data_dir.exists():
+        second = Box()
+        second.setWindowTitle("配置与备份")
+        second.setIcon(Box.Warning)
+        second.setText("安装目录里有配置、日志与备份数据。")
+        second.setInformativeText(
+            "「保留」会先把 data/ 移动到 %APPDATA%\\SeqAudioManager，"
+            "以后重装还能接着用；\n「全部删除」会连备份的原始音频一起删掉，无法恢复。"
+        )
+        keep = second.addButton("保留数据", Box.AcceptRole)
+        wipe = second.addButton("全部删除", Box.DestructiveRole)
+        second.addButton("取消", Box.RejectRole)
+        second.setDefaultButton(keep)
+        second.exec()
+        if second.clickedButton() is wipe:
+            # 删除备份是不可逆操作，再问一次
+            third = Box()
+            third.setWindowTitle("确认删除备份")
+            third.setIcon(Box.Critical)
+            third.setText("备份目录里的原始音频也会被删除，且无法恢复。")
+            third.setInformativeText("确定继续吗？")
+            sure = third.addButton("确定全部删除", Box.DestructiveRole)
+            third.addButton("保留数据", Box.AcceptRole)
+            third.exec()
+            keep_data = third.clickedButton() is not sure
+        elif second.clickedButton() is not keep:
+            return 0
+
+    if not run_uninstall(install_dir, keep_data=keep_data):
+        Box.critical(None, "卸载失败", "无法启动卸载进程，请手动删除安装目录。")
+        return 1
+    log.info("已启动卸载：%s（保留数据=%s）", install_dir, keep_data)
+    app.processEvents()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
     if "--selftest" in args:
@@ -162,6 +228,9 @@ def main(argv: list[str] | None = None) -> int:
         index = args.index("--selftest-file")
         target = args[index + 1] if index + 1 < len(args) else ""
         return _selftest_file(target)
+    if "--uninstall" in args:
+        setup_logging()
+        return _uninstall_flow()
 
     setup_logging()
     log.info("启动 %s v%s", APP_NAME, __version__)

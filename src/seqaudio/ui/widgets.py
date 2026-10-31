@@ -7,11 +7,10 @@ Qt 的 QSS 能力有限（无阴影、无过渡），"现代感"主要靠三件�
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -33,7 +32,8 @@ def app_icon_path() -> Path | None:
     return asset_path("app.png")
 
 
-def app_icon_pixmap(size: int) -> "QPixmap | None":
+def app_icon_pixmap(size: int):
+    """返回缩放后的 QPixmap；无图标资源时返回 None。"""
     from PySide6.QtGui import QPixmap
 
     path = app_icon_path()
@@ -62,7 +62,7 @@ class StatCard(QFrame):
         self.key = key
         self._color = color
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(62)
+        self.setFixedHeight(70)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         layout = QVBoxLayout(self)
@@ -227,14 +227,14 @@ class SearchInput(QLineEdit):
         self.setStyleSheet(
             f"""
             QLineEdit {{
-                background: {theme.BG_CARD};
+                background: {theme.SURFACE_INPUT};
                 border: 1px solid {theme.LINE};
                 border-radius: 8px;
                 padding-left: 30px;
                 padding-right: 8px;
                 color: {theme.FG};
             }}
-            QLineEdit:focus {{ border-color: {theme.ACCENT}; background: #12161e; }}
+            QLineEdit:focus {{ border-color: {theme.ACCENT}; background: rgba(18,24,34,0.92); }}
             """
         )
 
@@ -342,11 +342,10 @@ class Card(QFrame):
 
 
 def mono_font(size: int = 12, bold: bool = False) -> QFont:
-    font = QFont("Cascadia Mono")
-    font.setStyleHint(QFont.Monospace)
-    font.setPixelSize(size)
-    font.setBold(bold)
-    return font
+    """等宽字体（数据列专用），走 ui/fonts 统一解析。"""
+    from .fonts import mono_font as _mono
+
+    return _mono(size, bold)
 
 
 class EmptyState(QWidget):

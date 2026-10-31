@@ -73,6 +73,10 @@ class Settings:
     min_duration_sec: float = 30.0         # 过滤短视频 BGM / 广告音频
     skip_encrypted: bool = True
 
+    # ---- 界面 ----
+    space_background: bool = True          # 星空动态背景
+    cleanup_include_suspect: bool = True   # 清理时是否包含「疑似」项
+
     # ---- 其他 ----
     offline_mode: bool = False
     last_folder: str = ""

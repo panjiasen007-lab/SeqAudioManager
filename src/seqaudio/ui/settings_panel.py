@@ -28,6 +28,8 @@ from .widgets import Card
 
 class SettingsPanel(QScrollArea):
     settingsChanged = Signal()
+    #: 星空背景开关需要立刻生效（不只是存进配置），单独发信号
+    spaceToggled = Signal(bool)
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -52,6 +54,7 @@ class SettingsPanel(QScrollArea):
         layout.addWidget(self._build_watermark_card())
         layout.addWidget(self._build_rename_card())
         layout.addWidget(self._build_scan_card())
+        layout.addWidget(self._build_ui_card())
         layout.addStretch(1)
 
         self.load_from(settings)
@@ -59,7 +62,7 @@ class SettingsPanel(QScrollArea):
     # ------------------------------------------------------------ 卡片构建
 
     def _build_match_card(self) -> Card:
-        card = Card("匹配与覆盖", "命中后如何写入")
+        card = Card("匹配与覆盖")
         self.conflict_combo = QComboBox()
         for mode in ConflictMode:
             self.conflict_combo.addItem(mode.value, mode)
@@ -82,7 +85,7 @@ class SettingsPanel(QScrollArea):
         return card
 
     def _build_source_card(self) -> Card:
-        card = Card("联网数据源", "全部开源平台")
+        card = Card("联网数据源")
 
         self.online_check = QCheckBox("启用联网匹配与歌词下载")
         self.online_check.toggled.connect(self._notify)
@@ -125,7 +128,7 @@ class SettingsPanel(QScrollArea):
         return card
 
     def _build_lyrics_card(self) -> Card:
-        card = Card("歌词", "LRC 同步歌词")
+        card = Card("歌词")
         self.lyrics_combo = QComboBox()
         for mode in LyricsMode:
             self.lyrics_combo.addItem(mode.value, mode)
@@ -138,7 +141,7 @@ class SettingsPanel(QScrollArea):
         return card
 
     def _build_write_card(self) -> Card:
-        card = Card("写入与备份", "无损安全写入")
+        card = Card("写入与备份")
 
         self.backup_check = QCheckBox("写入前自动备份原文件")
         self.backup_check.toggled.connect(self._notify)
@@ -165,7 +168,7 @@ class SettingsPanel(QScrollArea):
         return card
 
     def _build_watermark_card(self) -> Card:
-        card = Card("水印清理", "仅标签文字", theme.WARN)
+        card = Card("水印清理", "", theme.WARN)
 
         self.watermark_check = QCheckBox("清理站点广告与推广后缀")
         self.watermark_check.toggled.connect(self._notify)
@@ -184,7 +187,7 @@ class SettingsPanel(QScrollArea):
         return card
 
     def _build_rename_card(self) -> Card:
-        card = Card("批量重命名", "按模板", theme.OK)
+        card = Card("批量重命名", "", theme.OK)
 
         self.rename_check = QCheckBox("处理完成后自动重命名")
         self.rename_check.toggled.connect(self._notify)
@@ -220,6 +223,34 @@ class SettingsPanel(QScrollArea):
         self.min_duration_spin.valueChanged.connect(self._notify)
         card.add_form([("最短时长", self.min_duration_spin)])
         return card
+
+    def _build_ui_card(self) -> Card:
+        card = Card("界面与清理", "", theme.PURPLE)
+
+        self.space_check = QCheckBox("动态星空背景")
+        self.space_check.setToolTip(
+            "窗口背景在宇宙中持续穿行，每 24 秒切换一个星区\n关闭后为纯深色，笔记本上更省电"
+        )
+        self.space_check.toggled.connect(self._on_space_toggled)
+        card.add_widget(self.space_check)
+
+        self.suspect_check = QCheckBox("清理时包含「疑似」项")
+        self.suspect_check.setToolTip(
+            "勾选：连「疑似假无损 / 疑似升频」一起清理\n"
+            "取消：只清理明确判定为假无损的文件（更保守）"
+        )
+        self.suspect_check.toggled.connect(self._notify)
+        card.add_widget(self.suspect_check)
+
+        hint = QLabel("判定只在本地做频谱分析，不会上传任何音频。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        card.add_widget(hint)
+        return card
+
+    def _on_space_toggled(self, checked: bool) -> None:
+        self.spaceToggled.emit(checked)
+        self._notify()
 
     # ------------------------------------------------------------ 辅助
 
@@ -283,6 +314,8 @@ class SettingsPanel(QScrollArea):
 
             self.recursive_check.setChecked(settings.recursive_scan)
             self.min_duration_spin.setValue(int(settings.min_duration_sec))
+            self.space_check.setChecked(settings.space_background)
+            self.suspect_check.setChecked(settings.cleanup_include_suspect)
         finally:
             self._loading = False
 
@@ -320,4 +353,7 @@ class SettingsPanel(QScrollArea):
 
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.min_duration_sec = float(self.min_duration_spin.value())
+
+        settings.space_background = self.space_check.isChecked()
+        settings.cleanup_include_suspect = self.suspect_check.isChecked()
         return settings

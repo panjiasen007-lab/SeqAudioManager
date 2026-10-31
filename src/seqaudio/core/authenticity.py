@@ -79,6 +79,8 @@ class AuthenticityResult:
     analyzed_seconds: float = 0.0
     reasons: list[str] = field(default_factory=list)
     error: str = ""
+    #: 判定所用那一段的 (频率轴, dB) 频谱，供界面画图；不参与比较与打印
+    spectrum: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     @property
     def is_true_lossless(self) -> bool:
@@ -467,6 +469,7 @@ def analyze(
             worst = (freqs, db)
     assert worst is not None
     freqs, db = worst
+    result.spectrum = (freqs, db)
 
     cutoff, steepness = _find_cutoff(freqs, db)
     is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
@@ -524,3 +527,40 @@ def analyze_many(
                     pending.cancel()
                 break
     return results
+
+
+# ---------------------------------------------------------------- 分组（界面筛选 / 批量清理共用）
+
+#: 判定分组：把一个结论映射到「真 / 假 / 可疑 / 未鉴定」四类，
+#: 界面筛选与清理范围都用这一份口径，避免两处逻辑各自漂移
+VERDICT_GROUPS: dict[str, tuple[str, ...]] = {
+    "true": (VERDICT_TRUE, VERDICT_DSD),
+    "fake": (VERDICT_FAKE,),
+    "suspect": (VERDICT_SUSPECT, VERDICT_FAKE_DSD, VERDICT_UPSAMPLED),
+    "unknown": (VERDICT_UNKNOWN, ""),
+}
+
+GROUP_LABELS = {
+    "true": "真无损",
+    "fake": "假无损",
+    "suspect": "可疑",
+    "unknown": "未鉴定",
+}
+
+
+def group_of(verdict: str) -> str:
+    for key, members in VERDICT_GROUPS.items():
+        if verdict in members:
+            return key
+    return "unknown"
+
+
+def removable_tracks(tracks, *, include_suspect: bool = True):
+    """挑出可清理的曲目：结论为假无损，或（可选）疑似假无损/升频。
+
+    判定为「无法判定」的一律不动 —— 没测出结果不等于有问题。
+    """
+    wanted = set(VERDICT_GROUPS["fake"])
+    if include_suspect:
+        wanted |= set(VERDICT_GROUPS["suspect"])
+    return [t for t in tracks if t.authenticity is not None and t.authenticity.verdict in wanted]

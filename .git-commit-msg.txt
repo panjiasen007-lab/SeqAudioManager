@@ -1,0 +1,55 @@
+feat: v1.0.0 — 假无损清理、星空背景、开源字体与协议、安装版+便携版
+
+一、假无损一键清理（core/quarantine.py + ui/cleanup.py + ui/spectrum.py）
+
+判定结果只有"概率"，直接删母带风险太高，所以做成三级处理：
+- 移入回收站（默认）：SHFileOperationW + FOF_ALLOWUNDO，系统回收站可还原
+- 移入软件隔离区：data/quarantine/<批次>/ + manifest 记录原路径与判定依据，
+  「隔离区管理」里可一键还原；同名 .lrc/.cue 跟随移动，不留孤儿文件
+- 彻底删除：必须额外勾选确认，按钮文案带数量（"彻底删除 3 个文件"）
+回收站 API 失败时自动回退到隔离区 —— 绝不能出现"报错但文件又没了"。
+
+配套：
+- 频谱查看器：QPainter 画相对 dB 曲线 + 截止虚线 + 判定依据，
+  用户不必盲信软件结论，自己看那条悬崖即可
+- 统计卡新增"假无损"、判定筛选下拉（真/假/可疑/未鉴定）、
+  右键"查看频谱 / 移入隔离区"、Ctrl+Shift+D
+
+二、星空动态背景（ui/space.py）
+
+生成式星场，760 颗星三层视差，沿 z 轴持续推进 + 透视投影。
+关键细节：拖尾必须沿径向（中心→星点方向）。第一版画成竖直短线，
+整片星空像在下雨而不是在飞行。
+5 个星区（深空/猎户/玫瑰/船底/天鹅）每 24 秒切换：2.6s 调色板插值 +
+3.4s 加速跃迁（速度 3 倍再回落、星点拉长），把换场解释成"进入了另一片星域"。
+主题随之改为半透明玻璃：面板 0.90 / 卡片 0.90 / 表格 0.96 / 日志 0.90，
+低于 0.85 文字会被星星吃掉，高于 0.95 又等于白做。实测 5.1ms/帧（25fps 预算 40ms）。
+设置里可关闭（省电），窗口隐藏时计时器自动停。
+
+三、开源字体 + 关于 + GPLv3
+
+随包 Noto Sans SC（Regular/Bold）+ JetBrains Mono，均 SIL OFL 1.1，可随软件分发。
+ui/fonts.py 在 create_app 里注册（顺序必须在 setFont 之前，否则 QSS 的族名白写），
+支持用户自放 data/fonts/。含 17MB 字体，换来"零安装依赖"。
+
+关于对话框：概览 / 开源协议（内嵌 GPLv3 全文 674 行，离线可查）/
+第三方组件（8 项，带授权与主页）/ 运行环境（可一键复制诊断信息）。
+补 assets/LICENSE、THIRD-PARTY.md、assets/fonts/OFL-*.txt，pyproject 授权元数据。
+
+四、安装版 + 便携绿色版（build.py 重写 + installer/）
+
+python build.py --target all 一次产出：
+  dist/音序管家-v1.0.0-x86-x64.7z            78.9 MB（onedir + LZMA2）
+  dist/音序管家-v1.0.0-x86-x64-Setup.exe    141.5 MB
+便携版用 onedir 而非 onefile：onefile 每次启动都要解压 250MB，首次 3~5 秒。
+安装器是本机没有 Inno/NSIS 时自己写的三页 Qt 向导（约 700 行）：
+装到 %LOCALAPPDATA% 免管理员、写 HKCU 卸载项、快捷方式可取消、支持 --silent 无人值守。
+安装包与便携版共用同一份 7z 载荷，一次压缩两处使用。
+
+修一个卸载真 bug：run_uninstall 同时用了 CREATE_NO_WINDOW 和 DETACHED_PROCESS，
+两个标志冲突，子进程瞬间退出、脚本一句没执行 —— 表现就是"点了卸载什么都没发生"。
+改为只用 CREATE_NO_WINDOW 后实测：目录删除、注册表清除、
+data/ 成功迁移到 %APPDATA%\SeqAudioManager。
+
+验证：45 项单测（新增隔离区 7 项 + 卸载脚本 2 项）、界面端到端、
+安装包静默安装 → 装后 EXE 自检（ffmpeg 83.6MB 可用）→ 卸载清场，全链路通过。

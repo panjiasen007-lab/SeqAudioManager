@@ -16,6 +16,7 @@ import make_samples  # noqa: E402
 from seqaudio.core import cue as cue_mod  # noqa: E402
 from seqaudio.core import lyrics as lyrics_mod  # noqa: E402
 from seqaudio.core import probe, rename, tags as tags_mod, watermark, writer  # noqa: E402
+from seqaudio.core import quarantine, uninstall  # noqa: E402
 from seqaudio.core.model import Tags, Track, ConflictMode  # noqa: E402
 
 
@@ -473,6 +474,111 @@ class TestMerge(unittest.TestCase):
         current.merge(Tags(title="新", album="新专辑"), ConflictMode.KEEP_EXISTING)
         self.assertEqual(current.title, "旧")
         self.assertEqual(current.album, "新专辑")
+
+
+class TestQuarantine(unittest.TestCase):
+    """隔离区：移动 / 还原 / 彻底删除。
+
+    这套逻辑直接删用户文件，测试必须覆盖「原位置已被占用」这种真实场景 ——
+    还原时若直接覆盖，用户刚下载的同名文件就没了。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_quar_"))
+        self.music = self.tmp / "music"
+        self.music.mkdir()
+        self.store = quarantine.QuarantineStore(self.tmp / "quarantine")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make(self, name: str, size: int = 1024) -> Path:
+        path = self.music / name
+        path.write_bytes(b"\0" * size)
+        return path
+
+    def test_move_and_manifest(self) -> None:
+        path = self._make("fake.flac")
+        created, failed = self.store.move_in([(path, "假无损", "截止 16.0kHz")])
+        self.assertEqual(len(created), 1)
+        self.assertFalse(failed)
+        self.assertFalse(path.exists(), "原文件应已被移走")
+        self.assertTrue(Path(created[0].stored).exists())
+
+        entries = self.store.entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].verdict, "假无损")
+        self.assertEqual(entries[0].original, str(path))
+        self.assertGreater(self.store.total_size(), 0)
+
+    def test_sidecar_moves_with_audio(self) -> None:
+        path = self._make("song.flac")
+        lrc = self.music / "song.lrc"
+        lrc.write_text("[00:01.00]歌词", encoding="utf-8")
+        self.store.move_in([(path, "假无损", "")])
+        self.assertFalse(lrc.exists(), "同名 .lrc 应一起移走")
+        self.assertIn("song.lrc", self.store.entries()[0].companions)
+
+    def test_restore_to_original(self) -> None:
+        path = self._make("song.flac")
+        self.store.move_in([(path, "假无损", "")])
+        entry = self.store.entries()[0]
+        ok, _ = self.store.restore(entry)
+        self.assertTrue(ok)
+        self.assertTrue(path.exists())
+        self.assertEqual(self.store.entries(), [])
+
+    def test_restore_when_original_taken(self) -> None:
+        path = self._make("song.flac")
+        self.store.move_in([(path, "假无损", "")])
+        path.write_bytes(b"new")          # 用户又放了一个同名文件
+        entry = self.store.entries()[0]
+        ok, message = self.store.restore(entry)
+        self.assertTrue(ok, message)
+        self.assertEqual(path.read_bytes(), b"new", "原有文件不能被覆盖")
+        restored = self.music / "song (已恢复).flac"
+        self.assertTrue(restored.exists())
+
+    def test_purge_removes_file(self) -> None:
+        path = self._make("song.flac")
+        self.store.move_in([(path, "假无损", "")])
+        entry = self.store.entries()[0]
+        stored = Path(entry.stored)
+        ok, _ = self.store.purge(entry)
+        self.assertTrue(ok)
+        self.assertFalse(stored.exists())
+        self.assertEqual(self.store.entries(), [])
+
+    def test_batch_grouping(self) -> None:
+        self.store.move_in([(self._make("a.flac"), "假无损", "")], batch="B1")
+        self.store.move_in([(self._make("b.flac"), "疑似升频", "")], batch="B1")
+        batches = self.store.batches()
+        self.assertIn("B1", batches)
+        self.assertEqual(len(batches["B1"]), 2)
+
+    def test_human_size(self) -> None:
+        self.assertEqual(quarantine.human_size(0), "0 B")
+        self.assertEqual(quarantine.human_size(1536), "1.5 KB")
+        self.assertEqual(quarantine.human_size(1024 ** 3 * 2), "2.0 GB")
+
+
+class TestUninstallScript(unittest.TestCase):
+    """卸载脚本是唯一会删整个安装目录的地方，至少要保证路径写对了。"""
+
+    def test_script_contains_paths(self) -> None:
+        install = Path(r"C:\Users\demo\AppData\Local\Programs\SeqAudioManager")
+        script = uninstall.build_uninstall_script(install, keep_data=True)
+        self.assertIn(str(install), script)
+        self.assertIn("SeqAudioManager", script)
+        self.assertIn("Remove-Item", script)
+        # 保留数据时，必须先把 data 复制出去再删目录，顺序反了备份就没了
+        self.assertLess(script.index("Copy-Item"), script.index("Remove-Item"))
+
+    def test_script_without_keep(self) -> None:
+        install = Path(r"C:\Temp\SeqAudio")
+        script = uninstall.build_uninstall_script(install, keep_data=False)
+        self.assertNotIn("Copy-Item", script)
+        self.assertIn("Uninstall\\SeqAudioManager", script)
 
 
 if __name__ == "__main__":

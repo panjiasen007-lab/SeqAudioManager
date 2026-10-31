@@ -11,23 +11,27 @@ from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStackedLayout,
     QStatusBar,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
+from .. import __version__
 from ..core import lyrics as lyrics_mod
 from ..core import rename as rename_mod
 from ..core import report as report_mod
@@ -46,6 +50,7 @@ from .track_model import (
     TrackFilterProxy,
     TrackTableModel,
 )
+from .space import SpaceView
 from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
 from .worker import AuthenticityWorker, MatchPreviewWorker, ProcessorWorker, ScanWorker
 
@@ -92,6 +97,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._init_shortcuts()
 
+        self._refresh_stats()
         add_listener(self._log_listener)
         self._append_log("INFO", f"日志目录：{self._log_dir_hint()}")
         if settings.offline_mode:
@@ -102,11 +108,29 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+
+        # 两层堆叠：底层是持续飞行的星空，上层是半透明界面。
+        # 用 QStackedLayout(StackAll) 而不是自绘 paintEvent —— 这样星场是个
+        # 真正的 widget，有自己的计时器，也不会被中央控件的背景覆盖掉。
+        stack = QStackedLayout(central)
+        stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        stack.setContentsMargins(0, 0, 0, 0)
+
+        self.space = SpaceView(star_count=760)
+        self.space.sceneChanged.connect(self._on_scene_changed)
+        self.space.set_running(self.settings.space_background)
+        stack.addWidget(self.space)
+
+        surface = QWidget()
+        surface.setObjectName("appSurface")
+        stack.addWidget(surface)
+        stack.setCurrentWidget(surface)
+
+        root = QVBoxLayout(surface)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.brand_bar = BrandBar("0.1.0")
+        self.brand_bar = BrandBar(f"{__version__}")
         root.addWidget(self.brand_bar)
 
         body = QWidget()
@@ -124,6 +148,7 @@ class MainWindow(QMainWindow):
 
         self.settings_panel = SettingsPanel(self.settings)
         self.settings_panel.settingsChanged.connect(self._on_settings_changed)
+        self.settings_panel.spaceToggled.connect(self.toggle_space_background)
         QTimer.singleShot(0, lambda: self.btn_toggle_panel.setChecked(True))
         splitter.addWidget(self.settings_panel)
         splitter.setStretchFactor(0, 1)
@@ -140,10 +165,14 @@ class MainWindow(QMainWindow):
 
         status = QStatusBar()
         status.setSizeGripEnabled(False)
-        status.setFixedHeight(26)
+        status.setFixedHeight(30)
         self.setStatusBar(status)
         self.status_hint = QLabel("拖入音频文件，或点击「添加文件夹」")
         status.addWidget(self.status_hint, 1)
+        self.scene_label = QLabel("")
+        self.scene_label.setStyleSheet(f"color:{theme.FG_MUTE}; font-size:11px;")
+        self.scene_label.setToolTip("当前星区（背景每 24 秒切换一次）")
+        status.addPermanentWidget(self.scene_label)
         self.mode_label = QLabel("")
         self.mode_label.setStyleSheet(f"color:{theme.FG_MUTE};")
         status.addPermanentWidget(self.mode_label)
@@ -157,8 +186,9 @@ class MainWindow(QMainWindow):
         self.btn_add_files = self._button("添加文件", self.add_files, ghost=True)
         self.btn_add_folder = self._button("添加文件夹", self.add_folder, ghost=True)
         self.btn_remove = self._button("移除", self.remove_selected, ghost=True)
-        self.btn_clear = self._button("清空", self.clear_all, ghost=True)
-        for btn in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
+        # 「清空」放进「更多」菜单：1080px 下 8 个按钮已接近一行的极限，
+        # 清空属于低频且可撤销性差的操作，不适合摆在手边
+        for btn in (self.btn_add_files, self.btn_add_folder, self.btn_remove):
             layout.addWidget(btn)
 
         layout.addWidget(self._vline())
@@ -174,18 +204,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_local)
         layout.addWidget(self.btn_stop)
 
-        layout.addStretch(1)
+        layout.addWidget(self._vline())
 
         self.btn_auth = self._button("真假鉴定", self.run_authenticity, ghost=True)
         self.btn_auth.setToolTip("频谱分析判定是否真无损（需解码，速度约 0.3~1 秒/首）")
+        self.btn_cleanup = self._button("清理假无损", self.run_cleanup, ghost=True)
+        self.btn_cleanup.setObjectName("danger")
+        self.btn_cleanup.setToolTip("把判定为假无损/可疑的文件移入回收站或隔离区（Ctrl+Shift+D）")
         layout.addWidget(self.btn_auth)
+        layout.addWidget(self.btn_cleanup)
 
-        self.btn_rename = self._button("重命名预览", self.rename_preview, ghost=True)
-        self.btn_report = self._button("导出报表", self.export_report, ghost=True)
-        layout.addWidget(self.btn_rename)
-        layout.addWidget(self.btn_report)
+        layout.addStretch(1)
 
-        layout.addWidget(self._vline())
+        self.btn_more = self._button("更多", self._show_more_menu, ghost=True)
+        self.btn_more.setToolTip("重命名预览、导出报表、隔离区、关于")
+        self.btn_more.setMenu(self._build_more_menu())
+        layout.addWidget(self.btn_more)
 
         # 窄屏救星：收起参数面板，表格独占整宽
         self.btn_toggle_panel = self._button("参数", self.toggle_settings_panel, ghost=True)
@@ -193,6 +227,29 @@ class MainWindow(QMainWindow):
         self.btn_toggle_panel.setToolTip("显示 / 隐藏右侧参数面板（Ctrl+P）")
         layout.addWidget(self.btn_toggle_panel)
         return bar
+
+    def _build_more_menu(self) -> QMenu:
+        menu = QMenu(self)
+
+        self.action_rename = menu.addAction("重命名预览…", self.rename_preview)
+        self.action_report = menu.addAction("导出处理报表…", self.export_report)
+        menu.addAction("清空列表", self.clear_all)
+        menu.addSeparator()
+        self.action_quarantine = menu.addAction("隔离区管理…", self.open_quarantine)
+        self.action_spectrum = menu.addAction("查看频谱…", self.show_spectrum)
+        menu.addSeparator()
+        self.action_space = menu.addAction("动态星空背景")
+        self.action_space.setCheckable(True)
+        self.action_space.setChecked(self.settings.space_background)
+        self.action_space.toggled.connect(self.toggle_space_background)
+        menu.addAction("打开日志目录", self._open_log_dir)
+        menu.addSeparator()
+        menu.addAction("关于音序管家…", self.show_about)
+        return menu
+
+    def _show_more_menu(self) -> None:
+        """按钮自带的菜单在点击时弹出；这里只负责把勾选状态同步成最新值。"""
+        self.action_space.setChecked(self.settings.space_background)
 
     def toggle_settings_panel(self) -> None:
         visible = not self.settings_panel.isVisible()
@@ -221,12 +278,15 @@ class MainWindow(QMainWindow):
         specs = [
             ("total", "曲目总数", theme.FG),
             ("lossless", "无损音源", theme.CYAN),
+            ("suspect", "假无损", theme.BAD),
             ("done", "已完成", theme.OK),
             ("review", "待确认", theme.WARN),
             ("failed", "失败", theme.BAD),
         ]
         for key, title, color in specs:
             card = StatCard(key, title, color)
+            if key == "suspect":
+                card.setToolTip("判定为假无损 / 疑似假无损 / 升频 的数量，点击筛选")
             card.clicked.connect(self._on_stat_clicked)
             self._stat_cards[key] = card
             row.addWidget(card)
@@ -251,6 +311,21 @@ class MainWindow(QMainWindow):
         self.problems_check.toggled.connect(self.proxy.set_problems_only)
         filter_row.addWidget(self.lossless_check)
         filter_row.addWidget(self.problems_check)
+
+        self.verdict_combo = QComboBox()
+        self.verdict_combo.setFixedHeight(34)
+        self.verdict_combo.setMinimumWidth(118)
+        for label, key in (
+            ("全部判定", "all"),
+            ("真无损", "true"),
+            ("假无损", "fake"),
+            ("可疑（升频/低码）", "suspect"),
+            ("假无损 + 可疑", "suspect_any"),
+            ("未鉴定", "unknown"),
+        ):
+            self.verdict_combo.addItem(label, key)
+        self.verdict_combo.currentIndexChanged.connect(self._on_verdict_filter)
+        filter_row.addWidget(self.verdict_combo)
         layout.addLayout(filter_row)
 
         self.table = QTableView()
@@ -328,6 +403,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self, self.run_auto)
         QShortcut(QKeySequence("Ctrl+E"), self, self.edit_selected)
         QShortcut(QKeySequence("Ctrl+P"), self, self.toggle_settings_panel)
+        QShortcut(QKeySequence("Ctrl+Shift+D"), self, self.run_cleanup)
+        QShortcut(QKeySequence("F1"), self, self.show_about)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -623,9 +700,43 @@ class MainWindow(QMainWindow):
         menu.addAction("查看候选匹配", self.show_candidates)
         menu.addAction("撤销本地修改", self.revert_selected)
         menu.addSeparator()
+        menu.addAction("查看频谱", self.show_spectrum)
+        menu.addAction("移入隔离区", self._quarantine_selected)
+        menu.addSeparator()
         menu.addAction("打开所在文件夹", self.open_folder)
         menu.addAction("仅处理选中项", self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _select_verdict_filter(self, key: str) -> None:
+        for index in range(self.verdict_combo.count()):
+            if self.verdict_combo.itemData(index) == key:
+                self.verdict_combo.setCurrentIndex(index)
+                return
+
+    def _quarantine_selected(self) -> None:
+        """右键直接把选中项送进隔离区（不弹清单，仅对已鉴定的项生效）。"""
+        from ..core.quarantine import QuarantineStore
+
+        tracks = [t for t in self._selected_tracks() if t.path.exists()]
+        if not tracks:
+            return
+        total = sum(t.path.stat().st_size for t in tracks)
+        if QMessageBox.question(
+            self,
+            "移入隔离区",
+            f"将 {len(tracks)} 个文件（{total / 1024 / 1024:.0f} MB）移入隔离区？\n"
+            "可在「更多 → 隔离区管理」中还原。",
+        ) != QMessageBox.Yes:
+            return
+        store = QuarantineStore()
+        created, failed = store.move_in(
+            [(t.path, t.authenticity.verdict if t.authenticity else "",
+              t.authenticity.detail_text if t.authenticity else "") for t in tracks]
+        )
+        removed = [t for t in tracks if not t.path.exists()]
+        self.model.remove_tracks(removed)
+        self._refresh_stats()
+        self._append_log("WARNING", f"已隔离 {len(created)} 个文件，{len(failed)} 个失败")
 
     def _run_selected(self) -> None:
         tracks = self._selected_tracks()
@@ -726,6 +837,156 @@ class MainWindow(QMainWindow):
         if suspect:
             self._append_log("INFO", "已自动勾选「只看问题」，可从表格筛出可疑项")
 
+    # ------------------------------------------------------------ 清理假无损
+
+    def run_cleanup(self) -> None:
+        """一键清理：把判定为假无损/可疑的文件移出曲库。"""
+        from ..core.authenticity import removable_tracks
+        from ..core.quarantine import (
+            QuarantineStore,
+            delete_permanently,
+            send_to_recycle_bin,
+        )
+        from .cleanup import MODE_DELETE, MODE_QUARANTINE, CleanupDialog
+
+        if self.auth_worker is not None and self.auth_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "鉴定仍在进行中，请等它跑完再清理。")
+            return
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "请稍候", "批处理正在运行，先停止再清理。")
+            return
+
+        scope = self._selected_tracks() or self.model.tracks()
+        candidates = removable_tracks(
+            scope, include_suspect=self.settings.cleanup_include_suspect
+        )
+        if not candidates:
+            unexamined = [t for t in scope if t.authenticity is None]
+            message = "当前列表没有判定为假无损的文件。"
+            if unexamined:
+                message += f"\n\n其中 {len(unexamined)} 首尚未鉴定，要先跑一遍「真假鉴定」吗？"
+                if QMessageBox.question(self, "先鉴定？", message) == QMessageBox.Yes:
+                    self.run_authenticity()
+                return
+            QMessageBox.information(self, "无需清理", message)
+            return
+
+        dialog = CleanupDialog(candidates, self)
+        if dialog.exec() != CleanupDialog.Accepted:
+            return
+
+        paths = [t.path for t in candidates]
+        mode = dialog.mode
+
+        removed: list[Track] = []
+        if mode == MODE_DELETE:
+            done, failed = delete_permanently(paths)
+            removed = [t for t in candidates if not t.path.exists()]
+            self._append_log(
+                "WARNING", f"已彻底删除 {done} 个文件" + (f"，{len(failed)} 个失败" if failed else "")
+            )
+            for path, reason in failed:
+                self._append_log("ERROR", f"删除失败 {path.name}：{reason}")
+        elif mode == MODE_QUARANTINE:
+            store = QuarantineStore()
+            created, failed = store.move_in(
+                [
+                    (t.path, t.authenticity.verdict if t.authenticity else "",
+                     t.authenticity.detail_text if t.authenticity else "")
+                    for t in candidates
+                ]
+            )
+            removed = [t for t in candidates if not t.path.exists()]
+            self._append_log(
+                "WARNING",
+                f"已隔离 {len(created)} 个文件到 {store.root}，可在「隔离区管理」中还原",
+            )
+            for path, reason in failed:
+                self._append_log("ERROR", f"隔离失败 {path.name}：{reason}")
+        else:
+            count, error = send_to_recycle_bin(paths)
+            if count == 0:
+                # 回收站不可用（非 Windows 或被策略禁用）时回退到隔离区，
+                # 绝不能因为一个 API 失败就退化成"删除失败但文件也没了"
+                self._append_log("WARNING", f"回收站不可用（{error}），改用隔离区")
+                store = QuarantineStore()
+                created, failed = store.move_in(
+                    [
+                        (t.path, t.authenticity.verdict if t.authenticity else "",
+                         t.authenticity.detail_text if t.authenticity else "")
+                        for t in candidates
+                    ]
+                )
+                removed = [t for t in candidates if not t.path.exists()]
+                self._append_log("WARNING", f"已隔离 {len(created)} 个文件（可还原）")
+            else:
+                removed = [t for t in candidates if not t.path.exists()]
+                self._append_log("WARNING", f"已移入回收站 {count} 个文件（可在资源管理器还原）")
+
+        if removed:
+            self.model.remove_tracks(removed)
+            self._refresh_stats()
+        self.status_hint.setText(
+            f"清理完成：{len(removed)} 个文件已移出列表"
+            if removed else "清理未生效：文件仍存在，请检查权限"
+        )
+
+    def open_quarantine(self) -> None:
+        from .cleanup import QuarantineDialog
+
+        dialog = QuarantineDialog(parent=self)
+        dialog.exec()
+
+    # ------------------------------------------------------------ 频谱 / 关于
+
+    def show_spectrum(self) -> None:
+        tracks = self._selected_tracks()
+        if not tracks:
+            QMessageBox.information(self, "未选中", "请先选中一行，再查看频谱。")
+            return
+        from .spectrum import open_spectrum
+
+        open_spectrum(tracks[0], self)
+
+    def show_about(self) -> None:
+        from .about import AboutDialog
+
+        AboutDialog(self).exec()
+
+    def _open_log_dir(self) -> None:
+        import os as _os
+
+        try:
+            _os.startfile(self._log_dir_hint())  # type: ignore[attr-defined]
+        except OSError as exc:
+            self._append_log("ERROR", f"打开日志目录失败：{exc}")
+
+    # ------------------------------------------------------------ 星空背景
+
+    def toggle_space_background(self, enabled: bool) -> None:
+        self.space.set_running(enabled)
+        self.settings.space_background = enabled
+        self.scene_label.setVisible(enabled)
+        # 菜单项与参数面板是同一开关的两个入口，要互相同步且不能互相触发
+        for widget in (getattr(self, "action_space", None),
+                       getattr(self.settings_panel, "space_check", None)):
+            if widget is None:
+                continue
+            blocked = widget.blockSignals(True)
+            widget.setChecked(enabled)
+            widget.blockSignals(blocked)
+        try:
+            self.settings.save()
+        except OSError:
+            pass
+        self._append_log("INFO", f"星空背景已{'启用' if enabled else '关闭（省电模式）'}")
+
+    def _on_scene_changed(self, name: str) -> None:
+        self.scene_label.setText(f"星区 · {name}")
+
+    def _on_verdict_filter(self) -> None:
+        self.proxy.set_verdict_group(str(self.verdict_combo.currentData()))
+
     # ------------------------------------------------------------ 重命名 / 报表
 
     def rename_preview(self) -> None:
@@ -798,9 +1059,12 @@ class MainWindow(QMainWindow):
         tracks = self.model.tracks()
         stats = report_mod.summarize(tracks)
         lossless = sum(1 for t in tracks if t.info.lossless)
+        suspect = sum(1 for t in tracks if t.authenticity is not None
+                      and t.authenticity.is_suspicious)
         values = {
             "total": len(tracks),
             "lossless": lossless,
+            "suspect": suspect,
             "done": stats.get("完成", 0),
             "review": stats.get("待人工确认", 0),
             "failed": stats.get("失败", 0),
@@ -814,10 +1078,13 @@ class MainWindow(QMainWindow):
         if not tracks:
             self.status_hint.setText("拖入音频文件，或点击「添加文件夹」")
         else:
-            self.status_hint.setText(
+            hint = (
                 f"共 {len(tracks)} 首 · 无损 {lossless} · 完成 {values['done']}"
                 f" · 待确认 {values['review']} · 失败 {values['failed']}"
             )
+            if suspect:
+                hint += f" · 假无损 {suspect}"
+            self.status_hint.setText(hint)
 
     def _on_stat_clicked(self, key: str) -> None:
         if key == "total":
@@ -826,6 +1093,8 @@ class MainWindow(QMainWindow):
             self.problems_check.setChecked(False)
         elif key == "lossless":
             self.lossless_check.setChecked(not self.lossless_check.isChecked())
+        elif key == "suspect":
+            self._select_verdict_filter("suspect_any")
         elif key in ("review", "failed"):
             if not self.problems_check.isChecked():
                 self.problems_check.setChecked(True)

@@ -1,28 +1,50 @@
-"""视觉主题：深色分层 + 冷调强调色 + 精确留白。
+"""视觉主题：星空底 + 半透明分层 + 冷调强调色。
 
 设计原则
 --------
-1. **分层而非平铺**：窗口底 / 面板 / 卡片 / 悬浮，四层色阶各自拉开，
-   靠 1px 细边框而非重描边划分区域，界面才有"深度"。
-2. **强调色只用于一处**：主操作按钮与选中态统一用 #4d7cfe，
-   状态色（成功/警告/失败）只出现在状态胶囊与数字上，避免色彩打架。
-3. **数字用等宽**：码率、采样率、置信度、时长这类数据列用等宽字体，
-   纵向对齐后才有"仪表盘"的感觉。
-4. 不使用任何图片资源，全部 QSS + QPainter，保证 DPI 缩放不失真。
+1. **背景是星空，界面是玻璃**：窗口不做实心填充，星场在最底层持续流动，
+   面板/卡片用半透明底色压在上面。透明度不能太低 —— 低于 0.55 时文字会
+   被星星"吃掉"，高于 0.85 又会把背景完全盖住，等于白做。
+2. **分层靠 1px 细边框而非重描边**：面板 0.72 / 卡片 0.60 / 输入 0.80 三档
+   透明度拉开层次，越靠前越"实"。
+3. **强调色只用于一处**：#4d7cfe 只出现在主按钮与选中态；状态色只出现在
+   胶囊和数字上，避免和背景的星云色打架。
+4. **数字用等宽**：码率、采样率、置信度、时长这类数据列纵向对齐后才有
+   仪表盘的感觉。
+5. 不使用任何图片资源，全部 QSS + QPainter，保证 DPI 缩放不失真。
+
+字体
+----
+UI 用 Noto Sans SC、等宽用 JetBrains Mono，均为 SIL OFL 1.1 授权并随包分发
+（见 ui/fonts.py）。CSS 字体族在这里写成完整的候选栈，Qt 会按顺序取第一个
+已注册的，缺失时自然回退，不需要运行时判断。
 """
 
 from __future__ import annotations
 
 # ---------------------------------------------------------------- 色板
 
-BG_BASE = "#0a0c10"      # 窗口底
-BG_PANEL = "#0f1218"     # 面板/工具栏
-BG_CARD = "#151922"      # 卡片/输入框
-BG_HOVER = "#1c2130"     # 悬浮
-BG_ACTIVE = "#232a3a"    # 按下
+#: 不透底的基准色。对话框、弹出菜单这类独立窗口用它，避免透出桌面
+BG_BASE = "#070a10"
 
-LINE = "#232a38"         # 主分隔线
-LINE_SOFT = "#1a1f2b"    # 次级分隔
+#: 半透明层（星空可透出）。数值是反复调出来的：太透看不清字，太实看不见星
+SURFACE_PANEL = "rgba(11,15,22,0.90)"
+SURFACE_CARD = "rgba(19,24,34,0.90)"
+SURFACE_INPUT = "rgba(14,19,27,0.90)"
+SURFACE_HOVER = "rgba(38,47,64,0.72)"
+SURFACE_ACTIVE = "rgba(48,59,80,0.80)"
+SURFACE_TABLE = "rgba(6,8,13,0.96)"
+SURFACE_LOG = "rgba(3,5,9,0.90)"
+SURFACE_SOLID = "rgba(13,17,25,0.96)"
+
+#: 兼容旧引用（部分模块直接用了 BG_PANEL/BG_CARD 这两个名字）
+BG_PANEL = SURFACE_PANEL
+BG_CARD = SURFACE_CARD
+BG_HOVER = SURFACE_HOVER
+BG_ACTIVE = SURFACE_ACTIVE
+
+LINE = "#26303f"         # 主分隔线
+LINE_SOFT = "#1a2130"    # 次级分隔
 
 FG = "#e8ecf4"
 FG_DIM = "#8b95a8"
@@ -52,21 +74,29 @@ STATUS_COLORS = {
     "待处理": (FG_DIM, "rgba(139,149,168,0.12)"),
 }
 
-UI_FONT = '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable Display", "Segoe UI", sans-serif'
-MONO_FONT = '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace'
+#: 字体候选栈：前两个随包分发（OFL），后面是常见系统字体兜底
+UI_FONT = (
+    '"Noto Sans SC", "Source Han Sans SC", "HarmonyOS Sans SC", "MiSans", '
+    '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif'
+)
+MONO_FONT = '"JetBrains Mono", "Sarasa Mono SC", "Cascadia Mono", Consolas, "Courier New", monospace'
 
 QSS = f"""
 /* ============================== 基础 ============================== */
+/* 全局不透底：星场才能从下面透出来。需要实体背景的控件在下面单独指定。 */
 QWidget {{
-    background: {BG_BASE};
+    background: transparent;
     color: {FG};
     font-family: {UI_FONT};
     font-size: 12px;
 }}
-QMainWindow, QDialog {{ background: {BG_BASE}; }}
+QMainWindow {{ background: {BG_BASE}; }}
+QDialog {{
+    background: {BG_BASE};
+}}
 
 QToolTip {{
-    background: {BG_HOVER};
+    background: {SURFACE_SOLID};
     color: {FG};
     border: 1px solid {LINE};
     border-radius: 6px;
@@ -95,11 +125,11 @@ QToolButton {{
     font-size: 12px;
 }}
 QToolButton:hover {{
-    background: {BG_HOVER};
+    background: {SURFACE_HOVER};
     border-color: {LINE};
     color: {FG};
 }}
-QToolButton:pressed {{ background: {BG_ACTIVE}; }}
+QToolButton:pressed {{ background: {SURFACE_ACTIVE}; }}
 QToolButton:disabled {{ color: #3c4453; background: transparent; border-color: transparent; }}
 QToolButton#accent {{
     background: {ACCENT};
@@ -112,15 +142,15 @@ QToolButton#accent:disabled {{ background: {ACCENT_DIM}; border-color: {ACCENT_D
 
 /* ============================== 按钮 ============================== */
 QPushButton {{
-    background: {BG_CARD};
+    background: {SURFACE_CARD};
     border: 1px solid {LINE};
     border-radius: 7px;
     padding: 7px 15px;
     color: {FG};
 }}
-QPushButton:hover {{ background: {BG_HOVER}; border-color: #2f394c; }}
-QPushButton:pressed {{ background: {BG_ACTIVE}; }}
-QPushButton:disabled {{ color: {FG_MUTE}; background: #11141b; border-color: {LINE_SOFT}; }}
+QPushButton:hover {{ background: {SURFACE_HOVER}; border-color: #33405a; }}
+QPushButton:pressed {{ background: {SURFACE_ACTIVE}; }}
+QPushButton:disabled {{ color: {FG_MUTE}; background: rgba(17,20,27,0.5); border-color: {LINE_SOFT}; }}
 QPushButton#primary {{
     background: {ACCENT};
     border: 1px solid {ACCENT};
@@ -135,37 +165,52 @@ QPushButton#ghost {{
     border: 1px solid {LINE};
     color: {FG_DIM};
 }}
-QPushButton#ghost:hover {{ border-color: {ACCENT}; color: {FG}; }}
-QPushButton#danger {{ color: {BAD}; }}
-QPushButton#danger:hover {{ border-color: {BAD}; background: rgba(248,113,113,0.10); }}
+QPushButton#ghost:hover {{ border-color: {ACCENT}; color: {FG}; background: rgba(77,124,254,0.10); }}
+QPushButton#danger {{ color: {BAD}; border-color: rgba(248,113,113,0.45); }}
+QPushButton#danger:hover {{ border-color: {BAD}; background: rgba(248,113,113,0.12); }}
+QPushButton#dangerSolid {{
+    background: rgba(190,44,44,0.92);
+    border: 1px solid rgba(248,113,113,0.6);
+    color: #ffffff;
+    font-weight: 600;
+}}
+QPushButton#dangerSolid:hover {{ background: rgba(212,52,52,0.96); }}
+QPushButton#dangerSolid:disabled {{ background: rgba(80,26,26,0.6); border-color: rgba(248,113,113,0.2); color: #c98f8f; }}
 
-/* ============================== 卡片 ============================== */
+/* ============================== 容器 ============================== */
 QFrame#card {{
-    background: {BG_PANEL};
+    background: {SURFACE_CARD};
     border: 1px solid {LINE_SOFT};
     border-radius: 10px;
 }}
 QFrame#statCard {{
-    background: {BG_PANEL};
+    background: {SURFACE_CARD};
     border: 1px solid {LINE_SOFT};
     border-radius: 9px;
 }}
-QFrame#statCard:hover {{ border-color: #2b3446; }}
+QFrame#statCard:hover {{ border-color: #35405a; background: rgba(26,32,44,0.70); }}
 QFrame#brandBar {{
-    background: transparent;
+    background: rgba(8,11,17,0.72);
     border: none;
     border-bottom: 1px solid {LINE_SOFT};
 }}
+QFrame#panelBox {{
+    background: {SURFACE_PANEL};
+    border: 1px solid {LINE_SOFT};
+    border-radius: 12px;
+}}
+QFrame#hLine {{ background: {LINE_SOFT}; border: none; }}
+
 QLabel#brandTitle {{
     color: {FG};
     font-size: 16px;
     font-weight: 700;
 }}
-QLabel#brandSub {{ color: #47505f; font-size: 10px; }}
-QLabel#statLabel {{ color: #66707f; font-size: 11px; }}
+QLabel#brandSub {{ color: #4d586a; font-size: 10px; }}
+QLabel#statLabel {{ color: #6b7585; font-size: 11px; }}
 QLabel#statValue {{
     font-family: {MONO_FONT};
-    font-size: 20px;
+    font-size: 21px;
     font-weight: 700;
 }}
 QLabel#sectionTitle {{
@@ -174,26 +219,27 @@ QLabel#sectionTitle {{
     font-weight: 700;
 }}
 QLabel#hint {{ color: {FG_MUTE}; font-size: 11px; }}
+QLabel#mono {{ font-family: {MONO_FONT}; color: {FG_DIM}; }}
 
 /* ============================== 表格 ============================== */
-QTableView {{
-    background: {BG_BASE};
-    alternate-background-color: #0d1016;
+QTableView, QTableWidget {{
+    background: {SURFACE_TABLE};
+    alternate-background-color: rgba(13,17,24,0.55);
     border: 1px solid {LINE_SOFT};
     border-radius: 10px;
-    selection-background-color: rgba(77,124,254,0.18);
+    selection-background-color: rgba(77,124,254,0.20);
     selection-color: {FG};
     outline: none;
     gridline-color: transparent;
 }}
 QTableView::item {{ padding: 2px 8px; border: none; }}
-QTableView::item:selected {{ background: rgba(77,124,254,0.18); color: {FG}; }}
-QTableView::item:hover {{ background: rgba(255,255,255,0.028); }}
-QTableView::item:selected:hover {{ background: rgba(77,124,254,0.22); }}
+QTableView::item:selected {{ background: rgba(77,124,254,0.20); color: {FG}; }}
+QTableView::item:hover {{ background: rgba(255,255,255,0.035); }}
+QTableView::item:selected:hover {{ background: rgba(77,124,254,0.26); }}
 
 QHeaderView {{ background: transparent; }}
 QHeaderView::section {{
-    background: {BG_PANEL};
+    background: rgba(12,16,24,0.86);
     color: {FG_DIM};
     border: none;
     border-bottom: 1px solid {LINE};
@@ -201,12 +247,12 @@ QHeaderView::section {{
     font-size: 11px;
     font-weight: 600;
 }}
-QHeaderView::section:hover {{ color: {FG_DIM}; background: {BG_HOVER}; }}
-QTableCornerButton::section {{ background: {BG_PANEL}; border: none; }}
+QHeaderView::section:hover {{ color: {FG}; background: rgba(30,37,50,0.86); }}
+QTableCornerButton::section {{ background: rgba(12,16,24,0.86); border: none; }}
 
 /* ============================== 输入 ============================== */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
-    background: {BG_CARD};
+    background: {SURFACE_INPUT};
     border: 1px solid {LINE};
     border-radius: 7px;
     padding: 6px 9px;
@@ -214,10 +260,10 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
     selection-background-color: {ACCENT_DIM};
     selection-color: #ffffff;
 }}
-QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: #2f394c; }}
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: #34405a; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
     border-color: {ACCENT};
-    background: #12161e;
+    background: rgba(18,24,34,0.92);
 }}
 QLineEdit::placeholder {{ color: {FG_MUTE}; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
@@ -229,11 +275,11 @@ QComboBox::down-arrow {{
     margin-right: 8px;
 }}
 QComboBox QAbstractItemView {{
-    background: {BG_CARD};
+    background: {SURFACE_SOLID};
     border: 1px solid {LINE};
     border-radius: 7px;
     padding: 4px;
-    selection-background-color: {BG_ACTIVE};
+    selection-background-color: {SURFACE_ACTIVE};
     outline: none;
 }}
 QSpinBox::up-button, QDoubleSpinBox::up-button,
@@ -256,32 +302,52 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
 }}
 
 QTextBrowser {{
-    background: {BG_CARD};
+    background: rgba(10,14,20,0.85);
     border: 1px solid {LINE_SOFT};
     border-radius: 8px;
     padding: 6px;
     color: {FG_DIM};
 }}
+QTextBrowser#licenseView {{
+    font-family: {MONO_FONT};
+    font-size: 11px;
+}}
 
-/* ============================== 勾选 ============================== */
-QCheckBox {{ spacing: 8px; color: {FG_DIM}; }}
+/* ============================== 勾选 / 单选 ============================== */
+QCheckBox {{ spacing: 8px; color: {FG_DIM}; background: transparent; }}
 QCheckBox:hover {{ color: {FG}; }}
 QCheckBox::indicator {{
     width: 15px;
     height: 15px;
     border: 1px solid #3a4356;
     border-radius: 4px;
-    background: {BG_CARD};
+    background: {SURFACE_INPUT};
 }}
 QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
 QCheckBox::indicator:checked {{
     background: {ACCENT};
     border-color: {ACCENT};
+    image: none;
+}}
+
+QRadioButton {{ spacing: 9px; color: {FG_DIM}; background: transparent; padding: 3px 0; }}
+QRadioButton:hover {{ color: {FG}; }}
+QRadioButton::indicator {{
+    width: 15px;
+    height: 15px;
+    border: 1px solid #3a4356;
+    border-radius: 8px;
+    background: {SURFACE_INPUT};
+}}
+QRadioButton::indicator:hover {{ border-color: {ACCENT}; }}
+QRadioButton::indicator:checked {{
+    border: 1px solid {ACCENT};
+    background: {ACCENT};
 }}
 
 /* ============================== 分组 ============================== */
 QGroupBox {{
-    background: {BG_PANEL};
+    background: {SURFACE_PANEL};
     border: 1px solid {LINE_SOFT};
     border-radius: 10px;
     margin-top: 16px;
@@ -296,12 +362,12 @@ QGroupBox::title {{
     left: 12px;
     padding: 0 6px;
     color: {FG_DIM};
-    background: {BG_BASE};
+    background: transparent;
 }}
 
 /* ============================== 进度 ============================== */
 QProgressBar {{
-    background: {BG_CARD};
+    background: rgba(20,26,36,0.8);
     border: none;
     border-radius: 2px;
     height: 4px;
@@ -316,7 +382,7 @@ QProgressBar::chunk {{
 
 /* ============================== 状态栏 ============================== */
 QStatusBar {{
-    background: transparent;
+    background: rgba(7,10,16,0.72);
     border-top: 1px solid {LINE_SOFT};
     color: {FG_MUTE};
     font-size: 11px;
@@ -335,11 +401,11 @@ QScrollBar:vertical {{
     margin: 2px;
 }}
 QScrollBar::handle:vertical {{
-    background: #2a3242;
+    background: rgba(58,68,87,0.7);
     border-radius: 4px;
     min-height: 28px;
 }}
-QScrollBar::handle:vertical:hover {{ background: #3a4457; }}
+QScrollBar::handle:vertical:hover {{ background: rgba(78,90,114,0.85); }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QScrollBar:horizontal {{
@@ -348,15 +414,15 @@ QScrollBar:horizontal {{
     margin: 2px;
 }}
 QScrollBar::handle:horizontal {{
-    background: #2a3242;
+    background: rgba(58,68,87,0.7);
     border-radius: 4px;
     min-width: 28px;
 }}
-QScrollBar::handle:horizontal:hover {{ background: #3a4457; }}
+QScrollBar::handle:horizontal:hover {{ background: rgba(78,90,114,0.85); }}
 
 /* ============================== 菜单 ============================== */
 QMenu {{
-    background: {BG_CARD};
+    background: {SURFACE_SOLID};
     border: 1px solid {LINE};
     border-radius: 9px;
     padding: 6px;
@@ -366,13 +432,14 @@ QMenu::item {{
     border-radius: 6px;
     color: {FG_DIM};
 }}
-QMenu::item:selected {{ background: {BG_ACTIVE}; color: {FG}; }}
+QMenu::item:selected {{ background: {SURFACE_ACTIVE}; color: {FG}; }}
+QMenu::item:disabled {{ color: #4a5364; }}
 QMenu::separator {{ height: 1px; background: {LINE_SOFT}; margin: 5px 8px; }}
 QMenu::indicator {{ width: 13px; height: 13px; margin-left: 6px; }}
 
 /* ============================== 日志 ============================== */
 QPlainTextEdit#logView {{
-    background: #07090d;
+    background: {SURFACE_LOG};
     border: 1px solid {LINE_SOFT};
     border-radius: 10px;
     padding: 8px 10px;
@@ -385,7 +452,8 @@ QPlainTextEdit#logView {{
 QTabWidget::pane {{
     border: 1px solid {LINE_SOFT};
     border-radius: 10px;
-    background: {BG_PANEL};
+    background: {SURFACE_PANEL};
+    top: -1px;
 }}
 QTabBar::tab {{
     background: transparent;
@@ -394,5 +462,6 @@ QTabBar::tab {{
     border: none;
     border-bottom: 2px solid transparent;
 }}
+QTabBar::tab:hover {{ color: {FG_DIM}; }}
 QTabBar::tab:selected {{ color: {FG}; border-bottom-color: {ACCENT}; }}
 """

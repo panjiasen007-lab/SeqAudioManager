@@ -11,17 +11,17 @@ from ..core.model import Track, TrackStatus
 
 #: (表头, 取值函数, 列宽)
 COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
-    ("状态", lambda t: t.status.value, 78),
-    ("歌名", lambda t: t.working.title or t.original.title, 156),
-    ("歌手", lambda t: t.working.artist or t.original.artist, 92),
-    ("专辑", lambda t: t.working.album or t.original.album, 98),
+    ("状态", lambda t: t.status.value, 96),
+    ("歌名", lambda t: t.working.title or t.original.title, 130),
+    ("歌手", lambda t: t.working.artist or t.original.artist, 84),
+    ("专辑", lambda t: t.working.album or t.original.album, 82),
     ("年份", lambda t: (t.working.date or t.original.date)[:4], 46),
     ("格式", lambda t: t.info.fmt, 50),
-    ("规格", lambda t: t.info.spec_text, 88),
+    ("规格", lambda t: t.info.spec_text, 114),
     ("时长", lambda t: t.info.duration_text, 46),
     ("无损", lambda t: t.info.kind_text, 42),
-    ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 52),
-    ("鉴定", lambda t: (t.authenticity.verdict if t.authenticity else ""), 88),
+    ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 54),
+    ("鉴定", lambda t: (t.authenticity.verdict if t.authenticity else ""), 80),
     ("来源", lambda t: t.source, 80),
     ("文件名", lambda t: t.path.name, 150),
     ("说明", lambda t: " | ".join(t.notes), 180),
@@ -185,6 +185,11 @@ class TrackTableModel(QAbstractTableModel):
             self._row_of = self._build_index()
         return removed
 
+    def remove_tracks(self, tracks: list[Track]) -> int:
+        """按对象删除（清理/隔离后调用）。用 id 索引定位，避免逐行扫描。"""
+        rows = [self._row_of[id(t)] for t in tracks if id(t) in self._row_of]
+        return self.remove_rows(rows)
+
     def clear(self) -> None:
         self.set_tracks([])
 
@@ -197,7 +202,13 @@ class TrackFilterProxy(QSortFilterProxyModel):
         self._text = ""
         self._lossless_only = False
         self._problems_only = False
+        self._verdict_group = "all"
         self.setSortRole(Qt.DisplayRole)
+
+    def set_verdict_group(self, group: str) -> None:
+        """按鉴定结论筛选：all / true / fake / suspect / suspect_any / unknown。"""
+        self._verdict_group = group or "all"
+        self.invalidateFilter()
 
     def set_text(self, text: str) -> None:
         self._text = (text or "").strip().lower()
@@ -220,6 +231,16 @@ class TrackFilterProxy(QSortFilterProxyModel):
             return False
         if self._lossless_only and not track.info.lossless:
             return False
+        if self._verdict_group != "all":
+            from ..core.authenticity import group_of
+
+            verdict = track.authenticity.verdict if track.authenticity else ""
+            group = group_of(verdict)
+            if self._verdict_group == "suspect_any":
+                if group not in ("fake", "suspect"):
+                    return False
+            elif group != self._verdict_group:
+                return False
         if self._problems_only:
             problematic = track.status in (
                 TrackStatus.FAILED,
