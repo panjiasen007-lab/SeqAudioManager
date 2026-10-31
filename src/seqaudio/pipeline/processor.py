@@ -321,6 +321,16 @@ class Processor:
                 f for f in report.changed_fields if f not in track.changed_fields
             )
 
+        # ---- 7c. 清空注释 ----
+        # 注释字段通常是抓轨/下载工具塞进去的广告、推广或个人备注，
+        # 默认整段清空，让标签干净。放在水印清理之后：水印只删命中的片段，
+        # 这里是「无条件整段清空」，两个语义独立、可分别开关。
+        if s.clear_comment and track.working.comment:
+            track.working.comment = ""
+            track.note("已清空注释")
+            if "comment" not in track.changed_fields:
+                track.changed_fields.append("comment")
+
         track.elapsed_ms = int((time.perf_counter() - started) * 1000)
 
     # ------------------------------------------------------------ 单首：落盘

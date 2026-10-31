@@ -61,6 +61,7 @@ class Settings:
     watermark_enabled: bool = True
     clean_title_watermark: bool = True
     clean_albumartist_watermark: bool = True
+    clear_comment: bool = True             # 默认清空注释字段全部内容（抓轨/下载工具塞的垃圾）
     strong_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_STRONG_PATTERNS))
     segment_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_SEGMENT_PATTERNS))
     custom_words: list[str] = field(default_factory=list)

@@ -624,6 +624,50 @@ class TestClean(unittest.TestCase):
         self.assertTrue(clean_mod.strip_track_number("123 早安", allow_three_digit=True)[1])
 
 
+class TestClearComment(unittest.TestCase):
+    """默认清空注释字段：抓轨/下载工具塞的广告与推广整段去掉，可关闭。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_cc_"))
+        self.files = make_samples.build_all(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _prepare(self, comment: str, clear: bool):
+        from seqaudio.core.config import Settings
+        from seqaudio.pipeline.processor import BatchOptions, Processor
+
+        track = probe.probe(self.files["mp3"], with_cue=False)
+        track.original = Tags(title="测试", artist="某人", comment=comment)
+        track.working = track.original.copy()
+        processor = Processor(Settings(offline_mode=True, clear_comment=clear, min_duration_sec=0))
+        processor.prepare_one(
+            track,
+            BatchOptions(match_online=False, clean_watermark=True, write_tags=False, fetch_lyrics=False),
+            None,
+        )
+        return track
+
+    def test_clear_normal_comment(self) -> None:
+        track = self._prepare("这是我的私人备注", clear=True)
+        self.assertEqual(track.working.comment, "")
+        self.assertIn("comment", track.changed_fields)
+
+    def test_clear_watermarked_comment(self) -> None:
+        track = self._prepare("广告 www.xxx.com 加微信13800138000", clear=True)
+        self.assertEqual(track.working.comment, "")
+
+    def test_keep_when_disabled(self) -> None:
+        track = self._prepare("保留的备注", clear=False)
+        self.assertEqual(track.working.comment, "保留的备注")
+
+    def test_empty_comment_untouched(self) -> None:
+        track = self._prepare("", clear=True)
+        self.assertEqual(track.working.comment, "")
+        self.assertNotIn("comment", track.changed_fields)
+
+
 class TestQuarantine(unittest.TestCase):
     """隔离区：移动 / 还原 / 彻底删除。
 

@@ -199,6 +199,14 @@ class SettingsPanel(QWidget):
         self.clean_title_check.toggled.connect(self._notify)
         card.add_widget(self.clean_title_check)
 
+        self.clear_comment_check = QCheckBox("清空注释字段的全部内容")
+        self.clear_comment_check.setToolTip(
+            "注释（comment）通常是抓轨/下载工具塞进去的广告或推广，默认整段清空。\n"
+            "若想保留自己写进注释的信息，取消此项。"
+        )
+        self.clear_comment_check.toggled.connect(self._notify)
+        card.add_widget(self.clear_comment_check)
+
         self.unify_script_check = QCheckBox("同目录艺术家名字统一简体（简繁不混搭）")
         self.unify_script_check.setToolTip(
             "MusicBrainz 返回繁体、iTunes/本地多为简体，混写进标签就成了「一张专辑两种写法」。\n"
@@ -415,6 +423,7 @@ class SettingsPanel(QWidget):
             self.watermark_check.setChecked(settings.watermark_enabled)
             self.strip_number_check.setChecked(settings.strip_track_numbers)
             self.clean_title_check.setChecked(settings.clean_title_watermark)
+            self.clear_comment_check.setChecked(settings.clear_comment)
             self.unify_script_check.setChecked(settings.unify_artist_script)
             self.words_edit.setPlainText("\n".join(settings.custom_words))
 
@@ -457,6 +466,7 @@ class SettingsPanel(QWidget):
         settings.watermark_enabled = self.watermark_check.isChecked()
         settings.strip_track_numbers = self.strip_number_check.isChecked()
         settings.clean_title_watermark = self.clean_title_check.isChecked()
+        settings.clear_comment = self.clear_comment_check.isChecked()
         settings.unify_artist_script = self.unify_script_check.isChecked()
         settings.custom_words = [
             line.strip() for line in self.words_edit.toPlainText().splitlines() if line.strip()
