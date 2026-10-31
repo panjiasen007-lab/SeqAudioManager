@@ -71,6 +71,9 @@ def build_pyinstaller(debug: bool = False, onedir: bool = False, clean: bool = T
         "--specpath", str(work),
         "--paths", str(SRC),
         "--collect-submodules", "seqaudio",
+        # 真假无损鉴定依赖内置 ffmpeg 解码（DSD/APE/WV 都吃），
+        # hook 通常能自动收集，这里显式声明避免版本差异导致漏打
+        "--collect-binaries", "imageio_ffmpeg",
         "--exclude-module", "tkinter",
         "--exclude-module", "unittest",
         "--exclude-module", "pydoc",

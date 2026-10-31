@@ -30,6 +30,7 @@ COL_SPEC = 6
 COL_DURATION = 7
 COL_KIND = 8
 COL_CONFIDENCE = 9
+COL_AUTHENTICITY = 10
 MONO_COLUMNS = {COL_YEAR, COL_FORMAT, COL_SPEC, COL_DURATION, COL_KIND, COL_CONFIDENCE}
 
 
@@ -135,6 +136,10 @@ class TrackDelegate(QStyledItemDelegate):
             color = QColor(theme.OK) if text == "无损" else QColor(theme.FG_MUTE)
         elif column == COL_FORMAT:
             color = QColor(theme.CYAN)
+        elif column == COL_AUTHENTICITY:
+            from ..core.authenticity import VERDICT_COLORS
+
+            color = QColor(VERDICT_COLORS.get(text, theme.FG_MUTE))
         elif selected:
             color = QColor(theme.FG)
         else:

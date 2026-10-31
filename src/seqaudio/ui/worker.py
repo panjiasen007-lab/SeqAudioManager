@@ -128,3 +128,61 @@ class MatchPreviewWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             log.exception("匹配失败")
             self.failedMatch.emit(self.track, str(exc))
+
+
+class AuthenticityWorker(QThread):
+    """批量真假无损鉴定。
+
+    每个文件要跑 4 次 ffmpeg 解码 + FFT，单线程跑一千首太慢。
+    ffmpeg 是子进程，用线程池并发即可（numpy 的 FFT 也会释放 GIL）。
+    """
+
+    trackDone = Signal(object, object)     # (track, AuthenticityResult)
+    progressChanged = Signal(int, int)
+    finishedAll = Signal(int, int, int)    # (真无损, 可疑, 无法判定)
+    failed = Signal(str)
+
+    def __init__(self, tracks: list[Track], workers: int = 4, parent=None):
+        super().__init__(parent)
+        self.tracks = list(tracks)
+        self.workers = max(1, workers)
+
+    def run(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from ..core.authenticity import AuthenticityResult, analyze
+
+        total = len(self.tracks)
+        if total == 0:
+            self.finishedAll.emit(0, 0, 0)
+            return
+
+        true_count = suspect = unknown = 0
+        try:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                futures = {
+                    pool.submit(analyze, t.path, t.info): t for t in self.tracks
+                }
+                for index, future in enumerate(as_completed(futures), start=1):
+                    track = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("鉴定异常：%s", track.path)
+                        result = AuthenticityResult(error=f"分析异常：{exc}")
+                    self.trackDone.emit(track, result)
+                    if result.verdict == "无法判定":
+                        unknown += 1
+                    elif result.is_suspicious:
+                        suspect += 1
+                    else:
+                        true_count += 1
+                    self.progressChanged.emit(index, total)
+                    if self.isInterruptionRequested():
+                        for pending in futures:
+                            pending.cancel()
+                        break
+        except Exception as exc:  # noqa: BLE001
+            log.exception("批量鉴定失败")
+            self.failed.emit(str(exc))
+        self.finishedAll.emit(true_count, suspect, unknown)

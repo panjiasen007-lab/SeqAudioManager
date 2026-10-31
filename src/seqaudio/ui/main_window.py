@@ -47,7 +47,7 @@ from .track_model import (
     TrackTableModel,
 )
 from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
-from .worker import MatchPreviewWorker, ProcessorWorker, ScanWorker
+from .worker import AuthenticityWorker, MatchPreviewWorker, ProcessorWorker, ScanWorker
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self.worker: Optional[ProcessorWorker] = None
         self.scan_worker: Optional[ScanWorker] = None
         self._match_workers: list[MatchPreviewWorker] = []
+        self.auth_worker: Optional[AuthenticityWorker] = None
         self._stat_cards: dict[str, StatCard] = {}
 
         self.model = TrackTableModel()
@@ -174,6 +175,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_stop)
 
         layout.addStretch(1)
+
+        self.btn_auth = self._button("真假鉴定", self.run_authenticity, ghost=True)
+        self.btn_auth.setToolTip("频谱分析判定是否真无损（需解码，速度约 0.3~1 秒/首）")
+        layout.addWidget(self.btn_auth)
 
         self.btn_rename = self._button("重命名预览", self.rename_preview, ghost=True)
         self.btn_report = self._button("导出报表", self.export_report, ghost=True)
@@ -459,6 +464,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(running)
         self.btn_auto.setEnabled(not running)
         self.btn_local.setEnabled(not running)
+        self.btn_auth.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         self.brand_bar.set_status(
             "处理中" if running else "就绪", theme.PURPLE if running else theme.FG_DIM
@@ -650,6 +656,75 @@ class MainWindow(QMainWindow):
         self.worker.phaseChanged.connect(self._on_phase)
         self.worker.finishedRun.connect(self._on_finished)
         self.worker.start()
+
+    # ------------------------------------------------------------ 真假无损鉴定
+
+    def run_authenticity(self) -> None:
+        from ..core.authenticity import ffmpeg_available
+
+        if not ffmpeg_available():
+            QMessageBox.warning(
+                self,
+                "缺少解码组件",
+                "真假无损鉴定需要 ffmpeg 解码音频。\n\n"
+                "本机未找到 ffmpeg，请把 ffmpeg.exe 放到程序目录，"
+                "或安装 imageio-ffmpeg 后重试。",
+            )
+            return
+        if self.auth_worker is not None and self.auth_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "正在鉴定中，请等待完成。")
+            return
+
+        selected = self._selected_tracks()
+        targets = selected or [
+            t for t in self.model.tracks()
+            if t.status is not TrackStatus.UNSUPPORTED and t.info.lossless
+        ]
+        if not targets:
+            QMessageBox.information(
+                self, "没有可鉴定的曲目",
+                "无损鉴定只对有损/无损判断意义，请先添加 FLAC / APE / WAV / DSD 等文件。",
+            )
+            return
+
+        self._set_running(True)
+        self.progress.setMaximum(len(targets))
+        self.progress.setValue(0)
+        self.brand_bar.set_status("鉴定中", theme.CYAN)
+        self._append_log(
+            "INFO", f"开始无损鉴定 {len(targets)} 首（{'选中项' if selected else '全部无损文件'}）"
+        )
+
+        self.auth_worker = AuthenticityWorker(targets, workers=max(2, self.settings.concurrency))
+        self.auth_worker.trackDone.connect(self._on_auth_track)
+        self.auth_worker.progressChanged.connect(self._on_auth_progress)
+        self.auth_worker.finishedAll.connect(self._on_auth_finished)
+        self.auth_worker.failed.connect(lambda m: self._append_log("ERROR", f"鉴定失败：{m}"))
+        self.auth_worker.start()
+
+    def _on_auth_track(self, track: Track, result) -> None:
+        track.authenticity = result
+        self.model.refresh_row(track)
+        if result.reasons:
+            self._append_log(
+                "WARNING" if result.is_suspicious else "INFO",
+                f"{track.path.name} → {result.verdict}（{result.detail_text}）",
+            )
+
+    def _on_auth_progress(self, index: int, total: int) -> None:
+        self.progress.setMaximum(max(1, total))
+        self.progress.setValue(index)
+        self.status_hint.setText(f"鉴定中 {index} / {total}")
+
+    def _on_auth_finished(self, true_count: int, suspect: int, unknown: int) -> None:
+        self._set_running(False)
+        self.brand_bar.set_status("就绪", theme.FG_DIM)
+        self.model.refresh_all()
+        msg = f"鉴定完成：真无损 {true_count}，可疑 {suspect}，无法判定 {unknown}"
+        self._append_log("WARNING" if suspect else "INFO", msg)
+        self.status_hint.setText(msg)
+        if suspect:
+            self._append_log("INFO", "已自动勾选「只看问题」，可从表格筛出可疑项")
 
     # ------------------------------------------------------------ 重命名 / 报表
 

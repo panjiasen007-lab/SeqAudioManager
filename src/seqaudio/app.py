@@ -75,7 +75,92 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     return app
 
 
+def _selftest() -> int:
+    """`--selftest`：无人值守自检，把结果写到临时文件。
+
+    打包成 --windowed 后没有控制台，只能靠文件回读来确认
+    「内置 ffmpeg 是否被正确打进 EXE、鉴定链路是否可用」。
+    """
+    import json
+    import tempfile
+
+    report: dict = {"version": __version__}
+    try:
+        from .core.authenticity import ffmpeg_available, find_ffmpeg
+
+        report["ffmpeg_available"] = ffmpeg_available()
+        report["ffmpeg_path"] = find_ffmpeg() or ""
+        if report["ffmpeg_path"]:
+            report["ffmpeg_exists"] = Path(report["ffmpeg_path"]).exists()
+            report["ffmpeg_size_mb"] = round(
+                Path(report["ffmpeg_path"]).stat().st_size / 1024 / 1024, 1
+            )
+    except Exception as exc:  # noqa: BLE001
+        report["ffmpeg_error"] = str(exc)
+    try:
+        import mutagen
+
+        report["mutagen"] = mutagen.version_string
+    except Exception as exc:  # noqa: BLE001
+        report["mutagen_error"] = str(exc)
+    try:
+        from .core.probe import SUPPORTED_EXTS
+
+        report["formats"] = len(SUPPORTED_EXTS)
+    except Exception as exc:  # noqa: BLE001
+        report["formats_error"] = str(exc)
+
+    target = Path(tempfile.gettempdir()) / "seqaudio_selftest.json"
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0
+
+
+def _selftest_file(target: str) -> int:
+    """`--selftest-file <路径>`：对指定文件跑一遍完整鉴定链路并落盘结果。
+
+    用于验证「打包后的 EXE 真的能解码并分析」，而不只是「ffmpeg 文件存在」。
+    """
+    import json
+    import tempfile
+
+    report: dict = {"input": target}
+    try:
+        from .core.authenticity import analyze
+        from .core.probe import probe
+
+        path = Path(target)
+        info = probe(path, with_cue=False).info
+        report["probe"] = {
+            "fmt": info.fmt,
+            "spec": info.spec_text,
+            "lossless": info.lossless,
+            "duration": info.duration,
+        }
+        result = analyze(path, info)
+        report["verdict"] = result.verdict
+        report["score"] = result.score
+        report["cutoff_hz"] = result.cutoff_hz
+        report["nyquist_hz"] = result.nyquist_hz
+        report["effective_bit_depth"] = result.bit_depth_effective
+        report["reasons"] = result.reasons
+        report["error"] = result.error
+    except Exception as exc:  # noqa: BLE001
+        report["exception"] = f"{type(exc).__name__}: {exc}"
+
+    out = Path(tempfile.gettempdir()) / "seqaudio_selftest_file.json"
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    args = argv if argv is not None else sys.argv
+    if "--selftest" in args:
+        return _selftest()
+    if "--selftest-file" in args:
+        index = args.index("--selftest-file")
+        target = args[index + 1] if index + 1 < len(args) else ""
+        return _selftest_file(target)
+
     setup_logging()
     log.info("启动 %s v%s", APP_NAME, __version__)
 

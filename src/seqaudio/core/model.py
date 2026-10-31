@@ -315,6 +315,7 @@ class Track:
     cue: Optional[CueSheet] = None
     lyrics_src: str = ""                           # 歌词来源（本地/网络）
     lyrics_sidecar: str = ""                       # 待写入 .lrc 的歌词正文
+    authenticity: Optional[Any] = None              # 真假无损鉴定结果（AuthenticityResult）
     changed_fields: list[str] = field(default_factory=list)
     backup_path: Optional[Path] = None
     elapsed_ms: int = 0

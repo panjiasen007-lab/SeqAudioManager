@@ -1,6 +1,8 @@
 # 运行期依赖（刻意保持精简：只留标签库与 GUI 框架）
 mutagen>=1.47.0        # 音频标签读写（FLAC/APE/WV/TTA/DSF/MP3/MP4/OGG）
 PySide6>=6.7.0         # Qt6 界面（LGPL，商业友好，Win10/11 稳定）
+numpy>=1.26            # 频谱分析（真假无损鉴定）
+imageio-ffmpeg>=0.5    # 内置 ffmpeg 二进制：解码 DSD/APE/WV/FLAC 做频谱分析
 
 # 网络层使用标准库 urllib 实现，零额外依赖：
 #   - 这几个公开 API 均不支持/不需要 HTTP/2

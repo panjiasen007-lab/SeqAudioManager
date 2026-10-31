@@ -21,18 +21,19 @@ COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
     ("时长", lambda t: t.info.duration_text, 46),
     ("无损", lambda t: t.info.kind_text, 42),
     ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 52),
+    ("鉴定", lambda t: (t.authenticity.verdict if t.authenticity else ""), 88),
     ("来源", lambda t: t.source, 80),
     ("文件名", lambda t: t.path.name, 150),
     ("说明", lambda t: " | ".join(t.notes), 180),
 ]
 
-#: 默认折叠的次要列：年份 / 时长 / 无损 / 来源 / 文件名。
-#: 1080px 窗口下 13 列全部铺开会触发横向滚动，而这几列的信息在 tooltip
-#: 与「说明」里都能拿到；用户可在表头右键随时展开。
-HIDDEN_BY_DEFAULT = {4, 7, 8, 10, 11}
+#: 默认折叠的次要列：年份 / 时长 / 无损 / 来源 / 文件名 / 说明。
+#: 1080px 窗口（1366 笔记本）下铺满 14 列必然横向滚动；这几列的信息
+#: 在 tooltip 里都有，需要时可从表头右键随时展开。
+HIDDEN_BY_DEFAULT = {4, 7, 8, 11, 12, 13}
 
-#: 说明列随窗口伸缩，其余固定
-STRETCH_COLUMN = 12
+#: 歌名随窗口伸缩，其余列固定宽度
+STRETCH_COLUMN = 1
 
 STATUS_COLORS = {
     TrackStatus.DONE: QColor("#3fb950"),
@@ -127,6 +128,10 @@ class TrackTableModel(QAbstractTableModel):
             lines.append(f"歌词来源：{track.lyrics_src}")
         if track.changed_fields:
             lines.append(f"变更字段：{', '.join(track.changed_fields)}")
+        if track.authenticity is not None:
+            auth = track.authenticity
+            lines.append(f"无损鉴定：{auth.verdict}（{auth.detail_text}）")
+            lines.extend(f"  · {r}" for r in auth.reasons)
         if track.notes:
             lines.append("说明：")
             lines.extend(f"  · {n}" for n in track.notes)
@@ -215,12 +220,14 @@ class TrackFilterProxy(QSortFilterProxyModel):
             return False
         if self._lossless_only and not track.info.lossless:
             return False
-        if self._problems_only and track.status not in (
-            TrackStatus.FAILED,
-            TrackStatus.NEEDS_REVIEW,
-            TrackStatus.UNSUPPORTED,
-        ):
-            return False
+        if self._problems_only:
+            problematic = track.status in (
+                TrackStatus.FAILED,
+                TrackStatus.NEEDS_REVIEW,
+                TrackStatus.UNSUPPORTED,
+            ) or (track.authenticity is not None and track.authenticity.is_suspicious)
+            if not problematic:
+                return False
         if self._text:
             haystack = " ".join(
                 [

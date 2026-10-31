@@ -367,6 +367,92 @@ class TestDffWrite(unittest.TestCase):
         self.assertEqual(outcome.backup_path.stat().st_size, self.original_size)
 
 
+def _ffmpeg() -> str | None:
+    try:
+        from seqaudio.core.authenticity import find_ffmpeg
+
+        return find_ffmpeg()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@unittest.skipUnless(_ffmpeg(), "需要 ffmpeg 才能解码做频谱分析")
+class TestAuthenticity(unittest.TestCase):
+    """真假无损鉴定。
+
+    基准信号用 ffmpeg 合成白噪声：白噪声的频谱天然平坦延伸到 Nyquist，
+    所以「真无损」的截止频率应当接近 22.05kHz；一旦过一遍 128kbps 编码，
+    高频会被砍掉，截止掉到 16kHz 附近。这样测试不依赖任何外部素材。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import subprocess
+
+        cls.tmp = Path(tempfile.mkdtemp(prefix="seq_auth_"))
+        ff = _ffmpeg()
+
+        def run(*args) -> None:
+            subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", *args],
+                check=True,
+                timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+
+        cls.true_wav = cls.tmp / "true.wav"
+        run("-f", "lavfi", "-i", "anoisesrc=d=12:c=white:a=0.5",
+            "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", "-y", str(cls.true_wav))
+
+        cls.fake_mp3 = cls.tmp / "fake.mp3"
+        run("-i", str(cls.true_wav), "-b:a", "128k", "-y", str(cls.fake_mp3))
+        cls.fake_wav = cls.tmp / "fake.wav"
+        run("-i", str(cls.fake_mp3), "-ar", "44100", "-c:a", "pcm_s16le",
+            "-y", str(cls.fake_wav))
+
+        cls.upsampled = cls.tmp / "up.wav"
+        run("-i", str(cls.true_wav), "-ar", "96000", "-c:a", "pcm_s24le",
+            "-y", str(cls.upsampled))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _verdict(self, path: Path):
+        from seqaudio.core.authenticity import analyze
+
+        info = probe.probe(path, with_cue=False).info
+        return analyze(path, info)
+
+    def test_true_lossless(self) -> None:
+        result = self._verdict(self.true_wav)
+        self.assertEqual(result.verdict, "真无损", result.reasons)
+        self.assertGreater(result.cutoff_hz, 20500)
+
+    def test_mp3_transcode_detected(self) -> None:
+        result = self._verdict(self.fake_wav)
+        self.assertEqual(result.verdict, "假无损", result.reasons)
+        self.assertLess(result.cutoff_hz, 18000)
+
+    def test_upsampled_detected(self) -> None:
+        result = self._verdict(self.upsampled)
+        self.assertEqual(result.verdict, "疑似升频", result.reasons)
+        self.assertLess(result.cutoff_hz, result.nyquist_hz * 0.7)
+
+    def test_effective_bit_depth(self) -> None:
+        """16bit 内容存进 24bit 容器时，有效位深应仍识别为 16。"""
+        from seqaudio.core.authenticity import _decode_segment, _effective_bit_depth
+
+        samples, _ = _decode_segment(_ffmpeg(), self.true_wav, 3.0, 2.0)
+        self.assertEqual(_effective_bit_depth(samples), 16)
+
+    def test_mp3_file_can_be_decoded(self) -> None:
+        """MP3 本身也应能解码分析（虽然它不需要"真假无损"结论）。"""
+        result = self._verdict(self.fake_mp3)
+        self.assertNotEqual(result.verdict, "无法判定", result.error)
+        self.assertLess(result.cutoff_hz, 18000)
+
+
 class TestMerge(unittest.TestCase):
     def test_fill_empty_only(self) -> None:
         current = Tags(title="已有标题", artist="")

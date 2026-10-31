@@ -28,6 +28,7 @@ COLUMNS = [
     ("位深", "bit_depth"),
     ("码率", "bitrate"),
     ("时长", "duration"),
+    ("无损鉴定", "authenticity"),
     ("匹配置信度", "confidence"),
     ("匹配来源", "source"),
     ("变更字段", "changed"),
@@ -55,6 +56,10 @@ def _row(track: Track) -> dict[str, str]:
         "bit_depth": str(info.bit_depth or ""),
         "bitrate": str(info.bitrate or ""),
         "duration": info.duration_text,
+        "authenticity": (
+            f"{track.authenticity.verdict}（{track.authenticity.detail_text}）"
+            if track.authenticity is not None else ""
+        ),
         "confidence": f"{track.confidence:.0%}" if track.confidence else "",
         "source": track.source,
         "changed": ",".join(track.changed_fields),
