@@ -23,7 +23,7 @@ from typing import Optional
 
 from . import paths
 from .model import Tags, Track
-from .tags import open_audio, write_tags
+from .tags import is_writable, open_audio, write_tags
 
 log = logging.getLogger(__name__)
 
@@ -158,6 +158,20 @@ def safe_write(
         return WriteOutcome(False, "文件不存在")
     if not os.access(path, os.W_OK):
         return WriteOutcome(False, "文件为只读，无法写入")
+
+    # 预检：标签体系不支持写回时立刻返回。
+    # 这一步必须在备份之前 —— 否则为了一个注定失败的写入，
+    # 白白复制几百 MB 的母带文件到备份盘。
+    try:
+        probe_obj = open_audio(path)
+        if probe_obj is None:
+            return WriteOutcome(False, "无法解析该文件（格式不支持或文件损坏）")
+        if not is_writable(probe_obj):
+            return WriteOutcome(
+                False, f"{type(probe_obj).__name__} 标签为只读格式，已跳过写入"
+            )
+    except Exception as exc:  # noqa: BLE001 - 预检失败不阻断，交给后续流程判断
+        log.debug("写前预检异常 %s：%s", path, exc)
 
     size = path.stat().st_size
     result = WriteOutcome()

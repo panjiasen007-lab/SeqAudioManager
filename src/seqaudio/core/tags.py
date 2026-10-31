@@ -66,8 +66,13 @@ _MP4_KEYS = {
     "comment": "\xa9cmt",
 }
 
-# DFF 只读：mutagen 能解析但 save() 未实现
-_READ_ONLY_MODULES = {"dsdiff"}
+# DFF (DSDIFF)：DSDIFF 类自身没有 save()，但它的 tags 对象是 IffID3，
+# tags.save() 能插入/替换 ID3 chunk 并同步 FRM8 大小 —— 实测只追加 1KB 左右，
+# 音频数据一个字节都不动。因此 DFF 是可写的，走单独的保存路径。
+_SAVE_VIA_TAGS = {"dsdiff"}
+
+# 确实无法写回的格式（留空表示当前全部支持；保留开关便于以后发现新只读格式时收口）
+_READ_ONLY_MODULES: set[str] = set()
 
 
 def _module_name(obj: Any) -> str:
@@ -78,13 +83,30 @@ def is_writable(obj: Any) -> bool:
     """判断该文件是否支持安全写回。"""
     if obj is None:
         return False
-    if _module_name(obj) in _READ_ONLY_MODULES:
+    module = _module_name(obj)
+    if module in _READ_ONLY_MODULES:
         return False
+    if module in _SAVE_VIA_TAGS:
+        # tags 为 None 时可以 add_tags() 后写，所以只要模块支持即可
+        return True
     # 部分格式暴露 save() 但实际抛 NotImplementedError
     try:
         return callable(getattr(obj, "save", None))
     except Exception:
         return False
+
+
+def commit_tags(obj: Any, path: Path | str) -> None:
+    """把内存中的标签落盘（不触碰音频流）。"""
+    module = _module_name(obj)
+    if module in _SAVE_VIA_TAGS:
+        if obj.tags is None:
+            obj.add_tags()
+        # add_tags() 新建的对象没有 filename，save() 需要它来定位文件
+        obj.tags.filename = str(path)
+        obj.tags.save()
+        return
+    obj.save()
 
 
 def open_audio(path: Path | str) -> Optional[Any]:
@@ -126,10 +148,22 @@ def read_tags(path: Path | str, audio: Any = None) -> Tags:
         tags.lyrics = _first(raw.get("LYRICS") or raw.get("UNSYNCEDLYRICS") or raw.get("LYRIC"))
         tags.cover, tags.cover_mime = _read_vorbis_cover(obj, raw)
     elif family == "id3":
+        # 注意：ID3 多值帧（COMM/USLT/APIC）的实际键带描述与语言后缀，
+        # 例如 COMM 存成 "COMM::XXX"，用 raw.get("COMM") 会取不到 ——
+        # 必须统一走 getall() 才能拿到帧实例
         for field, key in _ID3_KEYS.items():
-            frame = raw.get(key)
-            if frame is not None:
-                setattr(tags, field, _first(getattr(frame, "text", None)))
+            try:
+                frames = raw.getall(key)
+            except Exception:
+                frames = []
+            if not frames:
+                continue
+            frame = frames[0]
+            if field == "comment":
+                text = getattr(frame, "text", None)
+                tags.comment = str(text[0]).strip() if text else ""
+                continue
+            setattr(tags, field, _first(getattr(frame, "text", None)))
         tags.lyrics = _read_id3_lyrics(raw)
         tags.cover, tags.cover_mime = _read_id3_cover(raw)
     elif family == "ape":
@@ -329,7 +363,7 @@ def write_tags(
         else:
             return TagWriteResult(False, "未知标签体系，已跳过写入")
 
-        obj.save()
+        commit_tags(obj, path)
         return TagWriteResult(True, "标签写入成功", written)
     except Exception as exc:  # noqa: BLE001 - 需要把底层异常原样上报到日志
         return TagWriteResult(False, f"写入失败：{exc}", written)

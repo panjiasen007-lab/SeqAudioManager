@@ -24,6 +24,7 @@ from ..core import rename as rename_mod
 from ..core import watermark, writer
 from ..core.config import Settings
 from ..core.model import ConflictMode, LyricsMode, Track, TrackStatus
+from ..core.probe import guess_album_from_folder, guess_from_filename
 from ..core.report import RunSummary
 from ..net.http import DiskCache, HttpClient
 from .matcher import Matcher, MatchResult
@@ -122,27 +123,48 @@ class Processor:
 
         matcher = self.matcher() if opts.match_online else None
 
+        # ---- 阶段一：匹配与整理（只改内存，不落盘）----
+        # 必须先全部匹配完再写：同一张专辑的曲目要能互相"投票"统一专辑名与年份，
+        # 否则 MusicBrainz 会把它们匹配到演唱会版、精选集、重发版等不同发行版，
+        # 一批文件写出十种专辑名。
         for index, track in enumerate(tracks, start=1):
             if self.cancel_event.is_set():
-                track.note("用户取消")
-                if track.status not in (TrackStatus.DONE, TrackStatus.FAILED):
-                    track.status = TrackStatus.SKIPPED
-                self.emit("track", track)
+                self._mark_cancelled(track)
                 continue
-
             self.stats.index = index
             try:
-                self.process_one(track, opts, matcher)
+                self.prepare_one(track, opts, matcher)
             except Exception as exc:  # noqa: BLE001
                 log.exception("处理失败：%s", track.path)
                 track.status = TrackStatus.FAILED
                 track.note(f"未预期的错误：{exc}")
-
             self.emit("track", track)
             self.emit("progress", (index, len(tracks)))
-            time.sleep(0)  # 让出 GIL，保证 UI 线程有机会刷新
+            time.sleep(0)
 
-        # 批量重命名（统一执行，避免单曲改名后影响后续写入）
+        # ---- 阶段二：专辑一致性收敛 ----
+        if not self.cancel_event.is_set():
+            self._unify_album_fields(tracks)
+
+        # ---- 阶段三：落盘 ----
+        if opts.write_tags and not self.cancel_event.is_set():
+            self.emit("phase", "写入标签")
+            writable = [t for t in tracks if t.status not in
+                        (TrackStatus.UNSUPPORTED, TrackStatus.SKIPPED, TrackStatus.FAILED)]
+            for index, track in enumerate(writable, start=1):
+                if self.cancel_event.is_set():
+                    break
+                try:
+                    self.finalize_one(track, opts)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("写入失败：%s", track.path)
+                    track.status = TrackStatus.FAILED
+                    track.note(f"写入阶段异常：{exc}")
+                self.emit("track", track)
+                self.emit("write_progress", (index, len(writable)))
+                time.sleep(0)
+
+        # ---- 阶段四：批量重命名 ----
         if opts.do_rename and not self.cancel_event.is_set():
             self._batch_rename(tracks)
 
@@ -151,14 +173,21 @@ class Processor:
         log.info("批处理结束：%s", summary.text())
         return summary
 
-    # ------------------------------------------------------------ 单首
+    def _mark_cancelled(self, track: Track) -> None:
+        track.note("用户取消")
+        if track.status not in (TrackStatus.DONE, TrackStatus.FAILED):
+            track.status = TrackStatus.SKIPPED
+        self.emit("track", track)
 
-    def process_one(
+    # ------------------------------------------------------------ 单首：准备
+
+    def prepare_one(
         self,
         track: Track,
         opts: BatchOptions,
         matcher: Optional[Matcher] = None,
     ) -> None:
+        """匹配 + 清洗 + 歌词决策，全部只改内存。"""
         started = time.perf_counter()
         s = self.settings
 
@@ -181,14 +210,23 @@ class Processor:
         track.changed_fields.clear()
         track.notes.clear()
 
-        # ---- 2. CUE 整轨信息补充 ----
+        # ---- 2. 文件名兜底 ----
+        # 必须在联网检索之前：DSD/整轨资源常常一个标签都没有，
+        # 若不先把「周杰伦 - 02.七里香」拆成歌手+歌名，检索词就变成整个文件名，
+        # 相似度会被无谓拉低，甚至什么都搜不到。
+        guessed = guess_from_filename(track.path)
+        guessed_changed = track.working.merge(guessed, ConflictMode.FILL_EMPTY_ONLY)
+        if guessed_changed:
+            track.note(f"文件名补全：{', '.join(guessed_changed)}")
+
+        # ---- 3. CUE 整轨信息补充 ----
         if track.cue and s.fill_album_from_cue:
             cue_tags = cue_mod.to_tags_for_album(track.cue)
             changed = track.working.merge(cue_tags, ConflictMode.FILL_EMPTY_ONLY)
             if changed:
                 track.note(f"CUE 补充字段：{', '.join(changed)}")
 
-        # ---- 3. 本地歌词优先 ----
+        # ---- 4. 本地歌词优先 ----
         local_lyrics = ""
         if s.use_local_lyrics:
             local_lyrics = (
@@ -198,12 +236,13 @@ class Processor:
             if local_lyrics:
                 track.lyrics_src = "本地"
 
-        # ---- 4. 联网匹配 ----
+        # ---- 5. 联网匹配 ----
         accepted = False
         result: Optional[MatchResult] = None
+        album_hint = self._album_hint(track)
         if matcher is not None:
             track.status = TrackStatus.READING
-            result = matcher.match(track, need_lyrics=opts.fetch_lyrics)
+            result = matcher.match(track, need_lyrics=opts.fetch_lyrics, album_hint=album_hint)
             track.confidence = result.confidence
             if result.accepted and result.candidate:
                 cand = result.candidate
@@ -224,20 +263,24 @@ class Processor:
                     )
                 elif result.reason:
                     track.note(result.reason)
-                # 待确认时仍用文件名兜底补全空字段
+                # 待确认时仍用文件名 + 目录名兜底补全空字段
                 fallback = self._fallback_tags(track)
+                if album_hint and not fallback.album:
+                    fallback.album = album_hint
                 changed = track.working.merge(fallback, ConflictMode.FILL_EMPTY_ONLY)
                 track.changed_fields.extend(c for c in changed if c not in track.changed_fields)
         else:
             fallback = self._fallback_tags(track)
+            if album_hint and not fallback.album:
+                fallback.album = album_hint
             changed = track.working.merge(fallback, ConflictMode.FILL_EMPTY_ONLY)
             track.changed_fields.extend(c for c in changed if c not in track.changed_fields)
 
-        # ---- 5. 歌词决策 ----
+        # ---- 6. 歌词决策 ----
         if opts.fetch_lyrics:
             self._decide_lyrics(track, result, local_lyrics)
 
-        # ---- 6. 标签水印清理 ----
+        # ---- 7. 标签水印清理 ----
         if opts.clean_watermark:
             report = watermark.clean_tags(
                 track.working,
@@ -253,17 +296,77 @@ class Processor:
                 f for f in report.changed_fields if f not in track.changed_fields
             )
 
-        # ---- 7. 写标签 ----
+        track.elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    # ------------------------------------------------------------ 单首：落盘
+
+    def finalize_one(self, track: Track, opts: BatchOptions) -> None:
+        """写标签 + 歌词 sidecar（在专辑一致性收敛之后执行）。"""
+        if not track.exists or track.status is TrackStatus.UNSUPPORTED:
+            return
+        self._write_lyrics_sidecar(track)
         if opts.write_tags:
             self._write(track, opts)
 
-        track.elapsed_ms = int((time.perf_counter() - started) * 1000)
+    @staticmethod
+    def _album_hint(track: Track) -> str:
+        try:
+            return guess_album_from_folder(track.path.parent)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _unify_album_fields(self, tracks: list[Track]) -> None:
+        """同一目录下的曲目统一专辑名与年份。
+
+        MusicBrainz 对同一张专辑的不同曲目，可能分别匹配到录音室原版、
+        演唱会版、精选集、后续重发版。逐首写入的结果就是「一张专辑十个年份」。
+        这里按目录分组做多数投票，把整批收敛到票数最高的组合。
+        """
+        from collections import Counter, defaultdict
+
+        groups: dict[str, list[Track]] = defaultdict(list)
+        for track in tracks:
+            if track.status in (TrackStatus.UNSUPPORTED, TrackStatus.SKIPPED, TrackStatus.FAILED):
+                continue
+            groups[str(track.path.parent).lower()].append(track)
+
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            votes: Counter = Counter()
+            for track in group:
+                album = (track.working.album or "").strip()
+                if album:
+                    votes[(album, (track.working.date or "").strip()[:4])] += 1
+            if not votes:
+                continue
+            (best_album, best_year), hits = votes.most_common(1)[0]
+            # 只有形成多数共识才收敛，避免把双 EP 合集硬拧成一个名字
+            if hits * 2 < len(group):
+                continue
+
+            touched = 0
+            for track in group:
+                changed = False
+                if (track.working.album or "").strip() != best_album:
+                    track.working.album = best_album
+                    changed = True
+                current_year = (track.working.date or "").strip()[:4]
+                if best_year and current_year != best_year:
+                    track.working.date = best_year
+                    changed = True
+                if changed:
+                    touched += 1
+                    if "album" not in track.changed_fields:
+                        track.changed_fields.append("album")
+                    track.note(f"专辑一致性：统一为《{best_album}》{best_year}")
+            if touched:
+                log.info("专辑收敛 %s：%d 首统一为《%s》%s", group[0].path.parent.name,
+                         touched, best_album, best_year)
 
     # ------------------------------------------------------------ 子步骤
 
     def _fallback_tags(self, track: Track):
-        from ..core.probe import guess_from_filename
-
         guessed = guess_from_filename(track.path)
         if track.cue and len(track.cue.tracks) == 1:
             only = track.cue.tracks[0]
@@ -307,11 +410,20 @@ class Processor:
             if "lyrics" not in track.changed_fields:
                 track.changed_fields.append("lyrics")
         if mode in (LyricsMode.SIDECAR, LyricsMode.BOTH):
-            try:
-                lyrics_mod.write_sidecar(track.path, text)
-                track.note(f"歌词已生成：{lyrics_mod.sidecar_path(track.path).name}（{source}）")
-            except OSError as exc:
-                track.note(f"歌词文件写入失败：{exc}")
+            # 只记录待写内容，真正落盘放到 finalize —— 重命名之后路径才算最终确定
+            track.lyrics_sidecar = text
+
+    def _write_lyrics_sidecar(self, track: Track) -> None:
+        if not track.lyrics_sidecar:
+            return
+        mode = self.settings.lyrics_mode_enum()
+        if mode not in (LyricsMode.SIDECAR, LyricsMode.BOTH):
+            return
+        try:
+            path = lyrics_mod.write_sidecar(track.path, track.lyrics_sidecar)
+            track.note(f"歌词已生成：{path.name}（{track.lyrics_src or '网络'}）")
+        except OSError as exc:
+            track.note(f"歌词文件写入失败：{exc}")
 
     def _write(self, track: Track, opts: BatchOptions) -> None:
         s = self.settings

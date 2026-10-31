@@ -239,6 +239,134 @@ class TestWriteRoundtrip(unittest.TestCase):
         self.assertIn("加密", " ".join(track.notes))
 
 
+class TestFilenameGuess(unittest.TestCase):
+    """文件名解析：DSD/整轨资源里「歌手 - 02.歌名」是最常见的坑。"""
+
+    CASES = [
+        ("周杰伦 - 02.七里香.dff", "周杰伦", "2", "七里香"),
+        ("周杰伦 - 01.我的地盘.dff", "周杰伦", "1", "我的地盘"),
+        ("01 - 周杰伦 - 七里香.mp3", "周杰伦", "1", "七里香"),
+        ("07. 青花瓷.flac", "", "7", "青花瓷"),
+        ("05、将军.ape", "", "5", "将军"),
+        ("陈奕迅 - 富士山下.flac", "陈奕迅", "", "富士山下"),
+        ("Adele - Hello.mp3", "Adele", "", "Hello"),
+        ("Taylor Swift - 03.Lover.flac", "Taylor Swift", "3", "Lover"),
+        ("李宗盛-山丘.mp3", "李宗盛", "", "山丘"),
+        ("Beyond - 海阔天空.wav", "Beyond", "", "海阔天空"),
+    ]
+
+    def test_filename_patterns(self) -> None:
+        for name, artist, track, title in self.CASES:
+            with self.subTest(name=name):
+                tags = probe.guess_from_filename(Path(name))
+                self.assertEqual(tags.artist, artist, f"{name} 歌手解析错误")
+                self.assertEqual(tags.track, track, f"{name} 轨道号解析错误")
+                self.assertEqual(tags.title, title, f"{name} 歌名解析错误")
+
+    def test_english_hyphen_not_split(self) -> None:
+        tags = probe.guess_from_filename(Path("Jay-Z - 99 Problems.mp3"))
+        self.assertEqual(tags.artist, "Jay-Z")
+        self.assertEqual(tags.title, "99 Problems")
+
+    def test_album_from_folder(self) -> None:
+        cases = [
+            ("周杰伦 -七里香 DSD DFF", "七里香"),
+            ("Beyond - 樂與怒 SACD [DSD64] - 2015 DSF", "樂與怒"),
+            ("Taylor Swift - Lover DSD128", "Lover"),
+            ("周杰伦-七里香", "七里香"),
+            ("Adele - 25 DSD64", "25"),
+        ]
+        for folder, expected in cases:
+            with self.subTest(folder=folder):
+                self.assertEqual(probe.guess_album_from_folder(Path(folder)), expected)
+
+    def test_catalog_id_not_album(self) -> None:
+        # 右侧是资源编号时应整串保留，而不是把编号当专辑名
+        got = probe.guess_album_from_folder(Path("Nagra 70th Anniversary Collection - 2XHDFT1223"))
+        self.assertEqual(got, "Nagra 70th Anniversary Collection")
+
+
+#: 真实 DSD 母带样本（若本机没有则跳过，绝不在测试里改动它）
+REAL_DFF = Path("D:/02.音乐/周杰伦 -七里香 DSD DFF/周杰伦 - 05.将军.dff")
+
+
+@unittest.skipUnless(REAL_DFF.exists(), "需要本机真实 DFF 样本")
+class TestDffWrite(unittest.TestCase):
+    """DFF (DSDIFF) 标签写入。
+
+    mutagen 的 DSDIFF 类没有 save()，但 tags.save() 能追加 ID3 chunk ——
+    这条路径必须验证：DSD 母带一旦写坏，损失无法挽回。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_dff_"))
+        self.path = self.tmp / "将军.dff"
+        shutil.copy2(REAL_DFF, self.path)
+        self.original_size = self.path.stat().st_size
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_read_metadata(self) -> None:
+        track = probe.probe(self.path, with_cue=False)
+        self.assertEqual(track.info.fmt, "DFF")
+        self.assertTrue(track.info.lossless)
+        self.assertEqual(track.info.dsd_rate, "DSD64")
+        self.assertEqual(track.info.sample_rate, 2_822_400)
+        self.assertEqual(track.info.bit_depth, 1)
+        self.assertAlmostEqual(track.info.duration or 0, 202.2, delta=1.0)
+
+    def test_write_and_readback(self) -> None:
+        track = probe.probe(self.path, with_cue=False)
+        tags = Tags(
+            title="将军", artist="周杰伦", album="七里香", albumartist="周杰伦",
+            date="2004", genre="流行", track="5", comment="测试备注",
+            lyrics="[00:01.00]测试歌词",
+        )
+        outcome = writer.safe_write(track, tags=tags, backup=False)
+        self.assertTrue(outcome.ok, outcome.message)
+
+        back = tags_mod.read_tags(self.path)
+        self.assertEqual(back.title, "将军")
+        self.assertEqual(back.artist, "周杰伦")
+        self.assertEqual(back.album, "七里香")
+        self.assertEqual(back.track, "5")
+        self.assertEqual(back.comment, "测试备注")
+        self.assertIn("测试歌词", back.lyrics)
+
+        # 音频流未动：只应增加一个 ID3 块
+        grew = self.path.stat().st_size - self.original_size
+        self.assertGreater(grew, 0)
+        self.assertLess(grew, 64 * 1024, "标签体积异常，可能重写了音频")
+
+        after = probe.probe(self.path, with_cue=False)
+        self.assertAlmostEqual(after.info.duration or 0, 202.2, delta=0.1)
+        self.assertEqual(after.info.sample_rate, 2_822_400)
+
+    def test_container_structure_intact(self) -> None:
+        """FRM8 声明长度必须等于实际文件大小，否则播放器会截断。"""
+        track = probe.probe(self.path, with_cue=False)
+        writer.safe_write(track, tags=Tags(title="x", artist="y"), backup=False)
+
+        from seqaudio.core.integrity import check_structure
+
+        result = check_structure(self.path)
+        self.assertTrue(result.ok, result.text)
+        self.assertIn("ID3", result.text)
+
+    def test_backup_matches_original(self) -> None:
+        backup_root = self.tmp / "bak"
+        track = probe.probe(self.path, with_cue=False)
+        outcome = writer.safe_write(
+            track, tags=Tags(title="新标题"), backup=True, backup_root=backup_root
+        )
+        self.assertTrue(outcome.ok)
+        self.assertIsNotNone(outcome.backup_path)
+        self.assertTrue(outcome.backup_path.exists())
+        # 备份必须是写入前的原件
+        self.assertEqual(outcome.backup_path.stat().st_size, self.original_size)
+
+
 class TestMerge(unittest.TestCase):
     def test_fill_empty_only(self) -> None:
         current = Tags(title="已有标题", artist="")

@@ -22,6 +22,48 @@ MIN_INTERVAL = 1.1
 
 _LUCENE_SPECIAL = re.compile(r'([+\-&|!(){}\[\]^"~*?:\\/])')
 
+#: MusicBrainz 用这些占位串表示"未知专辑"，写进标签只会污染曲库
+_PLACEHOLDER_ALBUMS = {
+    "", "[unknown]", "[no album]", "[none]", "(unknown)", "unknown",
+    "[unknown album]", "[no title]",
+}
+
+#: 现场版 / 精选集 / 合集的特征词（转小写匹配）
+_COMPILATION_HINTS = (
+    "live", "concert", "in concert", "unplugged",
+    "演唱会", "演唱會", "音乐会", "音樂會", "演奏会",
+    "精选", "精選", "合集", "合辑", "合輯", "珍藏", "纪念", "紀念",
+    "compilation", "greatest hits", "best of", "collection", "anthology",
+    "remix", "karaoke", "伴奏",
+    "bootleg", "盗版", "私制", "私製", "刻录", "刻錄",
+)
+
+
+def _is_placeholder_album(value: str) -> bool:
+    """识别 MusicBrainz 的伪专辑名。
+
+    社区条目里存在大量 ``[unknown]``、``[unknown Jay Chou 永恒金曲 bootleg release]``
+    这类占位名 —— 它们是数据维护者给「未知出处」打的标记，不是真实专辑。
+    写进标签只会污染曲库，还会让重命名生成 ``[unknown ...]`` 这种目录。
+    """
+    text = (value or "").strip()
+    if not text:
+        return True
+    low = text.lower()
+    if low in _PLACEHOLDER_ALBUMS:
+        return True
+    if low.startswith("[unknown") or low.startswith("unknown ") or low.startswith("(unknown"):
+        return True
+    # 纯方括号包裹且内容不是正式专辑名的（如 "[bootleg]"、"[single]"）
+    if text.startswith("[") and text.endswith("]"):
+        return True
+    return False
+
+
+def _looks_compilation(*texts: str) -> bool:
+    joined = " ".join(t.lower() for t in texts if t)
+    return any(hint in joined for hint in _COMPILATION_HINTS)
+
 
 def _escape(value: str) -> str:
     return _LUCENE_SPECIAL.sub(r"\\\1", value.replace('"', ""))
@@ -84,25 +126,57 @@ def _artist_name(item: dict[str, Any]) -> str:
 
 
 def _pick_release(item: dict[str, Any]) -> Optional[dict[str, Any]]:
-    releases = item.get("releases") or []
+    """从候选发行版里挑最可能是「原始录音室专辑」的那一个。
+
+    MusicBrainz 的 search 接口会把演唱会、精选集、纪念合集一起返回，
+    而且顺序往往把现场版排前面。若不做筛选，同一张录音室专辑会被写成
+    「某某演唱会」+ 现场年份，整批曲目的专辑信息就散了。
+    """
+    releases = [r for r in (item.get("releases") or []) if r]
     if not releases:
         return None
-    # 优先：带 media/track 信息、有日期、非合辑
-    def score(release: dict[str, Any]) -> tuple[int, str]:
+
+    import datetime
+
+    current_year = datetime.date.today().year
+
+    def score(release: dict[str, Any]) -> tuple[int, int]:
+        weight = 0
+        title = (release.get("title") or "")
         media = release.get("media") or []
         has_tracks = any(m.get("track") for m in media)
         rg = release.get("release-group") or {}
         primary = (rg.get("primary-type") or "").lower()
-        weight = 0
+        secondaries = [s.lower() for s in (rg.get("secondary-types") or [])]
+        date = (release.get("date") or "").strip()
+
         if has_tracks:
             weight += 3
-        if release.get("date"):
+        if date:
             weight += 2
         if primary in ("album", "ep"):
-            weight += 2
-        if primary in ("compilation", "live", "remix"):
-            weight -= 2
-        return weight, release.get("date") or ""
+            weight += 3
+        if primary in ("compilation", "live", "remix", "soundtrack", "dj-mix", "mixtape"):
+            weight -= 4
+        if any(s in ("live", "compilation", "remix", "dj-mix", "mixtape", "bootleg")
+               for s in secondaries):
+            weight -= 3
+        if _looks_compilation(title):
+            weight -= 5
+        if _is_placeholder_album(title):
+            weight -= 6
+
+        # 未来日期基本是错误数据（社区条目被误填），降权
+        year = 0
+        try:
+            year = int(date[:4])
+            if year > current_year:
+                weight -= 4
+        except ValueError:
+            pass
+
+        # 同分时偏好更早的发行 —— 原版通常最早
+        return weight, -year if year else -9999
 
     return max(releases, key=score)
 
@@ -135,11 +209,15 @@ def _to_candidate(item: dict[str, Any]) -> Optional[MatchCandidate]:
         best = max(genres, key=lambda g: g.get("count", 0) or 0)
         genre = (best.get("name") or "").strip()
 
+    album = (release.get("title") or "").strip()
+    if _is_placeholder_album(album):
+        album = ""
+
     return MatchCandidate(
         source="MusicBrainz",
         title=title,
         artist=_artist_name(item),
-        album=(release.get("title") or "").strip(),
+        album=album,
         albumartist=_artist_name(item),
         date=(release.get("date") or "").strip(),
         genre=genre,

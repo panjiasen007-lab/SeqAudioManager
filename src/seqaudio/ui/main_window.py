@@ -450,6 +450,8 @@ class MainWindow(QMainWindow):
         self.worker.trackUpdated.connect(self.model.refresh_row)
         self.worker.trackUpdated.connect(lambda _: self._refresh_stats())
         self.worker.progressChanged.connect(self._on_progress)
+        self.worker.writeProgress.connect(self._on_write_progress)
+        self.worker.phaseChanged.connect(self._on_phase)
         self.worker.finishedRun.connect(self._on_finished)
         self.worker.start()
 
@@ -472,6 +474,15 @@ class MainWindow(QMainWindow):
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
         self.status_hint.setText(f"处理中 {index} / {total}")
+
+    def _on_write_progress(self, index: int, total: int) -> None:
+        self.progress.setMaximum(max(1, total))
+        self.progress.setValue(index)
+        self.status_hint.setText(f"写入标签 {index} / {total}")
+
+    def _on_phase(self, name: str) -> None:
+        self.brand_bar.set_status(name, theme.CYAN)
+        self.progress.setValue(0)
 
     def _on_finished(self, summary) -> None:
         self._set_running(False)
@@ -635,6 +646,8 @@ class MainWindow(QMainWindow):
         self.worker.trackUpdated.connect(self.model.refresh_row)
         self.worker.trackUpdated.connect(lambda _: self._refresh_stats())
         self.worker.progressChanged.connect(self._on_progress)
+        self.worker.writeProgress.connect(self._on_write_progress)
+        self.worker.phaseChanged.connect(self._on_phase)
         self.worker.finishedRun.connect(self._on_finished)
         self.worker.start()
 

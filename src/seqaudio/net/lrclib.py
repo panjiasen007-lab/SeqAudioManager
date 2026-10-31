@@ -21,8 +21,10 @@ log = logging.getLogger(__name__)
 BASE = "https://lrclib.net/api"
 MIN_INTERVAL = 1.2
 
-#: LRCLIB 在高峰期常返回 503，连续失败后静默跳过，避免逐首重试拖垮整批任务
-BREAKER = CircuitBreaker("LRCLIB", threshold=3, cooldown=180.0)
+#: LRCLIB 高峰期常返回 503（临时过载，通常几十秒自愈）。
+#: 阈值放得比较宽：过早熔断会让整批曲目一首歌词都拿不到，
+#: 真正需要"快速放弃"的是封面这种可选数据。
+BREAKER = CircuitBreaker("LRCLIB", threshold=6, cooldown=90.0)
 
 
 @dataclass

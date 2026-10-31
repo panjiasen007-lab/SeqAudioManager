@@ -53,6 +53,8 @@ class ProcessorWorker(QThread):
 
     trackUpdated = Signal(object)
     progressChanged = Signal(int, int)
+    writeProgress = Signal(int, int)      # 第二阶段（落盘）进度
+    phaseChanged = Signal(str)            # 当前阶段名
     logMessage = Signal(str, str)
     finishedRun = Signal(object)
     startedRun = Signal(int)
@@ -86,6 +88,11 @@ class ProcessorWorker(QThread):
         elif kind == "progress":
             index, total = payload  # type: ignore[misc]
             self.progressChanged.emit(int(index), int(total))
+        elif kind == "write_progress":
+            index, total = payload  # type: ignore[misc]
+            self.writeProgress.emit(int(index), int(total))
+        elif kind == "phase":
+            self.phaseChanged.emit(str(payload))
         elif kind == "start":
             self.startedRun.emit(int(payload))  # type: ignore[arg-type]
         elif kind == "log":

@@ -33,9 +33,15 @@ def cover_for_release(
     for size in SIZES:
         url = f"{BASE}/release/{release_id}/{size}"
         try:
-            data = client.get_bytes(url, max_size=max_bytes, attempts=1, timeout=5.0)
+            data = client.get_bytes(url, max_size=max_bytes, attempts=1, timeout=3.5)
         except NetworkError as exc:
+            # 超时/连不上同样要记失败 —— 否则熔断器永远不会打开，
+            # 每首曲目都得白等两个 5 秒超时，一千首就是三小时
             log.debug("封面获取失败 %s：%s", url, exc)
+            BREAKER.failure()
+            if not BREAKER.allow():
+                log.info("封面源连续不可达，本次任务跳过封面下载")
+                break
             continue
         if data and len(data) > 128:
             BREAKER.success()

@@ -158,11 +158,11 @@ class Matcher:
                 candidates.extend(musicbrainz.search_recordings(self.client, title, "", album))
         return candidates
 
-    def score(self, track: Track, candidate: MatchCandidate) -> float:
+    def score(self, track: Track, candidate: MatchCandidate, album_hint: str = "") -> float:
         w = self.weights
         probe_title = track.working.title or track.original.title or track.path.stem
         probe_artist = track.working.artist or track.original.artist
-        probe_album = track.working.album or track.original.album
+        probe_album = track.working.album or track.original.album or album_hint
 
         s_title = similarity(probe_title, candidate.title)
         s_artist = similarity(probe_artist, candidate.artist) if probe_artist else 0.6
@@ -175,25 +175,46 @@ class Matcher:
             + w.album * s_album
             + w.duration * s_dur
         )
+
+        # 目录名推断出的专辑是极强的先验：命中就大幅加分，明确冲突就减分。
+        # 权重只有 0.10 的 album 项不足以压过 live/合集的干扰，
+        # 这里单独给一个加减项，让「整批属于同一张专辑」这个事实起作用。
+        if album_hint:
+            hint_sim = similarity(album_hint, candidate.album) if candidate.album else 0.0
+            if hint_sim >= 0.80:
+                total += 0.14
+            elif hint_sim >= 0.55:
+                total += 0.05
+            elif candidate.album and hint_sim < 0.30:
+                total -= 0.06
+
         total -= version_penalty(probe_title, candidate.title, candidate.album)
         return max(0.0, min(1.0, total))
 
-    def rank(self, track: Track, candidates: Iterable[MatchCandidate]) -> list[MatchCandidate]:
+    def rank(
+        self,
+        track: Track,
+        candidates: Iterable[MatchCandidate],
+        album_hint: str = "",
+    ) -> list[MatchCandidate]:
         scored = list(candidates)
         for candidate in scored:
-            candidate.confidence = self.score(track, candidate)
+            candidate.confidence = self.score(track, candidate, album_hint)
         scored.sort(key=lambda c: c.confidence, reverse=True)
         return scored
 
     # ------------------------------------------------------------ 主流程
 
-    def match(self, track: Track, *, need_lyrics: bool = True) -> MatchResult:
+    def match(self, track: Track, *, need_lyrics: bool = True, album_hint: str = "") -> MatchResult:
         title = track.working.title or track.original.title or track.path.stem
         artist = track.working.artist or track.original.artist
-        album = track.working.album or track.original.album
+        # 检索时只在「文件自带专辑标签」的情况下加 release 限定；
+        # 目录推断的专辑只用于打分 —— 用它做检索条件会把其他发行版直接滤掉，
+        # 反而可能一首候选都搜不到
+        album_for_query = track.working.album or track.original.album
 
-        candidates = self.query(title, artist, album, track.info.duration)
-        candidates = self.rank(track, candidates)
+        candidates = self.query(title, artist, album_for_query, track.info.duration)
+        candidates = self.rank(track, candidates, album_hint)
         result = MatchResult(candidates=candidates)
 
         if not candidates:
@@ -217,7 +238,7 @@ class Matcher:
             target = result.candidate if result.accepted else None
             lyr_title = (target.title if target else title)
             lyr_artist = (target.artist if target else artist)
-            lyr_album = (target.album if target else album)
+            lyr_album = (target.album if target else album_for_query)
             result.lyrics = lrclib.fetch_lyrics(
                 self.client, lyr_title, lyr_artist, lyr_album, track.info.duration
             )

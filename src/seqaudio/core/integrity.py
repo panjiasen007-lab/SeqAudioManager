@@ -87,6 +87,65 @@ def _read_flac_blocks(path: Path) -> tuple[bool, str, dict]:
     return True, "FLAC 结构完整", summary
 
 
+def _read_dsdiff_chunks(path: Path) -> tuple[bool, str, dict]:
+    """遍历 DSDIFF 的 chunk 链。
+
+    DFF 写标签是在容器末尾追加 ID3 chunk，并同步 FRM8 的总长度字段 ——
+    所以「FRM8 声明的总长 == 文件实际大小」是判断文件有没有被写坏的
+    最直接证据。同时确认 DSD/DST 音频块仍然存在。
+    """
+    summary: dict = {}
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(16)
+            if len(head) < 16:
+                return False, "文件头不完整", summary
+            cid, size, form = struct.unpack(">4sQ4s", head)
+            if cid != b"FRM8":
+                return False, "缺少 FRM8 标识", summary
+            if form not in (b"DSD ", b"DST "):
+                return False, f"未知表单类型 {form!r}", summary
+
+            handle.seek(0, 2)
+            total = handle.tell()
+            pos = 16
+            names: list[str] = []
+            audio_size = 0
+            guard = 0
+            while pos + 12 <= total:
+                handle.seek(pos)
+                header = handle.read(12)
+                if len(header) < 12:
+                    break
+                chunk_id, chunk_size = struct.unpack(">4sQ", header)
+                name = chunk_id.decode("ascii", "replace")
+                if chunk_size > total:
+                    return False, f"{name} 块长度异常（{chunk_size}）", summary
+                names.append(name)
+                if name in ("DSD ", "DST "):
+                    audio_size += chunk_size
+                pos += 12 + chunk_size + (chunk_size & 1)
+                guard += 1
+                if guard > 64:
+                    return False, "chunk 数量异常", summary
+
+            declared = size + 12
+            summary = {
+                "chunks": names,
+                "audio_size": audio_size,
+                "has_id3": "ID3 " in names,
+                "declared": declared,
+                "actual": total,
+            }
+            if declared != total:
+                return False, f"FRM8 声明长度 {declared} 与实际 {total} 不符", summary
+            if audio_size <= 0:
+                return False, "缺少 DSD/DST 音频数据块", summary
+    except OSError as exc:
+        return False, f"读取失败：{exc}", summary
+    return True, "DSDIFF 结构完整", summary
+
+
 def check_structure(path: Path | str) -> CheckResult:
     path = Path(path)
     ext = path.suffix.lower()
@@ -116,6 +175,14 @@ def check_structure(path: Path | str) -> CheckResult:
         if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
             return CheckResult(False, "结构", "RIFF/WAVE 标识异常")
         return CheckResult(True, "结构", "RIFF 结构正常")
+
+    if ext == ".dff":
+        ok, message, summary = _read_dsdiff_chunks(path)
+        if not ok:
+            return CheckResult(False, "结构", message)
+        mb = summary.get("audio_size", 0) / 1024 / 1024
+        tag = "含 ID3 标签块" if summary.get("has_id3") else "无标签块"
+        return CheckResult(True, "结构", f"DSDIFF 完整（音频 {mb:.0f}MB，{tag}）")
 
     if ext == ".dsf":
         with path.open("rb") as handle:
