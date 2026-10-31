@@ -38,7 +38,13 @@ from ..core.model import Track, TrackStatus
 from ..pipeline.processor import BatchOptions
 from .dialogs import CandidateDialog, RenamePreviewDialog, TagEditDialog
 from .settings_panel import SettingsPanel
-from .track_model import COLUMNS, TrackFilterProxy, TrackTableModel
+from .track_model import (
+    COLUMNS,
+    HIDDEN_BY_DEFAULT,
+    STRETCH_COLUMN,
+    TrackFilterProxy,
+    TrackTableModel,
+)
 from .worker import MatchPreviewWorker, ProcessorWorker, ScanWorker
 
 log = logging.getLogger(__name__)
@@ -119,11 +125,16 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableView.SelectRows)
         self.table.setSelectionMode(QTableView.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(24)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(False)
         for index, (_, _, width) in enumerate(COLUMNS):
             self.table.setColumnWidth(index, width)
+        self.table.horizontalHeader().setSectionResizeMode(STRETCH_COLUMN, QHeaderView.Stretch)
+        for index in HIDDEN_BY_DEFAULT:
+            self.table.setColumnHidden(index, True)
+        self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.horizontalHeader().customContextMenuRequested.connect(self._header_menu)
         self.table.doubleClicked.connect(lambda _: self.edit_selected())
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
@@ -466,6 +477,20 @@ class MainWindow(QMainWindow):
         menu.addAction("打开所在文件夹", self.open_folder)
         menu.addAction("仅处理选中项", self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _header_menu(self, pos) -> None:
+        """表头右键：勾选显示/隐藏任意列（窄屏下按需裁列）。"""
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        for index, (label, _, _) in enumerate(COLUMNS):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(not self.table.isColumnHidden(index))
+            action.toggled.connect(
+                lambda checked, i=index: self.table.setColumnHidden(i, not checked)
+            )
+        menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
 
     def _run_selected(self) -> None:
         tracks = self._selected_tracks()

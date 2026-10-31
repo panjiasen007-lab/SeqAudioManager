@@ -40,6 +40,7 @@ class Settings:
     request_timeout: float = 12.0
     min_request_interval: float = 1.1      # MusicBrainz 要求 1 req/s
     cache_ttl_days: int = 30
+    match_threshold: float = 0.62          # 低于该置信度转人工确认
 
     # ---- 歌词 ----
     lyrics_mode: str = LyricsMode.SIDECAR.value

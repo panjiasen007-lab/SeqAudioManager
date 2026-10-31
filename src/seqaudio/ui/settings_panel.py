@@ -72,6 +72,17 @@ class SettingsPanel(QScrollArea):
         self.cue_check = QCheckBox("用 CUE 信息补全整轨标签")
         self.cue_check.toggled.connect(self._notify)
         form.addRow("", self.cue_check)
+
+        self.threshold_spin = QDoubleSpinBox()
+        self.threshold_spin.setRange(0.30, 0.95)
+        self.threshold_spin.setSingleStep(0.05)
+        self.threshold_spin.setDecimals(2)
+        self.threshold_spin.setToolTip(
+            "低于该置信度的匹配结果不会自动写入，转入「待人工确认」\n"
+            "调低＝写入更激进，调高＝更严格"
+        )
+        self.threshold_spin.valueChanged.connect(self._notify)
+        form.addRow("置信度阈值", self.threshold_spin)
         return box
 
     def _build_source_group(self) -> QGroupBox:
@@ -232,6 +243,7 @@ class SettingsPanel(QScrollArea):
             index = self.conflict_combo.findData(settings.conflict())
             self.conflict_combo.setCurrentIndex(max(0, index))
             self.cue_check.setChecked(settings.fill_album_from_cue)
+            self.threshold_spin.setValue(float(settings.match_threshold or 0.62))
 
             self.online_check.setChecked(settings.online_enabled and not settings.offline_mode)
             self.mb_check.setChecked(settings.use_musicbrainz)
@@ -267,6 +279,7 @@ class SettingsPanel(QScrollArea):
         # 所以这里读 value 而不是枚举对象本身
         settings.conflict_mode = str(self.conflict_combo.currentData())
         settings.fill_album_from_cue = self.cue_check.isChecked()
+        settings.match_threshold = float(self.threshold_spin.value())
 
         settings.online_enabled = self.online_check.isChecked()
         settings.offline_mode = not self.online_check.isChecked()

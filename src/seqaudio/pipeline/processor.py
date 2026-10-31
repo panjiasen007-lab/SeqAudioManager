@@ -93,7 +93,7 @@ class Processor:
         s = self.settings
         return Matcher(
             self.client,
-            threshold=s_threshold(self.settings),
+            threshold=max(0.3, min(0.95, float(s.match_threshold or 0.62))),
             use_musicbrainz=s.use_musicbrainz,
             use_coverart=s.use_coverart,
             use_lrclib=s.use_lrclib,
@@ -367,8 +367,3 @@ class Processor:
         self.emit("log", ("INFO", f"重命名完成：成功 {success}，失败 {failed}"))
         for item in plan.items:
             self.emit("track", item.track)
-
-
-def s_threshold(settings: Settings) -> float:
-    """阈值可后续暴露到设置面板；先给稳定默认值。"""
-    return 0.62

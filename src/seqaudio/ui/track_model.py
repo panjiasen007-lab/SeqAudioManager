@@ -11,20 +11,26 @@ from ..core.model import Track, TrackStatus
 
 #: (表头, 取值函数, 列宽)
 COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
-    ("状态", lambda t: t.status.value, 78),
-    ("歌名", lambda t: t.working.title or t.original.title, 200),
-    ("歌手", lambda t: t.working.artist or t.original.artist, 130),
-    ("专辑", lambda t: t.working.album or t.original.album, 150),
-    ("年份", lambda t: (t.working.date or t.original.date)[:4], 58),
-    ("格式", lambda t: t.info.fmt, 62),
-    ("规格", lambda t: t.info.spec_text, 96),
-    ("时长", lambda t: t.info.duration_text, 58),
-    ("无损", lambda t: t.info.kind_text, 50),
-    ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 66),
-    ("来源", lambda t: t.source, 96),
-    ("文件名", lambda t: t.path.name, 220),
-    ("说明", lambda t: " | ".join(t.notes), 320),
+    ("状态", lambda t: t.status.value, 82),
+    ("歌名", lambda t: t.working.title or t.original.title, 180),
+    ("歌手", lambda t: t.working.artist or t.original.artist, 104),
+    ("专辑", lambda t: t.working.album or t.original.album, 124),
+    ("年份", lambda t: (t.working.date or t.original.date)[:4], 50),
+    ("格式", lambda t: t.info.fmt, 54),
+    ("规格", lambda t: t.info.spec_text, 88),
+    ("时长", lambda t: t.info.duration_text, 50),
+    ("无损", lambda t: t.info.kind_text, 46),
+    ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 58),
+    ("来源", lambda t: t.source, 88),
+    ("文件名", lambda t: t.path.name, 170),
+    ("说明", lambda t: " | ".join(t.notes), 240),
 ]
+
+#: 文件名默认隐藏（路径与完整文件名在 tooltip 里），窄屏下可一键切出
+HIDDEN_BY_DEFAULT = {11}
+
+#: 说明列随窗口伸缩，其余固定
+STRETCH_COLUMN = 12
 
 STATUS_COLORS = {
     TrackStatus.DONE: QColor("#3fb950"),

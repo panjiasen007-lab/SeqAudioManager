@@ -249,11 +249,7 @@ def guess_from_filename(path: Path) -> Tags:
     """从文件名粗猜标签：常见 ``歌手 - 歌名``、``01. 歌名`` 形态。"""
     stem = path.stem
     cleaned = stem.strip()
-    # 去掉开头的轨道号
-    prefix = ""
-    for sep in (" - ", "-", "－"):
-        pass
-    # 处理 "01 - 歌手 - 歌名" / "01. 歌名"
+    # 处理 "01 - 歌手 - 歌名" / "01. 歌名" 两种常见形态
     body = cleaned
     tokens = body.split(" - ")
     if len(tokens) >= 3 and tokens[0].strip().isdigit():
