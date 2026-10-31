@@ -129,8 +129,10 @@ class TrackTableModel(QAbstractTableModel):
         if track.changed_fields:
             lines.append(f"变更字段：{', '.join(track.changed_fields)}")
         if track.authenticity is not None:
+            from .i18n import tr_verdict
+
             auth = track.authenticity
-            lines.append(f"无损鉴定：{auth.verdict}（{auth.detail_text}）")
+            lines.append(f"无损鉴定：{tr_verdict(auth.verdict)}（{auth.detail_text}）")
             lines.extend(f"  · {r}" for r in auth.reasons)
         if track.notes:
             lines.append("说明：")

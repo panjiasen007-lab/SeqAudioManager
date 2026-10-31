@@ -94,8 +94,11 @@ class SettingsPanel(QScrollArea):
         self.mb_check = QCheckBox("MusicBrainz · 元数据主源")
         self.caa_check = QCheckBox("Cover Art Archive · 封面")
         self.lrclib_check = QCheckBox("LRCLIB · 歌词主源")
+        self.itunes_check = QCheckBox("iTunes Search · 元数据/封面（Apple 公开接口）")
+        self.netmusic_check = QCheckBox("网易云 · 元数据/歌词/封面（兜底）")
         self.local_lyrics_check = QCheckBox("优先使用本地已有歌词")
-        for widget in (self.mb_check, self.caa_check, self.lrclib_check, self.local_lyrics_check):
+        for widget in (self.mb_check, self.caa_check, self.lrclib_check,
+                       self.itunes_check, self.netmusic_check, self.local_lyrics_check):
             widget.toggled.connect(self._notify)
             card.add_widget(self._indent(widget))
 
@@ -173,6 +176,11 @@ class SettingsPanel(QScrollArea):
         self.watermark_check = QCheckBox("清理站点广告与推广后缀")
         self.watermark_check.toggled.connect(self._notify)
         card.add_widget(self.watermark_check)
+
+        self.strip_number_check = QCheckBox("去除标题开头的曲目序号")
+        self.strip_number_check.setToolTip("把「01. 七里香」清洗成「七里香」，序号保留在曲目号字段")
+        self.strip_number_check.toggled.connect(self._notify)
+        card.add_widget(self.strip_number_check)
 
         self.clean_title_check = QCheckBox("同时清理歌名/专辑中的水印片段")
         self.clean_title_check.toggled.connect(self._notify)
@@ -292,6 +300,8 @@ class SettingsPanel(QScrollArea):
             self.mb_check.setChecked(settings.use_musicbrainz)
             self.caa_check.setChecked(settings.use_coverart)
             self.lrclib_check.setChecked(settings.use_lrclib)
+            self.itunes_check.setChecked(settings.use_itunes)
+            self.netmusic_check.setChecked(settings.use_netmusic)
             self.local_lyrics_check.setChecked(settings.use_local_lyrics)
             self.concurrency_spin.setValue(max(1, settings.concurrency))
             self.timeout_spin.setValue(settings.request_timeout)
@@ -306,6 +316,7 @@ class SettingsPanel(QScrollArea):
             self.compat_check.setChecked(settings.compat_mode)
 
             self.watermark_check.setChecked(settings.watermark_enabled)
+            self.strip_number_check.setChecked(settings.strip_track_numbers)
             self.clean_title_check.setChecked(settings.clean_title_watermark)
             self.words_edit.setPlainText("\n".join(settings.custom_words))
 
@@ -330,6 +341,8 @@ class SettingsPanel(QScrollArea):
         settings.use_musicbrainz = self.mb_check.isChecked()
         settings.use_coverart = self.caa_check.isChecked()
         settings.use_lrclib = self.lrclib_check.isChecked()
+        settings.use_itunes = self.itunes_check.isChecked()
+        settings.use_netmusic = self.netmusic_check.isChecked()
         settings.use_local_lyrics = self.local_lyrics_check.isChecked()
         settings.concurrency = self.concurrency_spin.value()
         settings.request_timeout = float(self.timeout_spin.value())
@@ -343,6 +356,7 @@ class SettingsPanel(QScrollArea):
         settings.compat_mode = self.compat_check.isChecked()
 
         settings.watermark_enabled = self.watermark_check.isChecked()
+        settings.strip_track_numbers = self.strip_number_check.isChecked()
         settings.clean_title_watermark = self.clean_title_check.isChecked()
         settings.custom_words = [
             line.strip() for line in self.words_edit.toPlainText().splitlines() if line.strip()

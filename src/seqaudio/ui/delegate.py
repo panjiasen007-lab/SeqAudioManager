@@ -9,8 +9,6 @@ QSS 只能改文字/背景色，做不出「药丸形底 + 圆角 + 内边距」
 
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -24,6 +22,9 @@ from . import theme
 
 #: 列索引（与 track_model.COLUMNS 对齐）
 COL_STATUS = 0
+COL_TITLE = 1
+COL_ARTIST = 2
+COL_ALBUM = 3
 COL_YEAR = 4
 COL_FORMAT = 5
 COL_SPEC = 6
@@ -136,17 +137,26 @@ class TrackDelegate(QStyledItemDelegate):
             color = QColor(theme.OK) if text == "无损" else QColor(theme.FG_MUTE)
         elif column == COL_FORMAT:
             color = QColor(theme.CYAN)
+        elif column == COL_ALBUM:
+            color = QColor(theme.PURPLE)
+        elif column == COL_YEAR:
+            color = QColor(theme.ACCENT)
         elif column == COL_AUTHENTICITY:
             from ..core.authenticity import VERDICT_COLORS
+            from .i18n import tr_verdict
 
+            # 用原始判定（中文）取颜色，再本地化显示文本，两者不能混淆
             color = QColor(VERDICT_COLORS.get(text, theme.FG_MUTE))
+            text = tr_verdict(text)
         elif selected:
             color = QColor(theme.FG)
         else:
             color = QColor(theme.FG_DIM)
 
-        if column == 1 and not selected:
+        if column == COL_TITLE and not selected:
             color = QColor(theme.FG)
+        if column == COL_ARTIST and not selected:
+            color = QColor(theme.FG_DIM)
 
         painter.setPen(color)
         align = Qt.AlignVCenter | (

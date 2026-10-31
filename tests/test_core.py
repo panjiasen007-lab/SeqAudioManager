@@ -16,6 +16,7 @@ import make_samples  # noqa: E402
 from seqaudio.core import cue as cue_mod  # noqa: E402
 from seqaudio.core import lyrics as lyrics_mod  # noqa: E402
 from seqaudio.core import probe, rename, tags as tags_mod, watermark, writer  # noqa: E402
+from seqaudio.core import clean as clean_mod  # noqa: E402
 from seqaudio.core import quarantine, uninstall  # noqa: E402
 from seqaudio.core.model import Tags, Track, ConflictMode  # noqa: E402
 
@@ -415,6 +416,23 @@ class TestAuthenticity(unittest.TestCase):
         run("-i", str(cls.true_wav), "-ar", "96000", "-c:a", "pcm_s24le",
             "-y", str(cls.upsampled))
 
+        # 用不同码率的白噪声做「转码伪装无损」的梯度样本，覆盖判定分档的边界
+        cls.encoders: dict[str, Path] = {}
+        for bitrate, tag in ((128, "mp3_128"), (192, "mp3_192"),
+                             (256, "mp3_256"), (320, "mp3_320")):
+            mp3 = cls.tmp / f"{tag}.mp3"
+            run("-i", str(cls.true_wav), "-b:a", f"{bitrate}k", "-y", str(mp3))
+            wav = cls.tmp / f"{tag}.wav"
+            run("-i", str(mp3), "-ar", "44100", "-c:a", "pcm_s16le", "-y", str(wav))
+            cls.encoders[tag] = wav
+
+        # VBR：恒定质量编码，比 CBR 更贴近真实转码场景
+        vbr_mp3 = cls.tmp / "vbr.mp3"
+        run("-i", str(cls.true_wav), "-q:a", "5", "-y", str(vbr_mp3))
+        vbr_wav = cls.tmp / "vbr.wav"
+        run("-i", str(vbr_mp3), "-ar", "44100", "-c:a", "pcm_s16le", "-y", str(vbr_wav))
+        cls.encoders["vbr"] = vbr_wav
+
     @classmethod
     def tearDownClass(cls) -> None:
         shutil.rmtree(cls.tmp, ignore_errors=True)
@@ -439,6 +457,28 @@ class TestAuthenticity(unittest.TestCase):
         result = self._verdict(self.upsampled)
         self.assertEqual(result.verdict, "疑似升频", result.reasons)
         self.assertLess(result.cutoff_hz, result.nyquist_hz * 0.7)
+
+    def test_bitrate_gradient_cutoff_order(self) -> None:
+        """码率越高截止频率越高：128 < 192 < 256 < 320，这是判定的物理依据。"""
+        cuts = {
+            tag: self._verdict(path).cutoff_hz
+            for tag, path in self.encoders.items()
+            if tag != "vbr"
+        }
+        self.assertLess(cuts["mp3_128"], cuts["mp3_192"])
+        self.assertLess(cuts["mp3_192"], cuts["mp3_256"])
+        self.assertLess(cuts["mp3_256"], cuts["mp3_320"])
+
+    def test_320k_flags_suspect_not_true(self) -> None:
+        """320k 与真无损只差 2kHz，绝不能判成「真无损」。"""
+        result = self._verdict(self.encoders["mp3_320"])
+        self.assertIn(result.verdict, ("疑似假无损", "假无损"), result.reasons)
+
+    def test_low_bitrate_flagged_fake(self) -> None:
+        """128 / 192 / VBR 都应判为假无损。"""
+        for tag in ("mp3_128", "mp3_192", "vbr"):
+            result = self._verdict(self.encoders[tag])
+            self.assertIn(result.verdict, ("假无损", "疑似假无损"), (tag, result.reasons))
 
     def test_effective_bit_depth(self) -> None:
         """16bit 内容存进 24bit 容器时，有效位深应仍识别为 16。"""
@@ -474,6 +514,43 @@ class TestMerge(unittest.TestCase):
         current.merge(Tags(title="新", album="新专辑"), ConflictMode.KEEP_EXISTING)
         self.assertEqual(current.title, "旧")
         self.assertEqual(current.album, "新专辑")
+
+
+class TestClean(unittest.TestCase):
+    """标题去序号：只删开头的曲目序号，不能误伤年份/歌名本身。"""
+
+    def test_common_prefixes(self) -> None:
+        cases = {
+            "01. 七里香": "七里香",
+            "01 七里香": "七里香",
+            "01-七里香": "七里香",
+            "01、七里香": "七里香",
+            "[01] 七里香": "七里香",
+            "(02)七里香": "七里香",
+            "【03】 七里香": "七里香",
+            "09.园游会": "园游会",
+        }
+        for original, expected in cases.items():
+            cleaned, changed = clean_mod.strip_track_number(original)
+            self.assertEqual(cleaned, expected, original)
+            self.assertTrue(changed)
+
+    def test_do_not_touch_non_numbers(self) -> None:
+        for title in ("七里香", "1997 - 往事", "U2. Beautiful Day", "1+1=2",
+                      "The 1975 - Love It If We Made It", "3 Doors Down - Here Without You"):
+            cleaned, changed = clean_mod.strip_track_number(title)
+            self.assertFalse(changed, title)
+            self.assertEqual(cleaned, title)
+
+    def test_empty_after_strip_keeps_original(self) -> None:
+        """纯序号（如「01」）删完就空了，必须保留原值。"""
+        cleaned, changed = clean_mod.strip_track_number("01")
+        self.assertFalse(changed)
+        self.assertEqual(cleaned, "01")
+
+    def test_three_digit_requires_opt_in(self) -> None:
+        self.assertFalse(clean_mod.strip_track_number("123 早安")[1])
+        self.assertTrue(clean_mod.strip_track_number("123 早安", allow_three_digit=True)[1])
 
 
 class TestQuarantine(unittest.TestCase):

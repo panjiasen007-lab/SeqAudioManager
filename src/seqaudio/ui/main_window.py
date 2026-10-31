@@ -39,7 +39,7 @@ from ..core.config import PresetStore, Settings
 from ..core.logging_setup import add_listener, remove_listener
 from ..core.model import Track, TrackStatus
 from ..pipeline.processor import BatchOptions
-from . import theme
+from . import i18n, theme
 from .delegate import TrackDelegate
 from .dialogs import CandidateDialog, RenamePreviewDialog, TagEditDialog
 from .settings_panel import SettingsPanel
@@ -74,6 +74,7 @@ class LogBridge(QObject):
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings):
         super().__init__()
+        i18n.set_locale(getattr(settings, "language", "zh_CN") or "zh_CN")
         self.settings = settings
         self.presets = PresetStore()
         self.worker: Optional[ProcessorWorker] = None
@@ -81,6 +82,8 @@ class MainWindow(QMainWindow):
         self._match_workers: list[MatchPreviewWorker] = []
         self.auth_worker: Optional[AuthenticityWorker] = None
         self._stat_cards: dict[str, StatCard] = {}
+        self._i18n_buttons: dict[QPushButton, str] = {}
+        self._i18n_stat_keys: dict[str, str] = {}
 
         self.model = TrackTableModel()
         self.proxy = TrackFilterProxy()
@@ -98,6 +101,7 @@ class MainWindow(QMainWindow):
         self._init_shortcuts()
 
         self._refresh_stats()
+        self.apply_theme(self.settings.theme)
         add_listener(self._log_listener)
         self._append_log("INFO", f"日志目录：{self._log_dir_hint()}")
         if settings.offline_mode:
@@ -183,9 +187,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.btn_add_files = self._button("添加文件", self.add_files, ghost=True)
-        self.btn_add_folder = self._button("添加文件夹", self.add_folder, ghost=True)
-        self.btn_remove = self._button("移除", self.remove_selected, ghost=True)
+        self.btn_add_files = self._button(i18n.tr("add_files"), self.add_files, ghost=True, i18n_key="add_files")
+        self.btn_add_folder = self._button(i18n.tr("add_folder"), self.add_folder, ghost=True, i18n_key="add_folder")
+        self.btn_remove = self._button(i18n.tr("remove"), self.remove_selected, ghost=True, i18n_key="remove")
         # 「清空」放进「更多」菜单：1080px 下 8 个按钮已接近一行的极限，
         # 清空属于低频且可撤销性差的操作，不适合摆在手边
         for btn in (self.btn_add_files, self.btn_add_folder, self.btn_remove):
@@ -193,12 +197,12 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._vline())
 
-        self.btn_auto = self._button("一键全自动", self.run_auto)
+        self.btn_auto = self._button(i18n.tr("auto"), self.run_auto, i18n_key="auto")
         self.btn_auto.setObjectName("primary")
         self.btn_auto.setToolTip("匹配 → 补全 → 清理水印 → 写标签 → 歌词（按当前参数）")
-        self.btn_local = self._button("仅本地处理", self.run_local_only, ghost=True)
+        self.btn_local = self._button(i18n.tr("local_only"), self.run_local_only, ghost=True, i18n_key="local_only")
         self.btn_local.setToolTip("不联网：清理水印、补全空白字段、写标签、重命名")
-        self.btn_stop = self._button("停止", self.stop, ghost=True)
+        self.btn_stop = self._button(i18n.tr("stop"), self.stop, ghost=True, i18n_key="stop")
         self.btn_stop.setEnabled(False)
         layout.addWidget(self.btn_auto)
         layout.addWidget(self.btn_local)
@@ -206,9 +210,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._vline())
 
-        self.btn_auth = self._button("真假鉴定", self.run_authenticity, ghost=True)
+        self.btn_auth = self._button(i18n.tr("auth"), self.run_authenticity, ghost=True, i18n_key="auth")
         self.btn_auth.setToolTip("频谱分析判定是否真无损（需解码，速度约 0.3~1 秒/首）")
-        self.btn_cleanup = self._button("清理假无损", self.run_cleanup, ghost=True)
+        self.btn_cleanup = self._button(i18n.tr("cleanup"), self.run_cleanup, ghost=True, i18n_key="cleanup")
         self.btn_cleanup.setObjectName("danger")
         self.btn_cleanup.setToolTip("把判定为假无损/可疑的文件移入回收站或隔离区（Ctrl+Shift+D）")
         layout.addWidget(self.btn_auth)
@@ -216,13 +220,13 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        self.btn_more = self._button("更多", self._show_more_menu, ghost=True)
+        self.btn_more = self._button(i18n.tr("more"), self._show_more_menu, ghost=True, i18n_key="more")
         self.btn_more.setToolTip("重命名预览、导出报表、隔离区、关于")
         self.btn_more.setMenu(self._build_more_menu())
         layout.addWidget(self.btn_more)
 
         # 窄屏救星：收起参数面板，表格独占整宽
-        self.btn_toggle_panel = self._button("参数", self.toggle_settings_panel, ghost=True)
+        self.btn_toggle_panel = self._button(i18n.tr("panel"), self.toggle_settings_panel, ghost=True, i18n_key="panel")
         self.btn_toggle_panel.setCheckable(True)
         self.btn_toggle_panel.setToolTip("显示 / 隐藏右侧参数面板（Ctrl+P）")
         layout.addWidget(self.btn_toggle_panel)
@@ -234,9 +238,33 @@ class MainWindow(QMainWindow):
         self.action_rename = menu.addAction("重命名预览…", self.rename_preview)
         self.action_report = menu.addAction("导出处理报表…", self.export_report)
         menu.addAction("清空列表", self.clear_all)
+        menu.addAction("批量导出封面…", self.export_covers)
+        menu.addSeparator()
+        menu.addAction("去除选中标题的序号", self._strip_selected_numbers)
         menu.addSeparator()
         self.action_quarantine = menu.addAction("隔离区管理…", self.open_quarantine)
         self.action_spectrum = menu.addAction("查看频谱…", self.show_spectrum)
+        # ---- 语言子菜单 ----
+        self.lang_menu = menu.addMenu(i18n.tr("menu_language"))
+        lang_menu = self.lang_menu
+        self._lang_actions: dict[str, object] = {}
+        for code in i18n.locale_names():
+            action = lang_menu.addAction(i18n.locale_names()[code])
+            action.setCheckable(True)
+            action.setChecked(code == self.settings.language)
+            action.toggled.connect(lambda checked, c=code: self.apply_language(c) if checked else None)
+            self._lang_actions[code] = action
+
+        # ---- 主题子菜单 ----
+        self.theme_menu = menu.addMenu(i18n.tr("menu_theme"))
+        self._theme_actions: dict[str, object] = {}
+        for name in theme.THEMES:
+            action = self.theme_menu.addAction(i18n.tr_theme(name))
+            action.setCheckable(True)
+            action.setChecked(name == self.settings.theme)
+            action.toggled.connect(lambda checked, n=name: self.apply_theme(n) if checked else None)
+            self._theme_actions[name] = action
+
         menu.addSeparator()
         self.action_space = menu.addAction("动态星空背景")
         self.action_space.setCheckable(True)
@@ -256,13 +284,15 @@ class MainWindow(QMainWindow):
         self.settings_panel.setVisible(visible)
         self.btn_toggle_panel.setChecked(visible)
 
-    def _button(self, text: str, slot, ghost: bool = False) -> QPushButton:
+    def _button(self, text: str, slot, ghost: bool = False, i18n_key: str = "") -> QPushButton:
         btn = QPushButton(text)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedHeight(34)
         if ghost:
             btn.setObjectName("ghost")
         btn.clicked.connect(slot)
+        if i18n_key:
+            self._i18n_buttons[btn] = i18n_key
         return btn
 
     @staticmethod
@@ -276,15 +306,16 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.setSpacing(8)
         specs = [
-            ("total", "曲目总数", theme.FG),
-            ("lossless", "无损音源", theme.CYAN),
-            ("suspect", "假无损", theme.BAD),
-            ("done", "已完成", theme.OK),
-            ("review", "待确认", theme.WARN),
-            ("failed", "失败", theme.BAD),
+            ("total", "stat_total", "fg"),
+            ("lossless", "stat_lossless", "cyan"),
+            ("suspect", "stat_fake", "bad"),
+            ("done", "stat_done", "ok"),
+            ("review", "stat_review", "warn"),
+            ("failed", "stat_failed", "bad"),
         ]
-        for key, title, color in specs:
-            card = StatCard(key, title, color)
+        for key, title_key, color_name in specs:
+            card = StatCard(key, i18n.tr(title_key), color_name)
+            self._i18n_stat_keys[key] = title_key
             if key == "suspect":
                 card.setToolTip("判定为假无损 / 疑似假无损 / 升频 的数量，点击筛选")
             card.clicked.connect(self._on_stat_clicked)
@@ -315,15 +346,16 @@ class MainWindow(QMainWindow):
         self.verdict_combo = QComboBox()
         self.verdict_combo.setFixedHeight(34)
         self.verdict_combo.setMinimumWidth(118)
-        for label, key in (
-            ("全部判定", "all"),
-            ("真无损", "true"),
-            ("假无损", "fake"),
-            ("可疑（升频/低码）", "suspect"),
-            ("假无损 + 可疑", "suspect_any"),
-            ("未鉴定", "unknown"),
-        ):
-            self.verdict_combo.addItem(label, key)
+        self._verdict_filter_items = [
+            ("filter_all", "all"),
+            ("verdict_true", "true"),
+            ("verdict_fake", "fake"),
+            ("filter_suspect", "suspect"),
+            ("filter_any", "suspect_any"),
+            ("verdict_unknown", "unknown"),
+        ]
+        for label_key, key in self._verdict_filter_items:
+            self.verdict_combo.addItem(i18n.tr(label_key), key)
         self.verdict_combo.currentIndexChanged.connect(self._on_verdict_filter)
         filter_row.addWidget(self.verdict_combo)
         layout.addLayout(filter_row)
@@ -738,6 +770,27 @@ class MainWindow(QMainWindow):
         self._refresh_stats()
         self._append_log("WARNING", f"已隔离 {len(created)} 个文件，{len(failed)} 个失败")
 
+    def _strip_selected_numbers(self) -> None:
+        """对选中曲目的标题做一次「去序号」，立即可见。"""
+        from ..core.clean import strip_track_number
+
+        tracks = self._selected_tracks() or self.model.tracks()
+        count = 0
+        for track in tracks:
+            title = track.working.title
+            if not title:
+                continue
+            new_title, stripped = strip_track_number(title)
+            if stripped:
+                track.working.title = new_title
+                if "title" not in track.changed_fields:
+                    track.changed_fields.append("title")
+                track.note("去序号")
+                self.model.refresh_row(track)
+                count += 1
+        self._append_log("INFO", f"已去除 {count} 个标题的序号前缀")
+        self.status_hint.setText(f"去序号：{count} 个标题已更新")
+
     def _run_selected(self) -> None:
         tracks = self._selected_tracks()
         if not tracks:
@@ -961,6 +1014,77 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._append_log("ERROR", f"打开日志目录失败：{exc}")
 
+    # ------------------------------------------------------------ 语言
+
+    def apply_language(self, code: str) -> None:
+        if code not in i18n.locale_names():
+            return
+        i18n.set_locale(code)
+        self.settings.language = code
+
+        for btn, key in self._i18n_buttons.items():
+            btn.setText(i18n.tr(key))
+        for key, title_key in self._i18n_stat_keys.items():
+            self._stat_cards[key].title_label.setText(i18n.tr(title_key))
+
+        # 判定筛选下拉：重建标签，保持当前选择
+        current_data = self.verdict_combo.currentData()
+        self.verdict_combo.blockSignals(True)
+        self.verdict_combo.clear()
+        for label_key, key in self._verdict_filter_items:
+            self.verdict_combo.addItem(i18n.tr(label_key), key)
+        self.verdict_combo.setCurrentIndex(
+            next((i for i in range(self.verdict_combo.count())
+                  if self.verdict_combo.itemData(i) == current_data), 0)
+        )
+        self.verdict_combo.blockSignals(False)
+
+        # 菜单标题与主题项
+        self.lang_menu.setTitle(i18n.tr("menu_language"))
+        self.theme_menu.setTitle(i18n.tr("menu_theme"))
+        for name, action in self._theme_actions.items():
+            action.setText(i18n.tr_theme(name))
+        for locale_code, action in self._lang_actions.items():
+            blocked = action.blockSignals(True)
+            action.setChecked(locale_code == code)
+            action.blockSignals(blocked)
+
+        self.model.refresh_all()
+        try:
+            self.settings.save()
+        except OSError:
+            pass
+        self._append_log("INFO", f"界面语言已切换：{i18n.locale_names()[code]}")
+
+    # ------------------------------------------------------------ 主题
+
+    def apply_theme(self, name: str) -> None:
+        if name not in theme.THEMES:
+            return
+        from PySide6.QtWidgets import QApplication
+
+        qss = theme.apply_theme(name)
+        QApplication.instance().setStyleSheet(qss)
+        self.settings.theme = name
+        # 浅色主题无星空，深色主题按用户开关
+        light = theme.is_light(name)
+        self.space.setVisible(not light)
+        self.space.set_running(not light and self.settings.space_background)
+        for theme_name, action in self._theme_actions.items():
+            blocked = action.blockSignals(True)
+            action.setChecked(theme_name == name)
+            action.blockSignals(blocked)
+        self.model.refresh_all()
+        for card in self._stat_cards.values():
+            card.restyle()
+        self.brand_bar.update()
+        self.update()
+        try:
+            self.settings.save()
+        except OSError:
+            pass
+        self._append_log("INFO", f"主题已切换：{name}")
+
     # ------------------------------------------------------------ 星空背景
 
     def toggle_space_background(self, enabled: bool) -> None:
@@ -986,6 +1110,26 @@ class MainWindow(QMainWindow):
 
     def _on_verdict_filter(self) -> None:
         self.proxy.set_verdict_group(str(self.verdict_combo.currentData()))
+
+    # ------------------------------------------------------------ 封面导出
+
+    def export_covers(self) -> None:
+        from ..core.cover import export_covers
+
+        tracks = [t for t in self.model.tracks()
+                  if (t.working.cover or t.original.cover)]
+        if not tracks:
+            QMessageBox.information(self, "没有封面", "列表中没有任何封面。\n"
+                                   "可先联网匹配获取封面，或导入已内嵌封面的文件。")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "选择导出目录")
+        if not folder:
+            return
+        exported, skipped = export_covers(tracks, Path(folder))
+        self._append_log("INFO", f"已导出 {exported} 张封面到 {folder}")
+        QMessageBox.information(
+            self, "导出完成", f"成功导出 {exported} 张封面，跳过 {skipped} 个无封面文件。"
+        )
 
     # ------------------------------------------------------------ 重命名 / 报表
 

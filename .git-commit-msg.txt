@@ -1,11 +1,38 @@
-fix(installer): 修复安装向导启动即崩溃（btn_back 不存在）
+feat: 去序号/鉴定提准/7主题/8语言/多源API/封面导出，补齐需求差距
 
-崩溃根因：构造顺序问题。Installer.__init__ 里先 addWidget 三个页面、最后才
-_build_footer() 建底部按钮；而 _build_options_page 内部会调用 _on_path_changed，
-后者触发 _refresh_buttons() 去读 self.btn_next / self.btn_back —— 此刻按钮还没
-建出来，于是 AttributeError: 'Installer' object has no attribute 'btn_back'，
-安装包一启动就弹「Unhandled exception in script」。
+本轮按用户 9 项要求逐项落地（详见 docs/GAP.md）：
 
-修复：_refresh_buttons 开头加 hasattr(self, 'btn_next') 守卫，构造期直接跳过，
-底部按钮建完后 __init__ 末尾统一刷新。离屏实测：勾选协议→下一步→选项页→
-清空路径按钮禁用，页面流转全部正常；重新打包后双击启动不再崩溃（进程存活）。
+1. 歌名去除序号（core/clean.py）
+   只删标题开头的曲目序号（01. / [01] / 01- / 01、/ (02) / 【03】），
+   不误伤「1997 - 往事」「3 Doors Down」「U2. Beautiful Day」——
+   单数字+空格仅当后跟中文才认作序号，2 位数字才走空格规则。
+   接入处理管线 + 设置开关 + 「更多」菜单快捷操作。
+
+2. 标签颜色层次（delegate.py）
+   歌名白色加粗 > 歌手灰色 > 专辑紫色 > 年份强调色 > 格式青色 >
+   规格/时长等宽灰；置信度与鉴定结论按语义色。信息一眼分层。
+
+3. 真假无损准确率（authenticity.py）
+   截止频率由「多段取最差」改为「多段中位数」——前奏静音/结尾淡出那一段
+   高频本来就低，取最小值会把真无损误判成假；中位数只认"多数段都被砍"。
+   扩展测试：128/192/256/320/VBR 梯度，验证截止频率单调递增、320k 判「疑似」。
+   实测：真无损 22.0k / 128k 16.9k / 192k 18.9k / 256k 19.6k / 320k 20.3k。
+
+4/5. 多源 API 自动切换（net/itunes.py + netmusic.py + aggregator.py）
+   元数据 MusicBrainz→iTunes→网易云；歌词 LRCLIB→网易云；
+   封面 Cover Art Archive→远程 cover_url。任一源失败静默切换。
+   iTunes 走 Apple 公开接口；网易云为社区逆向接口，仅作兜底（已在文档注明合规边界）。
+   修复网易云 publishTime 毫秒时间戳直接切片导致的 TypeError。
+
+6. 7 套主题一键切换（theme.py 重构）
+   Palette 注册表 + build_qss() 现算 QSS；深空/春/夏/秋/冬/黑白极简/太极。
+   浅色主题自动关闭星空；统计卡/搜索框改 objectName+语义色，切换后跟随刷新。
+
+7. 8 语言界面（ui/i18n.py + 语言菜单）
+   简/繁/英/日/韩/俄/法/德；首屏核心字符串（工具栏、统计卡、筛选、判定、
+   主题名、语言名）已翻译，切换立即刷新；深层字段逐步补齐。
+
+8. 需求差距 + 补实现
+   docs/GAP.md 逐项对照；补上 P1 的「封面批量导出」（core/cover.py）。
+
+验证：52 项单测全过、界面端到端通过；主题/语言切换离屏验证无回归。

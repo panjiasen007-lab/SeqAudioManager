@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..core import clean as clean_mod
 from ..core import cue as cue_mod
 from ..core import lyrics as lyrics_mod
 from ..core import rename as rename_mod
@@ -98,6 +99,8 @@ class Processor:
             use_musicbrainz=s.use_musicbrainz,
             use_coverart=s.use_coverart,
             use_lrclib=s.use_lrclib,
+            use_itunes=s.use_itunes,
+            use_netmusic=s.use_netmusic,
         )
 
     def emit(self, kind: str, payload: object) -> None:
@@ -280,7 +283,19 @@ class Processor:
         if opts.fetch_lyrics:
             self._decide_lyrics(track, result, local_lyrics)
 
-        # ---- 7. 标签水印清理 ----
+        # ---- 7a. 去序号：标题开头的「01. / [01] / 01-」是抓轨软件留下的，
+        # 不属于歌名，清掉才能让检索词干净、重命名不带着「02.」这种尾巴
+        if s.strip_track_numbers and track.working.title:
+            new_title, changed = clean_mod.clean_title(
+                track.working.title, strip_number=True
+            )
+            if changed and new_title != track.working.title:
+                track.working.title = new_title
+                track.note(f"去序号：{'、'.join(changed)}")
+                if "title" not in track.changed_fields:
+                    track.changed_fields.append("title")
+
+        # ---- 7b. 标签水印清理 ----
         if opts.clean_watermark:
             report = watermark.clean_tags(
                 track.working,

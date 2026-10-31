@@ -33,6 +33,8 @@ class Settings:
     use_musicbrainz: bool = True
     use_coverart: bool = True
     use_lrclib: bool = True
+    use_itunes: bool = True          # iTunes Search：元数据 + 封面（Apple 公开接口）
+    use_netmusic: bool = True        # 网易云：元数据 + 歌词 + 封面（社区接口，兜底）
     use_local_lyrics: bool = True
     acoustid_key: str = ""                 # 音频指纹（P1，可留空）
     http_proxy: str = ""
@@ -63,6 +65,7 @@ class Settings:
     segment_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_SEGMENT_PATTERNS))
     custom_words: list[str] = field(default_factory=list)
     replace_watermarked_cover: bool = True
+    strip_track_numbers: bool = True       # 清洗时去除标题开头的曲目序号
 
     # ---- 重命名 ----
     rename_enabled: bool = False
@@ -74,6 +77,8 @@ class Settings:
     skip_encrypted: bool = True
 
     # ---- 界面 ----
+    theme: str = "深空"                     # 主题名（见 ui/theme.THEMES）
+    language: str = "zh_CN"                 # 界面语言（见 ui/i18n.LOCALES）
     space_background: bool = True          # 星空动态背景
     cleanup_include_suspect: bool = True   # 清理时是否包含「疑似」项
 

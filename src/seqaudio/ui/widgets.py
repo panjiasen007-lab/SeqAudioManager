@@ -54,13 +54,15 @@ class StatCard(QFrame):
         self,
         key: str,
         title: str,
-        color: str = theme.FG,
+        color_name: str = "fg",
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self.setObjectName("statCard")
         self.key = key
-        self._color = color
+        # 存「语义色名」而不是解析后的颜色：这样切主题时能跟着换
+        self.color_name = color_name
+        self._value = 0
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(70)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -74,15 +76,19 @@ class StatCard(QFrame):
 
         self.value_label = QLabel("0")
         self.value_label.setObjectName("statValue")
-        self.value_label.setStyleSheet(f"color:{color};")
 
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)
+        self.restyle()
 
     def set_value(self, value: int, suffix: str = "") -> None:
+        self._value = value
         self.value_label.setText(f"{value}{suffix}")
-        # 全零时整排彩色数字会很吵；只有真正有数据的那一项才亮起来
-        color = self._color if value else theme.FG_MUTE
+        self.restyle()
+
+    def restyle(self) -> None:
+        """按当前主题重算数字颜色。全零时转灰，避免整排彩色数字互相干扰。"""
+        color = getattr(theme, self.color_name.upper(), theme.FG) if self._value else theme.FG_MUTE
         self.value_label.setStyleSheet(f"color:{color};")
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -221,22 +227,10 @@ class SearchInput(QLineEdit):
 
     def __init__(self, placeholder: str = "搜索", parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("searchInput")
         self.setPlaceholderText(placeholder)
         self.setClearButtonEnabled(True)
         self.setFixedHeight(34)
-        self.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background: {theme.SURFACE_INPUT};
-                border: 1px solid {theme.LINE};
-                border-radius: 8px;
-                padding-left: 30px;
-                padding-right: 8px;
-                color: {theme.FG};
-            }}
-            QLineEdit:focus {{ border-color: {theme.ACCENT}; background: rgba(18,24,34,0.92); }}
-            """
-        )
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)

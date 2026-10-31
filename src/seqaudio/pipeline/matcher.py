@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 
 from ..core.model import MatchCandidate, Tags, Track
 from ..core.watermark import DEFAULT_SEGMENT_PATTERNS, DEFAULT_STRONG_PATTERNS
-from ..net import coverart, lrclib, musicbrainz
+from ..net import aggregator, lrclib
 from ..net.http import HttpClient
 
 _PUNCT = re.compile(r"[\s\-_·、,，.。!！?？'\"“”‘’()（）\[\]【】~～]+")
@@ -135,6 +135,8 @@ class Matcher:
         use_musicbrainz: bool = True,
         use_coverart: bool = True,
         use_lrclib: bool = True,
+        use_itunes: bool = True,
+        use_netmusic: bool = True,
         weights: Optional[ScoreWeights] = None,
     ):
         self.client = client
@@ -142,21 +144,24 @@ class Matcher:
         self.use_mb = use_musicbrainz
         self.use_cover = use_coverart
         self.use_lrclib = use_lrclib
+        self.use_itunes = use_itunes
+        self.use_netmusic = use_netmusic
         self.weights = weights or ScoreWeights()
 
     # ------------------------------------------------------------ 检索
 
     def query(self, title: str, artist: str, album: str, duration: Optional[float]) -> list[MatchCandidate]:
-        candidates: list[MatchCandidate] = []
-        if self.use_mb:
-            candidates.extend(
-                musicbrainz.search_recordings(self.client, title, artist, album)
-            )
-        if not candidates and artist:
-            # 歌手可能带错，放宽到只按标题检索
-            if self.use_mb:
-                candidates.extend(musicbrainz.search_recordings(self.client, title, "", album))
-        return candidates
+        # 多源接力：MusicBrainz → iTunes → 网易云，任何一个命中即停。
+        # 每个源失败都静默切换，不会因为单个源失效而让整批曲目都匹配不上。
+        return aggregator.search_metadata(
+            self.client,
+            title,
+            artist,
+            album,
+            use_mb=self.use_mb,
+            use_itunes=self.use_itunes,
+            use_netmusic=self.use_netmusic,
+        )
 
     def score(self, track: Track, candidate: MatchCandidate, album_hint: str = "") -> float:
         w = self.weights
@@ -229,8 +234,10 @@ class Matcher:
 
         if result.accepted and result.candidate and self.use_cover:
             cand = result.candidate
-            if cand.release_id and not cand.cover:
-                data, mime = coverart.cover_for_release(self.client, cand.release_id)
+            if not cand.cover:
+                data, mime = aggregator.fetch_cover(
+                    self.client, cand, use_coverart=self.use_cover, use_remote=True
+                )
                 if data:
                     cand.cover, cand.cover_mime = data, mime
 
@@ -239,8 +246,14 @@ class Matcher:
             lyr_title = (target.title if target else title)
             lyr_artist = (target.artist if target else artist)
             lyr_album = (target.album if target else album_for_query)
-            result.lyrics = lrclib.fetch_lyrics(
-                self.client, lyr_title, lyr_artist, lyr_album, track.info.duration
+            result.lyrics = aggregator.fetch_lyrics(
+                self.client,
+                lyr_title,
+                lyr_artist,
+                lyr_album,
+                track.info.duration,
+                use_lrclib=self.use_lrclib,
+                use_netmusic=self.use_netmusic,
             )
             if result.lyrics is None and artist:
                 result.lyrics = lrclib.search_lyrics(self.client, title, "", track.info.duration)

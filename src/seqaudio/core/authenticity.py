@@ -373,7 +373,7 @@ def _judge(
         if cutoff < 20500:
             reasons.append(
                 f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steepness:.0f}dB/kHz），"
-                "符合 320kbps 转码特征"
+                "符合高码率有损转码特征（256~320kbps）"
             )
             return VERDICT_SUSPECT, 0.45, reasons
         reasons.append(f"频谱平滑延伸到 {cutoff / 1000:.1f}kHz（上限 {nyquist / 1000:.1f}kHz）")
@@ -459,19 +459,36 @@ def analyze(
         result.error = "解码失败：ffmpeg 无法解析该文件"
         return result
 
-    # 多段取"最差"的一段（截止最低）作为判定依据 —— 假无损只要有一段露馅就是假
-    worst: Optional[tuple[np.ndarray, np.ndarray]] = None
-    worst_cutoff = 1e9
+    # 每段各算一个截止频率，用**中位数**做判定。
+    #
+    # 早先用「最小值」（最差的一段）判定，问题是：前奏静音 / 结尾淡出那一段
+    # 本来高频能量就低，_find_cutoff 会报出一个偏低的截止，把真无损误判成假。
+    # 中位数对这类离群段不敏感，只有当多数段都被砍了高频才判假 —— 这才是
+    # "有损转码"的真实特征（编码器对整首歌一视同仁地砍高频）。
+    cutoffs: list[float] = []
     for freqs, db in spectra:
         cutoff, _ = _find_cutoff(freqs, db)
-        if cutoff < worst_cutoff:
-            worst_cutoff = cutoff
-            worst = (freqs, db)
-    assert worst is not None
-    freqs, db = worst
+        if cutoff > 0:
+            cutoffs.append(cutoff)
+    if not cutoffs:
+        result.error = "频谱中未检测到有效信号"
+        return result
+
+    cutoff = float(np.median(cutoffs))
+    cutoff_min = float(np.min(cutoffs))
+    cutoff_max = float(np.max(cutoffs))
+
+    # 展示频谱选「截止频率最接近中位数」的那一段，而不是随便取第一段
+    chosen_index = min(range(len(spectra)), key=lambda i: abs(cutoffs[i] - cutoff))
+    freqs, db = spectra[chosen_index]
     result.spectrum = (freqs, db)
 
-    cutoff, steepness = _find_cutoff(freqs, db)
+    _, steepness = _find_cutoff(freqs, db)
+    # 各段截止差异过大：多为包含前奏/静音的正常歌曲，在理由里注明，避免用户误以为鉴定不稳定
+    spread_note = ""
+    if cutoff_max - cutoff_min > 3000:
+        spread_note = f"（各段截止 {cutoff_min / 1000:.1f}~{cutoff_max / 1000:.1f}kHz，含静音/前奏段）"
+
     is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
     if is_dsd:
         # DSD 的噪声整形能量在 40kHz 以上，20~40kHz 反而是谷
@@ -488,6 +505,8 @@ def analyze(
     result.verdict = verdict
     result.score = score
     result.reasons = reasons
+    if spread_note and verdict == VERDICT_TRUE:
+        result.reasons.append(spread_note)
     return result
 
 
