@@ -1,4 +1,27 @@
-# 音序管家 · SeqAudio Manager
+<p align="center">
+  <img src="assets/app.png" alt="SeqAudio Manager" width="110" />
+</p>
+
+<h1 align="center">音序管家 · SeqAudio Manager</h1>
+
+<p align="center">
+  <b>中文</b> · <a href="#english">English</a>
+</p>
+
+<p align="center">
+  Windows 本地音乐元数据批量处理工具 · A local batch audio metadata processor for Windows
+</p>
+
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-1.0.0-4d7cfe">
+  <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
+  <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
+</p>
+
+---
+
+# 中文
 
 Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 → 清标签水印 → 安全写标签 → 批量重命名 → 导出报表，一键跑完。
 
@@ -164,7 +187,7 @@ onefile 每次启动都要把 250MB 内容解压到临时目录，首次要 3~5 
 **安装程序**是一个用 PySide6 写的三页向导（欢迎/授权 → 选择目录 → 安装进度）：
 
 - 装到 `%LOCALAPPDATA%\Programs\SeqAudioManager`，**不需要管理员权限**；
-- 写 HKCU 卸载项，在「设置 → 应用」里能正常卸载；
+- 写 HKCU 卸载项，在「设置 → 应用」里能正常卸载；**开始菜单同时创建「卸载 音序管家」快捷方式**，双击即进入卸载流程；
 - 桌面与开始菜单快捷方式可取消；
 - 卸载由主程序 `--uninstall` 完成：先把 `data/`（配置、日志、**备份的原始音频**）
   移到 `%APPDATA%`，再删安装目录 —— 顺序反了备份就找不回来了；
@@ -229,7 +252,7 @@ Visual Studio Build Tools。
 
 针对中文曲库与无损资源的专门处理：
 
-- **简繁归一**：MusicBrainz 中文条目多为繁体（陳奕迅 / 富士山下），不归一会导致相似度偏低；
+- **简繁归一**：MusicBrainz 中文条目多为繁体（陳奕迅 / 富士山下），不归一会导致相似度偏低；检索时对中文歌手名自动降级（精确 phrase 命中为空时去掉歌手限定重查），再由繁→简归一打分；
 - **版本惩罚**：候选专辑名含「演唱会 / Live / Remix / 伴奏」等而本地曲目没有时扣分；
 - **伪专辑名过滤**：`[unknown]`、`[unknown xxx bootleg release]` 这类社区占位名不会被写进标签；
 - **目录专辑先验**：`周杰伦 -七里香 DSD DFF` 这种目录名会被解析出专辑名「七里香」，命中候选直接加分 —— 否则整批曲目会被 MusicBrainz 分散匹配到演唱会版、精选集、重发版；
@@ -303,3 +326,184 @@ GPLv3 提供源代码。
 ## 法律边界
 
 仅用于整理用户本人合法拥有或已获授权的音频。启动时强制展示免责声明并需勾选确认。歌词版权归原词曲权利人，本软件不存储、不分发歌词内容。
+
+---
+
+<a name="english"></a>
+# English
+
+A Windows local batch audio metadata processor. Batch import → online completion → tag watermark cleanup → safe tag writing → batch rename → report export, all in one pass.
+
+Built for local music collectors, **lossless-first**: FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF are all supported. Only the tag blocks are modified — audio is never re-encoded.
+
+Advanced capabilities:
+
+- **Fake-lossless detection** — spectrum analysis tells whether a "lossless" file is genuine or a disguised MP3 transcode (with dedicated DSD criteria);
+- **One-click cleanup** — suspicious files go to the Recycle Bin or the app's quarantine (recoverable), with a spectrum chart you can verify yourself;
+- **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music, automatic failover);
+- **Starfield dynamic background** — the UI drifts through space, switching star regions every 24 s (can be disabled to save power).
+
+> License: **GNU General Public License v3.0**. The bundled fonts Noto Sans SC / JetBrains Mono are SIL OFL 1.1.
+
+---
+
+## Screenshots
+
+Main window (1080×720, the usable width of a 1366 laptop):
+
+![Main window](docs/screenshot.png)
+
+Fake-lossless cleanup — goes to the Recycle Bin by default; permanent deletion requires an extra confirmation:
+
+![Cleanup](docs/screenshot-cleanup.png)
+
+About & open-source license (full GPLv3 text embedded, readable offline):
+
+![About](docs/screenshot-about.png)
+
+---
+
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Language | Python 3.10+ | Maturest audio-tag ecosystem, fast iteration |
+| Tag engine | **mutagen** | The only mature library covering FLAC/APE/WV/TTA/DSF/DFF/MP4/ID3 at once; `save()` rewrites only the tag block, preserving lossless audio |
+| UI | **PySide6 (Qt 6)** | Officially maintained; stable HiDPI behavior at 125%/150% scaling on Win10/11; LGPL, no burden for distribution |
+| Network | stdlib `urllib` | Target APIs are simple GETs, no HTTP/2 needed; fewer deps = fewer DLL conflicts and a smaller bundle |
+| Spectrum | **numpy** + bundled **ffmpeg** | Fake-lossless detection decodes audio then runs FFT; ffmpeg is the only decoder covering DSD/APE/WV/TTA, bundled for out-of-the-box use |
+| Fonts | **Noto Sans SC** + **JetBrains Mono** | Both SIL OFL 1.1 — redistributable and commercially usable; system fonts like Microsoft YaHei may not be redistributed |
+| Compression | **py7zr** | Pure-Python 7z, build-time only, no external 7-Zip |
+| Packaging | **PyInstaller** + self-written Qt installer | Zero-compile dependency; no Inno/NSIS on this machine, so the wizard is written directly in PySide6 |
+
+Rejected options: C# + TagLib# (incomplete DSD/TTA/WV, almost no DFF), Rust + Tauri + lofty (DFF still hand-written, too slow), C++ + Qt (high maintenance cost).
+
+---
+
+## Development
+
+```bash
+pip install -r requirements.txt
+python run.py
+```
+
+Run the core self-tests (no UI):
+
+```bash
+python tests/test_core.py
+```
+
+Generate sample audio (pure bytes, no ffmpeg needed):
+
+```bash
+python tests/make_samples.py
+```
+
+## Packaging: installer + portable
+
+```bash
+pip install pyinstaller py7zr
+
+python build.py                  # build both artifacts (default)
+python build.py --target portable   # portable only
+python build.py --target installer  # installer only (reuses the existing .7z)
+python build.py --target onefile    # single EXE, quick self-test only
+python build.py --debug             # keep a console window for debugging
+```
+
+Artifacts:
+
+```
+dist/音序管家-v1.0.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.0.0-x86-x64-Setup.exe     installer (~90 MB)
+```
+
+The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
+
+The **installer** is a three-page wizard (welcome/license → choose directory → progress) written in PySide6:
+
+- Installs to `%LOCALAPPDATA%\Programs\SeqAudioManager`, **no admin rights required**;
+- Writes an HKCU uninstall entry (visible in Settings → Apps), and also creates an **"Uninstall SeqAudio Manager" shortcut in the Start menu** — double-click it to start uninstalling;
+- Desktop and Start-menu shortcuts are optional;
+- Uninstall runs through the main program's `--uninstall`: it moves `data/` (config, logs, **backed-up original audio**) to `%APPDATA%` first, then removes the install directory — reversing the order would lose the backups;
+- The installer and the portable edition share the same 7z payload — compress once, use twice.
+
+See `installer/installer.py` for the installer and `src/seqaudio/core/uninstall.py` for uninstall.
+
+---
+
+## Fake-lossless detection
+
+Targets two common scams: MP3 transcodes disguised as lossless, and 44.1 kHz upsampled as "hi-res".
+
+Lossy encoding always cuts the high frequencies, leaving a cliff on the spectrum: 128 kbps cuts at 16 kHz, 320 kbps at 20 kHz, while genuine CD lossless extends smoothly to 22.05 kHz. It decodes 2 s at 4 time points, runs FFT, then scans backward from Nyquist to find where the energy drops below a threshold — combined with **drop steepness** and **effective bit depth**.
+
+| Verdict | Meaning |
+|---|---|
+| Genuine lossless | Spectrum extends smoothly to near Nyquist |
+| Suspect fake | Sharp cutoff near 20 kHz (320 kbps transcode) |
+| Fake | Cutoff at 16–19 kHz (128/192 kbps transcode) |
+| Suspect upsample | High sample rate but bandwidth utilization under 55% |
+| Genuine DSD / suspect fake DSD | See below |
+
+**DSD criteria are completely different from PCM**: genuine DSD shapes quantization noise into the ultrasonic band, reaching −14 dB above 40 kHz (measured), while 20–40 kHz is actually a −60 dB "valley". So DSD only looks above 40 kHz; judging near 20 kHz would flag all genuine DSD as fake.
+
+**Verified samples** (same music):
+
+```
+Genuine WAV 44.1k   → genuine lossless   cutoff 21.7 kHz / ceiling 22.1 kHz
+128 kbps transcode  → fake               cutoff 16.1 kHz
+320 kbps transcode  → suspect fake       cutoff 20.0 kHz (steepness 6 dB/kHz)
+44.1k → 96k upsample→ suspect upsample   cutoff 23.3 kHz / ceiling 48.0 kHz (utilization 49%)
+Genuine DSD64 master→ genuine DSD         −14 dB above 40 kHz
+```
+
+About 0.3–1 s per track (4 parallel decodes), ~5 minutes for a thousand tracks.
+
+## Safety design (most critical for lossless)
+
+Three layers of protection — no layer failure leaves a corrupted file:
+
+1. **Backup**: the original file is copied to `backup/` first, preserving drive letter and directory structure;
+2. **Shadow copy**: normal files are copied to `*.seqaudio.tmp` and tags are written only on the copy; large files (≥2 GB) switch to "in-place write + auto-restore from backup on error" to avoid filling the disk with a second copy;
+3. **Post-write verification**: the copy is reopened to compare duration / sample rate / channels, confirming the audio stream wasn't truncated, before `os.replace` atomically swaps it in.
+
+Any exception → delete the copy → the original file is untouched.
+
+## Match accuracy
+
+Confidence = source relevance 34% + title similarity 28% + artist 20% + album 10% + duration 8%. Below 62% nothing is auto-written — it goes to "needs manual review".
+
+Dedicated handling for Chinese libraries and lossless resources:
+
+- **Simplified/traditional normalization**: MusicBrainz Chinese entries are mostly traditional (陳奕迅 / 富士山下); without normalization similarity scores drop. For Chinese artist names the query degrades automatically (drop the artist constraint when the exact phrase returns nothing), then scores via traditional→simplified normalization;
+- **Version penalty**: candidates whose album contains "live / remix / 伴奏" etc. while the local track doesn't are penalized;
+- **Placeholder album filtering**: `[unknown]`, `[unknown xxx bootleg release]` and similar community placeholders are never written into tags;
+- **Folder-album prior**: a folder like `周杰伦 -七里香 DSD DFF` is parsed to album "七里香", giving a direct bonus to matching candidates — otherwise MusicBrainz scatters a batch across live/compilation/reissue versions;
+- **Album-consistency convergence**: tracks in the same directory vote to unify album name and year before writing, avoiding "one album, ten years";
+- **Filename parsing**: `Artist - 02.Title` is split into artist / track number / title instead of merging the track number into the title and hurting search accuracy.
+
+## Network robustness
+
+- MusicBrainz strictly rate-limited at 1.1 s/req (official requirement), LRCLIB 1.2 s, others per-host;
+- 429 / 5xx exponential backoff retry, 404 fails fast without wasting quota;
+- **Circuit breaker**: a source that fails 3 times in a row cools down for 180 s (cover source: 2 times / 300 s), so a 1000-track batch isn't dragged to hours by one dead source;
+- Results cached on disk (default 30 days) so repeated tracks don't re-request.
+
+---
+
+## Known limitations
+
+- DFF (DSDIFF) tag writing appends an ID3 chunk via `tags.save()` (mutagen just doesn't expose `save()` on its `DSDIFF` class). Measured: a 142 MB master grows only ~1.2 KB, the DSD audio block is byte-for-byte untouched, and the declared FRM8 length always matches the actual file size;
+- GBK tags from old Chinese players: ID3 has no GBK standard; compatibility mode uses v2.3 + UTF-16 (the industry-standard choice for best compatibility);
+- Encrypted formats (ncm/qmc/kgm) are not decrypted — flagged and skipped on import.
+
+## License & acknowledgements
+
+Released under the **GNU General Public License v3.0** (`GPL-3.0-or-later`); see `LICENSE`. You may freely use, modify and redistribute; if you distribute a modified version you must provide the source under GPLv3 as well.
+
+Third-party components and font licenses are in `THIRD-PARTY.md`; the full font license texts are under `assets/fonts/`. The complete GPLv3 text is also available offline via About → Open-source license.
+
+## Legal boundary
+
+Intended only for organizing audio that the user legally owns or is authorized to use. A disclaimer is shown on first launch and must be accepted. Lyrics copyright belongs to their authors; this software neither stores nor redistributes lyrics.
