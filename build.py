@@ -29,7 +29,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-ENTRY = ROOT / "src" / "seqaudio" / "__main__.py"
+SRC = ROOT / "src"
+ENTRY = SRC / "seqaudio" / "__main__.py"
 ICON = ROOT / "assets" / "app.ico"
 OUTPUT_NAME = "音序管家"
 
@@ -62,14 +63,17 @@ def build(debug: bool = False, onedir: bool = False, clean: bool = True) -> int:
         "--standalone",
         "--assume-yes-for-downloads",
         "--enable-plugin=pyside6",
+        # src 布局：用 -m 包模式编译，并把 src 加进搜索路径，否则报
+        # "failed to locate package 'seqaudio'"
+        "--python-flag=-m",
         "--include-package=seqaudio",
-        "--include-data-dir=assets=assets",
+        f"--include-data-dir={ROOT / 'assets'}=assets",
         "--nofollow-import-to=tkinter",
         "--nofollow-import-to=unittest",
         "--nofollow-import-to=pydoc",
         "--remove-output",
         f"--output-dir={out_dir}",
-        f"--output-filename={OUTPUT_NAME}.exe",
+        f"--output-filename={OUTPUT_NAME}",
         "--company-name=SeqAudio",
         "--product-name=音序管家",
         "--file-version=0.1.0.0",
@@ -79,7 +83,8 @@ def build(debug: bool = False, onedir: bool = False, clean: bool = True) -> int:
 
     if not onedir:
         args.append("--onefile")
-        args.append("--windows-temp-dir-override={CACHE_DIR}/seqaudio")
+        # 解包到用户缓存目录，避免每次运行都解压到随机临时目录
+        args.append("--onefile-tempdir-spec={CACHE_DIR}/SeqAudioManager/{VERSION}")
 
     args.append("--windows-console-mode=force" if debug else "--windows-console-mode=disable")
 
@@ -88,12 +93,14 @@ def build(debug: bool = False, onedir: bool = False, clean: bool = True) -> int:
     else:
         print("提示：未找到 assets/app.ico，将使用默认图标（可先运行 tools/make_icon.py 生成）")
 
-    args.append(str(ENTRY))
+    # 包模式：编译入口为 seqaudio/__main__.py
+    args.append("seqaudio")
 
     env = dict(os.environ)
+    env["PYTHONPATH"] = str(SRC) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     print("执行：", " ".join(args))
-    result = subprocess.run(args, cwd=str(ROOT), env=env)
+    result = subprocess.run(args, cwd=str(SRC), env=env)
     if result.returncode != 0:
         print("打包失败，返回码：", result.returncode)
         return result.returncode

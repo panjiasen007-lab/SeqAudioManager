@@ -361,6 +361,13 @@ class Processor:
         success, failed = rename_mod.execute_plan(plan)
         for item in plan.items:
             if item.changed and item.ok:
+                # 同名 .lrc 必须跟着音频一起改名，否则歌词就“掉队”了
+                old_lrc = lyrics_mod.sidecar_path(item.old_path)
+                if old_lrc.exists():
+                    try:
+                        old_lrc.rename(lyrics_mod.sidecar_path(item.new_path))
+                    except OSError as exc:
+                        item.track.note(f"歌词文件改名失败：{exc}")
                 item.track.note(f"已重命名 -> {item.new_path.name}")
             elif not item.ok:
                 item.track.note(f"未重命名：{item.reason}")

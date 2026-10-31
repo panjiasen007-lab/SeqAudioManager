@@ -48,6 +48,11 @@ class TrackTableModel(QAbstractTableModel):
     def __init__(self, tracks: Optional[list[Track]] = None, parent=None):
         super().__init__(parent)
         self._tracks: list[Track] = tracks or []
+        self._row_of: dict[int, int] = self._build_index()
+
+    def _build_index(self) -> dict[int, int]:
+        """id(track) -> 行号。上千首时避免每次刷新都做 O(n) 的 list.index 扫描。"""
+        return {id(t): i for i, t in enumerate(self._tracks)}
 
     # ---- Qt 接口 ----
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
@@ -129,6 +134,7 @@ class TrackTableModel(QAbstractTableModel):
     def set_tracks(self, tracks: list[Track]) -> None:
         self.beginResetModel()
         self._tracks = tracks
+        self._row_of = self._build_index()
         self.endResetModel()
 
     def add_tracks(self, tracks: list[Track]) -> int:
@@ -136,6 +142,7 @@ class TrackTableModel(QAbstractTableModel):
             return 0
         self.beginInsertRows(QModelIndex(), len(self._tracks), len(self._tracks) + len(tracks) - 1)
         self._tracks.extend(tracks)
+        self._row_of = self._build_index()
         self.endInsertRows()
         return len(tracks)
 
@@ -148,9 +155,8 @@ class TrackTableModel(QAbstractTableModel):
         return list(self._tracks)
 
     def refresh_row(self, track: Track) -> None:
-        try:
-            row = self._tracks.index(track)
-        except ValueError:
+        row = self._row_of.get(id(track))
+        if row is None:
             return
         self.dataChanged.emit(self.index(row, 0), self.index(row, len(COLUMNS) - 1))
 
@@ -167,8 +173,9 @@ class TrackTableModel(QAbstractTableModel):
             if 0 <= row < len(self._tracks):
                 self.beginRemoveRows(QModelIndex(), row, row)
                 self._tracks.pop(row)
-                self.endRemoveRows()
                 removed += 1
+        if removed:
+            self._row_of = self._build_index()
         return removed
 
     def clear(self) -> None:

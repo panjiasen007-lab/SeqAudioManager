@@ -295,9 +295,14 @@ class CueSheet:
 # ---------------------------------------------------------------- 曲目条目
 
 
-@dataclass
+@dataclass(eq=False)
 class Track:
-    """列表中的一条曲目（一个音频文件）。"""
+    """列表中的一条曲目（一个音频文件）。
+
+    ``eq=False``：刻意使用**身份比较**。dataclass 默认的字段级 ``==`` 会让
+    两个内容相同但不同文件的 Track 互相相等，导致 ``list.index(track)``
+    定位到错误的行 —— 深层比较上百个字段在大曲库下还会明显拖慢刷新。
+    """
 
     path: Path
     info: AudioInfo = field(default_factory=AudioInfo)
