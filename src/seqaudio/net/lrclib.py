@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 BASE = "https://lrclib.net/api"
 MIN_INTERVAL = 1.2
 
+#: 精确匹配命中的结果若与本地时长偏差超过该值，回退搜索比较（同名不同版本）
+_DURATION_TOLERANCE = 8.0
+
 #: LRCLIB 高峰期常返回 503（临时过载，通常几十秒自愈）。
 #: 阈值放得比较宽：过早熔断会让整批曲目一首歌词都拿不到，
 #: 真正需要"快速放弃"的是封面这种可选数据。
@@ -88,6 +91,11 @@ def fetch_lyrics(
         result = _to_result(payload if isinstance(payload, dict) else {})
         if result:
             BREAKER.success()
+            # 精确匹配命中但时长偏差过大时，回退搜索比较，选时长更接近的结果
+            if _duration_delta(result, duration) > _DURATION_TOLERANCE:
+                alt = search_lyrics(client, title, artist, duration)
+                if alt and _duration_delta(alt, duration) < _duration_delta(result, duration):
+                    return alt
             return _release_duration_check(result, duration)
         BREAKER.success()
     except NetworkError as exc:
@@ -132,10 +140,17 @@ def search_lyrics(
     return _release_duration_check(best, duration)
 
 
+def _duration_delta(result: LyricsResult, expected: Optional[float]) -> float:
+    """候选与期望时长的绝对偏差；任一未知时返回极大值表示不可比。"""
+    if expected and result.duration:
+        return abs(result.duration - expected)
+    return 99.0
+
+
 def _release_duration_check(result: LyricsResult, expected: Optional[float]) -> LyricsResult:
     """时长偏差过大时在来源标记中提示，交由上层决定是否采信。"""
     if expected and result.duration:
         delta = abs(result.duration - expected)
-        if delta > 8:
+        if delta > _DURATION_TOLERANCE:
             result.source = f"LRCLIB(时长差 {delta:.0f}s)"
     return result

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Iterable, Optional
 
@@ -150,7 +150,7 @@ class Matcher:
         s_title = similarity(probe_title, candidate.title)
         s_artist = similarity(probe_artist, candidate.artist) if probe_artist else 0.6
         s_album = similarity(probe_album, candidate.album) if probe_album else 0.6
-        s_dur = duration_score(track.info.duration, None)
+        s_dur = duration_score(track.info.duration, candidate.duration)
         total = (
             w.source * max(candidate.raw_score, 0.5)
             + w.title * s_title
@@ -218,6 +218,19 @@ class Matcher:
                 )
                 if data:
                     cand.cover, cand.cover_mime = data, mime
+                else:
+                    # 候选没有可用的封面来源（无 release_id、无 cover_url）时，
+                    # 用「专辑名 + 歌手」独立再搜一张兜底，避免单曲封面留空。
+                    data, mime, _src = aggregator.fetch_album_cover(
+                        self.client,
+                        title,
+                        artist,
+                        album_for_query,
+                        use_itunes=self.use_itunes,
+                        use_netmusic=self.use_netmusic,
+                    )
+                    if data:
+                        cand.cover, cand.cover_mime = data, mime
 
         if need_lyrics and self.use_lrclib:
             target = result.candidate if result.accepted else None
@@ -236,18 +249,6 @@ class Matcher:
             if result.lyrics is None and artist:
                 result.lyrics = lrclib.search_lyrics(self.client, title, "", track.info.duration)
         return result
-
-
-def merge_candidates(primary: MatchCandidate, secondary: MatchCandidate) -> MatchCandidate:
-    """两源结果互补：主源缺失的字段用次源补齐（多源聚合）。"""
-    merged = replace(primary)
-    for field_name in ("album", "date", "genre", "track", "disc", "albumartist", "cover"):
-        if not getattr(merged, field_name) and getattr(secondary, field_name):
-            setattr(merged, field_name, getattr(secondary, field_name))
-    if secondary.source not in merged.source:
-        merged.source = f"{merged.source}+{secondary.source}"
-    merged.confidence = max(primary.confidence, secondary.confidence)
-    return merged
 
 
 def candidates_for_display(candidates: list[MatchCandidate], limit: int = 8) -> list[tuple[str, str, float]]:

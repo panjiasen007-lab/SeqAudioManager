@@ -31,6 +31,9 @@ log = logging.getLogger(__name__)
 APP_UA = "SeqAudioManager/0.1 ( https://github.com/seqaudio )"
 DEFAULT_TIMEOUT = 12.0
 
+#: 网易云图片 CDN 域名后缀，命中则补 Referer 防盗链头（否则部分封面 403）
+_NETMUSIC_IMAGE_HOST_SUFFIX = "music.126.net"
+
 
 class NetworkError(Exception):
     """统一的网络异常，携带可读原因，供 UI 展示。"""
@@ -197,6 +200,7 @@ class HttpClient:
         accept: str = "application/json",
         attempts: Optional[int] = None,
         timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
     ) -> tuple[bytes, str]:
         if self.offline:
             raise NetworkError("离线模式已开启")
@@ -208,15 +212,19 @@ class HttpClient:
         total_attempts = max(1, attempts if attempts is not None else self.retry.attempts)
         use_timeout = timeout if timeout is not None else self.timeout
 
+        base_headers = {
+            "User-Agent": self.user_agent,
+            "Accept": accept,
+            "Accept-Encoding": "gzip",
+        }
+        if headers:
+            base_headers.update(headers)
+
         with self.limiter.gate():
             for attempt in range(1, total_attempts + 1):
                 request = urllib.request.Request(
                     url,
-                    headers={
-                        "User-Agent": self.user_agent,
-                        "Accept": accept,
-                        "Accept-Encoding": "gzip",
-                    },
+                    headers=base_headers,
                 )
                 try:
                     with self._opener.open(request, timeout=use_timeout) as response:
@@ -297,8 +305,15 @@ class HttpClient:
         不能让一张取不到的图把整批任务拖死。
         """
         self.limiter.wait(urllib.parse.urlparse(url).netloc, min_interval)
+        headers: Optional[dict[str, str]] = None
+        if urllib.parse.urlparse(url).netloc.lower().endswith(_NETMUSIC_IMAGE_HOST_SUFFIX):
+            headers = {"Referer": "https://music.163.com/"}
         raw, _ = self._request(
-            url, accept="image/*", attempts=attempts, timeout=min(self.timeout, timeout)
+            url,
+            accept="image/*",
+            attempts=attempts,
+            timeout=min(self.timeout, timeout),
+            headers=headers,
         )
         if len(raw) > max_size:
             log.warning("封面体积超限已丢弃：%s bytes", len(raw))

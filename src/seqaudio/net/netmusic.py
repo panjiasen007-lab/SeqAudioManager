@@ -67,6 +67,7 @@ def _to_candidate(item: dict[str, Any], rank: int) -> Optional[MatchCandidate]:
         track="",
         cover_url=cover_url,
         recording_id=str(item.get("id") or ""),
+        duration=float(duration_ms) / 1000.0 if duration_ms else 0.0,
         raw_score=max(0.0, 0.85 - rank * 0.05),
         note=f"{int(duration_ms / 1000)}s" if duration_ms else "",
     )

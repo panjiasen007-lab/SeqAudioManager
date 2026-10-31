@@ -113,7 +113,13 @@ def start_menu_dir() -> Path:
     return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
 
 
-def create_shortcut(link: Path, target: Path, workdir: Path, icon: Optional[Path] = None) -> bool:
+def create_shortcut(
+    link: Path,
+    target: Path,
+    workdir: Path,
+    icon: Optional[Path] = None,
+    arguments: str = "",
+) -> bool:
     """用 WScript.Shell 建 .lnk。
 
     没有 pythoncom/win32com，也不想为了一个快捷方式去装 pywin32，
@@ -121,10 +127,11 @@ def create_shortcut(link: Path, target: Path, workdir: Path, icon: Optional[Path
     """
     link.parent.mkdir(parents=True, exist_ok=True)
     icon_part = f"$s.IconLocation='{icon or target},0';"
+    args_part = f"$s.Arguments='{arguments}';" if arguments else ""
     script = (
         f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
         f"$s.TargetPath='{target}';$s.WorkingDirectory='{workdir}';"
-        f"{icon_part}$s.Save()"
+        f"{args_part}{icon_part}$s.Save()"
     )
     try:
         result = subprocess.run(
@@ -541,6 +548,14 @@ class Installer(QWidget):
                 create_shortcut(desktop_dir() / f"{APP_NAME}.lnk", exe, self.target, exe)
             if self.startmenu_check.isChecked():
                 create_shortcut(start_menu_dir() / f"{APP_NAME}.lnk", exe, self.target, exe)
+                # 卸载入口：开始菜单里放一个「卸载」快捷方式，指向 --uninstall
+                create_shortcut(
+                    start_menu_dir() / f"卸载 {APP_NAME}.lnk",
+                    exe,
+                    self.target,
+                    exe,
+                    arguments="--uninstall",
+                )
             size_kb = sum(p.stat().st_size for p in self.target.rglob("*") if p.is_file()) // 1024
             write_registry(self.target, size_kb)
         except OSError as exc:
@@ -609,6 +624,13 @@ def silent_install(target: Path, *, shortcuts: bool = True) -> int:
                 )
                 report["startmenu_lnk"] = create_shortcut(
                     start_menu_dir() / f"{APP_NAME}.lnk", exe, target, exe
+                )
+                report["uninstall_lnk"] = create_shortcut(
+                    start_menu_dir() / f"卸载 {APP_NAME}.lnk",
+                    exe,
+                    target,
+                    exe,
+                    arguments="--uninstall",
                 )
             size_kb = sum(p.stat().st_size for p in target.rglob("*") if p.is_file()) // 1024
             report["size_mb"] = round(size_kb / 1024, 1)

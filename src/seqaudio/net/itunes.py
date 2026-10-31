@@ -51,6 +51,7 @@ def _to_candidate(item: dict[str, Any], rank: int) -> Optional[MatchCandidate]:
         disc=str(item.get("discNumber") or "") if item.get("discNumber") else "",
         cover_url=_upgrade_artwork(item.get("artworkUrl100") or ""),
         recording_id=str(item.get("trackId") or ""),
+        duration=float(duration_ms) / 1000.0 if duration_ms else 0.0,
         # iTunes 无相关度分，用返回顺序近似：越靠前越相关
         raw_score=max(0.0, 0.9 - rank * 0.06),
         note=f"{int(duration_ms / 1000)}s" if duration_ms else "",

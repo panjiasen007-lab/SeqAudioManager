@@ -849,6 +849,12 @@ class TestUninstallScript(unittest.TestCase):
         self.assertNotIn("Copy-Item", script)
         self.assertIn("Uninstall\\SeqAudioManager", script)
 
+    def test_script_removes_uninstall_shortcut(self) -> None:
+        install = Path(r"C:\Temp\SeqAudio")
+        script = uninstall.build_uninstall_script(install, keep_data=False)
+        # 安装器会在开始菜单创建「卸载」快捷方式，卸载时必须一并删除
+        self.assertIn("卸载 音序管家.lnk", script)
+
 
 class TestFolderCover(unittest.TestCase):
     """每文件夹至少一张 cover：本地识别/写入 + 离线编排（不依赖网络）。"""
@@ -911,6 +917,208 @@ class TestFolderCover(unittest.TestCase):
         self.assertEqual((fb / "cover.jpg").read_bytes(), b"EXIST")  # 未被覆盖
         self.assertEqual(summary.created, 1)
         self.assertEqual(summary.existing, 1)
+
+
+class TestMatcherDurationScoring(unittest.TestCase):
+    """本次修复：时长维度真正参与评分，不再恒为中性分。"""
+
+    def test_duration_score_uses_actual(self) -> None:
+        from seqaudio.pipeline.matcher import duration_score
+
+        self.assertGreater(duration_score(200.0, 201.0), duration_score(200.0, 230.0))
+        self.assertEqual(duration_score(200.0, 0.0), 0.5)  # 未知时长仍是中性分
+        self.assertEqual(duration_score(0.0, 200.0), 0.5)
+
+    def test_score_prefers_duration_match(self) -> None:
+        from seqaudio.core.model import MatchCandidate
+        from seqaudio.net.http import HttpClient
+        from seqaudio.pipeline.matcher import Matcher
+
+        track = Track(path=Path("x.flac"))
+        track.info.duration = 200.0
+        track.working = Tags(title="测试歌", artist="张三")
+
+        matcher = Matcher(HttpClient(offline=True))
+        good = MatchCandidate(source="x", title="测试歌", artist="张三", duration=200.0, raw_score=1.0)
+        bad = MatchCandidate(source="x", title="测试歌", artist="张三", duration=260.0, raw_score=1.0)
+
+        self.assertGreater(matcher.score(track, good), matcher.score(track, bad))
+
+
+class TestMusicBrainzFallback(unittest.TestCase):
+    """本次修复：中文歌手名与繁体库不匹配时，去掉 artist 限定自动重查。"""
+
+    def test_chinese_artist_fallback(self) -> None:
+        from seqaudio.net import musicbrainz
+
+        calls: list[str] = []
+
+        class FakeClient:
+            def get_json(self, url, **kw):
+                calls.append(kw.get("params", {}).get("query", ""))
+                if len(calls) == 1:
+                    return {"recordings": []}  # 带 artist 的精确查询 → 空
+                return {"recordings": [self._recording()]}
+
+            @staticmethod
+            def _recording():
+                return {
+                    "id": "rec-1", "title": "七里香", "score": 100,
+                    "artist-credit": [{"name": "周杰倫", "joinphrase": ""}],
+                    "releases": [{
+                        "id": "rel-1", "title": "七里香", "date": "2004-08-03",
+                        "media": [{"position": 1, "track": [
+                            {"id": "rec-1", "number": "2", "title": "七里香"},
+                        ]}],
+                        "release-group": {"primary-type": "Album", "secondary-types": []},
+                    }],
+                }
+
+        cands = musicbrainz.search_recordings(FakeClient(), "七里香", "周杰伦", "")
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0].title, "七里香")
+        self.assertEqual(len(calls), 2)           # 第一次空，触发降级重查
+        self.assertIn("artist:", calls[0])
+        self.assertNotIn("artist:", calls[1])
+
+    def test_english_artist_no_fallback(self) -> None:
+        from seqaudio.net import musicbrainz
+
+        calls: list[str] = []
+
+        class FakeClient:
+            def get_json(self, url, **kw):
+                calls.append(kw.get("params", {}).get("query", ""))
+                return {"recordings": []}
+
+        cands = musicbrainz.search_recordings(FakeClient(), "Hello", "Adele", "")
+        self.assertEqual(cands, [])
+        self.assertEqual(len(calls), 1)           # 英文歌手名不做降级重查
+
+
+class TestLyricsDurationCheck(unittest.TestCase):
+    """本次修复：LRCLIB 精确匹配命中但时长偏差过大时回退搜索比较。"""
+
+    def test_duration_delta(self) -> None:
+        from seqaudio.net import lrclib
+
+        self.assertEqual(lrclib._duration_delta(lrclib.LyricsResult(duration=210.0), 200.0), 10.0)
+        self.assertEqual(lrclib._duration_delta(lrclib.LyricsResult(duration=0.0), 200.0), 99.0)
+        self.assertEqual(lrclib._duration_delta(lrclib.LyricsResult(duration=200.0), None), 99.0)
+
+    def test_fetch_prefers_closer_duration(self) -> None:
+        from seqaudio.net import lrclib
+
+        class FakeClient:
+            def get_json(self, url, **kw):
+                if url.endswith("/get"):
+                    return {"trackName": "七里香", "artistName": "周杰伦",
+                            "syncedLyrics": "[00:01]远", "duration": 230.0}
+                return [{"trackName": "七里香", "artistName": "周杰伦",
+                         "syncedLyrics": "[00:01]近", "duration": 201.0}]
+
+        result = lrclib.fetch_lyrics(FakeClient(), "七里香", "周杰伦", "", 200.0)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result.duration, 201.0, places=1)  # 选时长更接近的搜索结果
+
+
+class TestHttpReferer(unittest.TestCase):
+    """本次修复：网易云图片 CDN 自动补 Referer 防盗链头。"""
+
+    def test_referer_added_for_netmusic(self) -> None:
+        from unittest import mock
+        from seqaudio.net.http import HttpClient
+
+        client = HttpClient()
+        captured: dict = {}
+
+        def fake_request(url, **kw):
+            captured["headers"] = kw.get("headers")
+            return b"\xff\xd8\xff" + b"x" * 200, "image/jpeg"
+
+        with mock.patch.object(client, "_request", side_effect=fake_request):
+            data = client.get_bytes("https://p1.music.126.net/cover.jpg")
+
+        self.assertIsNotNone(data)
+        self.assertEqual(captured["headers"]["Referer"], "https://music.163.com/")
+
+    def test_no_referer_for_other_host(self) -> None:
+        from unittest import mock
+        from seqaudio.net.http import HttpClient
+
+        client = HttpClient()
+        captured: dict = {}
+
+        def fake_request(url, **kw):
+            captured["headers"] = kw.get("headers")
+            return b"\xff\xd8\xff" + b"x" * 200, "image/jpeg"
+
+        with mock.patch.object(client, "_request", side_effect=fake_request):
+            client.get_bytes("https://is1-ssl.mzstatic.com/image/x.jpg")
+
+        self.assertIsNone(captured["headers"])  # iTunes 图片不加 Referer
+
+
+class TestLocalLyricsSkipNetwork(unittest.TestCase):
+    """本次修复：本地已有歌词时不再触发联网抓取。"""
+
+    def test_local_lyrics_skips_network(self) -> None:
+        from seqaudio.core.config import Settings
+        from seqaudio.pipeline.matcher import MatchResult
+        from seqaudio.pipeline.processor import BatchOptions, Processor
+
+        tmp = Path(tempfile.mkdtemp(prefix="seq_lyric_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "a.flac").write_bytes(b"")
+
+        class FakeMatcher:
+            def __init__(self):
+                self.need_lyrics_called = None
+
+            def match(self, track, need_lyrics=True, album_hint=""):
+                self.need_lyrics_called = need_lyrics
+                return MatchResult()
+
+        track = Track(path=tmp / "a.flac")
+        track.info.duration = 200.0
+        track.original = Tags(title="测试", artist="张三", lyrics="[00:01]本地歌词")
+
+        settings = Settings()
+        settings.use_local_lyrics = True
+        fake = FakeMatcher()
+        opts = BatchOptions(match_online=True, fetch_lyrics=True, write_tags=False)
+        Processor(settings).prepare_one(track, opts, matcher=fake)
+
+        self.assertIs(fake.need_lyrics_called, False)
+
+    def test_no_local_lyrics_keeps_network(self) -> None:
+        from seqaudio.core.config import Settings
+        from seqaudio.pipeline.matcher import MatchResult
+        from seqaudio.pipeline.processor import BatchOptions, Processor
+
+        tmp = Path(tempfile.mkdtemp(prefix="seq_lyric2_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "b.flac").write_bytes(b"")
+
+        class FakeMatcher:
+            def __init__(self):
+                self.need_lyrics_called = None
+
+            def match(self, track, need_lyrics=True, album_hint=""):
+                self.need_lyrics_called = need_lyrics
+                return MatchResult()
+
+        track = Track(path=tmp / "b.flac")
+        track.info.duration = 200.0
+        track.original = Tags(title="测试", artist="张三")
+
+        settings = Settings()
+        settings.use_local_lyrics = True
+        fake = FakeMatcher()
+        opts = BatchOptions(match_online=True, fetch_lyrics=True, write_tags=False)
+        Processor(settings).prepare_one(track, opts, matcher=fake)
+
+        self.assertIs(fake.need_lyrics_called, True)
 
 
 if __name__ == "__main__":

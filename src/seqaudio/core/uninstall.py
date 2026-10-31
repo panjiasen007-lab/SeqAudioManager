@@ -52,6 +52,12 @@ def start_menu_shortcut() -> Path:
     return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "音序管家.lnk"
 
 
+def uninstall_shortcut() -> Path:
+    """开始菜单里的「卸载」快捷方式（安装器创建，卸载时一并删除）。"""
+    base = os.environ.get("APPDATA", "")
+    return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "卸载 音序管家.lnk"
+
+
 def build_uninstall_script(install_dir: Path, *, keep_data: bool) -> str:
     """生成卸载用的 PowerShell 脚本。"""
     install = str(install_dir).replace("'", "''")
@@ -75,6 +81,7 @@ def build_uninstall_script(install_dir: Path, *, keep_data: bool) -> str:
         f"Remove-Item -LiteralPath 'HKCU:\\{UNINSTALL_KEY}' -Recurse -Force",
         f"Remove-Item -LiteralPath '{desktop_shortcut()}' -Force",
         f"Remove-Item -LiteralPath '{start_menu_shortcut()}' -Force",
+        f"Remove-Item -LiteralPath '{uninstall_shortcut()}' -Force",
     ]
     return "\n".join(lines)
 

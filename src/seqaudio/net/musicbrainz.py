@@ -69,6 +69,10 @@ def _escape(value: str) -> str:
     return _LUCENE_SPECIAL.sub(r"\\\1", value.replace('"', ""))
 
 
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
 def build_query(title: str, artist: str = "", album: str = "") -> str:
     parts = []
     if title:
@@ -88,27 +92,39 @@ def search_recordings(
     *,
     limit: int = 6,
 ) -> list[MatchCandidate]:
-    """按标题/歌手检索录音，返回候选列表（已按源分数降序）。"""
+    """按标题/歌手检索录音，返回候选列表（已按源分数降序）。
+
+    中文歌手名（简体）与 MusicBrainz 繁体库不匹配（周杰伦 vs 周杰倫），
+    精确 phrase 的 ``artist:"..."`` 会把结果直接清空。命中为空时自动去掉
+    artist 限定重查一次，繁简归一交给 matcher 的 ``similarity`` 处理。
+    """
     if not title.strip():
         return []
-    query = build_query(title, artist, album)
-    params = {"query": query, "fmt": "json", "limit": str(limit)}
-    try:
-        payload = client.get_json(f"{BASE}/recording", params=params, min_interval=MIN_INTERVAL)
-    except NetworkError as exc:
-        log.info("MusicBrainz 检索失败：%s", exc)
-        return []
-    except Exception as exc:  # noqa: BLE001
-        log.warning("MusicBrainz 异常：%s", exc)
-        return []
 
-    recordings = (payload or {}).get("recordings") or []
-    candidates: list[MatchCandidate] = []
-    for item in recordings:
-        candidate = _to_candidate(item)
-        if candidate:
-            candidates.append(candidate)
-    candidates.sort(key=lambda c: c.raw_score, reverse=True)
+    def _run(query: str) -> list[MatchCandidate]:
+        params = {"query": query, "fmt": "json", "limit": str(limit)}
+        try:
+            payload = client.get_json(f"{BASE}/recording", params=params, min_interval=MIN_INTERVAL)
+        except NetworkError as exc:
+            log.info("MusicBrainz 检索失败：%s", exc)
+            return []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("MusicBrainz 异常：%s", exc)
+            return []
+
+        recordings = (payload or {}).get("recordings") or []
+        candidates: list[MatchCandidate] = []
+        for item in recordings:
+            candidate = _to_candidate(item)
+            if candidate:
+                candidates.append(candidate)
+        candidates.sort(key=lambda c: c.raw_score, reverse=True)
+        return candidates
+
+    candidates = _run(build_query(title, artist, album))
+    if not candidates and artist and _has_cjk(artist):
+        log.debug("MusicBrainz 中文歌手名精确匹配为空，去掉 artist 限定重查")
+        candidates = _run(build_query(title, "", album))
     return candidates
 
 

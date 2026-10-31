@@ -225,6 +225,7 @@ class MatchCandidate:
     cover_url: str = ""
     cover: Optional[bytes] = None
     cover_mime: str = ""
+    duration: float = 0.0        # 候选曲目时长（秒），0 表示未知，用于评分区分同名异版
     raw_score: float = 0.0      # 数据源自带的相关度 0~1
     confidence: float = 0.0     # 聚合后的最终置信度 0~1
     note: str = ""

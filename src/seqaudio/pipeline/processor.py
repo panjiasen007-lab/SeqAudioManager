@@ -309,7 +309,9 @@ class Processor:
         album_hint = self._album_hint(track)
         if matcher is not None:
             track.status = TrackStatus.READING
-            result = matcher.match(track, need_lyrics=opts.fetch_lyrics, album_hint=album_hint)
+            # 本地已有歌词（内嵌或同名 .lrc）时跳过联网抓取，节省 LRCLIB 限流配额
+            need_lyrics = opts.fetch_lyrics and not bool(local_lyrics)
+            result = matcher.match(track, need_lyrics=need_lyrics, album_hint=album_hint)
             track.confidence = result.confidence
             if result.accepted and result.candidate:
                 cand = result.candidate
