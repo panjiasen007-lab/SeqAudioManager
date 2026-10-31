@@ -6,6 +6,8 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
+
+from .widgets import LogoMark
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -53,15 +55,23 @@ class DisclaimerDialog(QDialog):
         self.resize(620, 520)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
 
-        title = QLabel("音序管家 · 音乐元数据批量处理工具")
-        font = QFont()
-        font.setPointSize(13)
-        font.setBold(True)
-        title.setFont(font)
-        layout.addWidget(title)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(LogoMark(30))
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        title = QLabel("音序管家")
+        title.setObjectName("brandTitle")
+        subtitle = QLabel("首次使用需确认以下条款")
+        subtitle.setObjectName("brandSub")
+        text_col.addWidget(title)
+        text_col.addWidget(subtitle)
+        head.addLayout(text_col)
+        head.addStretch(1)
+        layout.addLayout(head)
 
         browser = QTextBrowser()
         browser.setHtml(NOTICE)

@@ -1,8 +1,6 @@
-"""参数设置面板（需求 4.8：新手一键全自动，进阶用户开放全部参数）。"""
+"""参数设置面板：卡片式分组，新手一眼看懂，进阶用户全部可调。"""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -10,8 +8,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -26,6 +22,8 @@ from PySide6.QtWidgets import (
 from ..core.config import Settings
 from ..core.model import ConflictMode, LyricsMode
 from ..core.rename import DEFAULT_TEMPLATE
+from . import theme
+from .widgets import Card
 
 
 class SettingsPanel(QScrollArea):
@@ -34,208 +32,222 @@ class SettingsPanel(QScrollArea):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self._loading = False
         self.setWidgetResizable(True)
         self.setFrameShape(QScrollArea.NoFrame)
         self.setMinimumWidth(330)
         self.setMaximumWidth(420)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         body = QWidget()
         self.setWidget(body)
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(0, 0, 6, 0)
         layout.setSpacing(10)
 
-        layout.addWidget(self._build_conflict_group())
-        layout.addWidget(self._build_source_group())
-        layout.addWidget(self._build_lyrics_group())
-        layout.addWidget(self._build_write_group())
-        layout.addWidget(self._build_watermark_group())
-        layout.addWidget(self._build_rename_group())
-        layout.addWidget(self._build_scan_group())
+        layout.addWidget(self._build_match_card())
+        layout.addWidget(self._build_source_card())
+        layout.addWidget(self._build_lyrics_card())
+        layout.addWidget(self._build_write_card())
+        layout.addWidget(self._build_watermark_card())
+        layout.addWidget(self._build_rename_card())
+        layout.addWidget(self._build_scan_card())
         layout.addStretch(1)
 
         self.load_from(settings)
 
-    # ------------------------------------------------------------ 分组构建
+    # ------------------------------------------------------------ 卡片构建
 
-    def _build_conflict_group(self) -> QGroupBox:
-        box = QGroupBox("匹配与覆盖策略")
-        form = QFormLayout(box)
-        form.setLabelAlignment(Qt.AlignRight)
-
+    def _build_match_card(self) -> Card:
+        card = Card("匹配与覆盖", "命中后如何写入")
         self.conflict_combo = QComboBox()
         for mode in ConflictMode:
             self.conflict_combo.addItem(mode.value, mode)
         self.conflict_combo.currentIndexChanged.connect(self._notify)
-        form.addRow("已有标签", self.conflict_combo)
-
-        self.cue_check = QCheckBox("用 CUE 信息补全整轨标签")
-        self.cue_check.toggled.connect(self._notify)
-        form.addRow("", self.cue_check)
 
         self.threshold_spin = QDoubleSpinBox()
         self.threshold_spin.setRange(0.30, 0.95)
         self.threshold_spin.setSingleStep(0.05)
         self.threshold_spin.setDecimals(2)
         self.threshold_spin.setToolTip(
-            "低于该置信度的匹配结果不会自动写入，转入「待人工确认」\n"
-            "调低＝写入更激进，调高＝更严格"
+            "低于该置信度的结果不会自动写入，转入「待人工确认」\n调低＝更激进，调高＝更严格"
         )
         self.threshold_spin.valueChanged.connect(self._notify)
-        form.addRow("置信度阈值", self.threshold_spin)
-        return box
 
-    def _build_source_group(self) -> QGroupBox:
-        box = QGroupBox("联网数据源（开源平台）")
-        outer = QVBoxLayout(box)
-        outer.setSpacing(6)
+        card.add_form([("已有标签", self.conflict_combo), ("置信度阈值", self.threshold_spin)])
+
+        self.cue_check = QCheckBox("用 CUE 信息补全整轨标签")
+        self.cue_check.toggled.connect(self._notify)
+        card.add_widget(self.cue_check)
+        return card
+
+    def _build_source_card(self) -> Card:
+        card = Card("联网数据源", "全部开源平台")
 
         self.online_check = QCheckBox("启用联网匹配与歌词下载")
         self.online_check.toggled.connect(self._notify)
-        outer.addWidget(self.online_check)
+        card.add_widget(self.online_check)
 
-        self.mb_check = QCheckBox("MusicBrainz（元数据主源）")
-        self.caa_check = QCheckBox("Cover Art Archive（封面）")
-        self.lrclib_check = QCheckBox("LRCLIB（歌词主源）")
+        self.mb_check = QCheckBox("MusicBrainz · 元数据主源")
+        self.caa_check = QCheckBox("Cover Art Archive · 封面")
+        self.lrclib_check = QCheckBox("LRCLIB · 歌词主源")
         self.local_lyrics_check = QCheckBox("优先使用本地已有歌词")
         for widget in (self.mb_check, self.caa_check, self.lrclib_check, self.local_lyrics_check):
-            widget.setContentsMargins(14, 0, 0, 0)
             widget.toggled.connect(self._notify)
-            outer.addWidget(widget)
+            card.add_widget(self._indent(widget))
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("并发"))
+        row.setSpacing(8)
+        row.addWidget(self._dim_label("并发"))
         self.concurrency_spin = QSpinBox()
         self.concurrency_spin.setRange(1, 8)
         self.concurrency_spin.setToolTip("同时进行的检索数量，过高容易被数据源限流")
         self.concurrency_spin.valueChanged.connect(self._notify)
-        row.addWidget(self.concurrency_spin)
-        row.addSpacing(10)
-        row.addWidget(QLabel("超时(秒)"))
+        row.addWidget(self.concurrency_spin, 1)
+
+        row.addWidget(self._dim_label("超时"))
         self.timeout_spin = QDoubleSpinBox()
         self.timeout_spin.setRange(3.0, 60.0)
         self.timeout_spin.setSingleStep(1.0)
+        self.timeout_spin.setSuffix(" s")
         self.timeout_spin.valueChanged.connect(self._notify)
-        row.addWidget(self.timeout_spin)
-        row.addStretch(1)
-        outer.addLayout(row)
+        row.addWidget(self.timeout_spin, 1)
+        card.add_layout(row)
 
         proxy_row = QHBoxLayout()
-        proxy_row.addWidget(QLabel("代理"))
+        proxy_row.setSpacing(8)
+        proxy_row.addWidget(self._dim_label("代理"))
         self.proxy_edit = QLineEdit()
-        self.proxy_edit.setPlaceholderText("如 http://127.0.0.1:7890，留空用系统设置")
+        self.proxy_edit.setPlaceholderText("留空使用系统代理")
         self.proxy_edit.editingFinished.connect(self._notify)
         proxy_row.addWidget(self.proxy_edit, 1)
-        outer.addLayout(proxy_row)
-        return box
+        card.add_layout(proxy_row)
+        return card
 
-    def _build_lyrics_group(self) -> QGroupBox:
-        box = QGroupBox("歌词")
-        form = QFormLayout(box)
+    def _build_lyrics_card(self) -> Card:
+        card = Card("歌词", "LRC 同步歌词")
         self.lyrics_combo = QComboBox()
         for mode in LyricsMode:
             self.lyrics_combo.addItem(mode.value, mode)
         self.lyrics_combo.currentIndexChanged.connect(self._notify)
-        form.addRow("输出方式", self.lyrics_combo)
+        card.add_form([("输出方式", self.lyrics_combo)])
 
         self.clean_lyrics_check = QCheckBox("自动剔除歌词内广告与水印")
         self.clean_lyrics_check.toggled.connect(self._notify)
-        form.addRow("", self.clean_lyrics_check)
-        return box
+        card.add_widget(self.clean_lyrics_check)
+        return card
 
-    def _build_write_group(self) -> QGroupBox:
-        box = QGroupBox("写入与备份")
-        outer = QVBoxLayout(box)
+    def _build_write_card(self) -> Card:
+        card = Card("写入与备份", "无损安全写入")
 
         self.backup_check = QCheckBox("写入前自动备份原文件")
         self.backup_check.toggled.connect(self._notify)
-        outer.addWidget(self.backup_check)
+        card.add_widget(self.backup_check)
 
         backup_row = QHBoxLayout()
+        backup_row.setSpacing(6)
         self.backup_dir_edit = QLineEdit()
         self.backup_dir_edit.setPlaceholderText("默认：程序目录下 backup")
         self.backup_dir_edit.editingFinished.connect(self._notify)
         browse = QPushButton("…")
-        browse.setFixedWidth(30)
+        browse.setFixedSize(32, 30)
+        browse.setObjectName("ghost")
+        browse.setCursor(Qt.PointingHandCursor)
         browse.clicked.connect(self._pick_backup_dir)
         backup_row.addWidget(self.backup_dir_edit, 1)
         backup_row.addWidget(browse)
-        outer.addLayout(backup_row)
+        card.add_layout(backup_row)
 
-        self.compat_check = QCheckBox("兼容模式（ID3v2.3 + UTF-16，适配老播放器）")
+        self.compat_check = QCheckBox("兼容模式 · ID3v2.3 + UTF-16")
         self.compat_check.setToolTip("车载/老式播放器读不出标签时开启，Vorbis 系格式不受影响")
         self.compat_check.toggled.connect(self._notify)
-        outer.addWidget(self.compat_check)
-        return box
+        card.add_widget(self.compat_check)
+        return card
 
-    def _build_watermark_group(self) -> QGroupBox:
-        box = QGroupBox("水印清理")
-        outer = QVBoxLayout(box)
+    def _build_watermark_card(self) -> Card:
+        card = Card("水印清理", "仅标签文字", theme.WARN)
 
-        self.watermark_check = QCheckBox("清理标签文字水印（站点广告、推广后缀）")
+        self.watermark_check = QCheckBox("清理站点广告与推广后缀")
         self.watermark_check.toggled.connect(self._notify)
-        outer.addWidget(self.watermark_check)
+        card.add_widget(self.watermark_check)
 
         self.clean_title_check = QCheckBox("同时清理歌名/专辑中的水印片段")
         self.clean_title_check.toggled.connect(self._notify)
-        outer.addWidget(self.clean_title_check)
+        card.add_widget(self.clean_title_check)
 
-        outer.addWidget(QLabel("自定义屏蔽词（每行一个）"))
+        card.add_widget(self._dim_label("自定义屏蔽词（每行一个）"))
         self.words_edit = QPlainTextEdit()
         self.words_edit.setPlaceholderText("例如：某某音乐网\n更多资源请访问")
-        self.words_edit.setFixedHeight(70)
+        self.words_edit.setFixedHeight(62)
         self.words_edit.textChanged.connect(self._notify)
-        outer.addWidget(self.words_edit)
-        return box
+        card.add_widget(self.words_edit)
+        return card
 
-    def _build_rename_group(self) -> QGroupBox:
-        box = QGroupBox("批量重命名")
-        outer = QVBoxLayout(box)
+    def _build_rename_card(self) -> Card:
+        card = Card("批量重命名", "按模板", theme.OK)
 
-        self.rename_check = QCheckBox("处理完成后按模板重命名")
+        self.rename_check = QCheckBox("处理完成后自动重命名")
         self.rename_check.toggled.connect(self._notify)
-        outer.addWidget(self.rename_check)
+        card.add_widget(self.rename_check)
 
         self.template_edit = QLineEdit()
         self.template_edit.setPlaceholderText(DEFAULT_TEMPLATE)
         self.template_edit.editingFinished.connect(self._notify)
-        outer.addWidget(self.template_edit)
+        card.add_widget(self.template_edit)
 
         hint = QLabel(
-            "可用变量：{歌手} {歌名} {专辑} {年份} {流派} {曲目} {碟号} {格式} {位深} {采样率}\n"
-            "支持补零 {曲目:02d}，用 / 建立子文件夹"
+            "变量：{歌手} {歌名} {专辑} {年份} {流派} {曲目} {碟号} {格式}\n"
+            "补零 {曲目:02d}，用 / 建立子文件夹"
         )
-        hint.setStyleSheet("color:#8b909a; font-size:11px;")
+        hint.setObjectName("hint")
         hint.setWordWrap(True)
-        outer.addWidget(hint)
-        return box
+        card.add_widget(hint)
+        return card
 
-    def _build_scan_group(self) -> QGroupBox:
-        box = QGroupBox("扫描与过滤")
-        form = QFormLayout(box)
+    def _build_scan_card(self) -> Card:
+        card = Card("扫描与过滤", "", theme.CYAN)
 
         self.recursive_check = QCheckBox("递归扫描子文件夹")
         self.recursive_check.toggled.connect(self._notify)
-        form.addRow("", self.recursive_check)
+        card.add_widget(self.recursive_check)
 
         self.min_duration_spin = QSpinBox()
         self.min_duration_spin.setRange(0, 3600)
         self.min_duration_spin.setSuffix(" 秒")
-        self.min_duration_spin.setToolTip("低于该时长的音频直接跳过，用于过滤短视频 BGM / 广告音频")
+        self.min_duration_spin.setToolTip(
+            "低于该时长的音频直接跳过，用于过滤短视频 BGM / 广告音频"
+        )
         self.min_duration_spin.valueChanged.connect(self._notify)
-        form.addRow("最短时长", self.min_duration_spin)
-        return box
+        card.add_form([("最短时长", self.min_duration_spin)])
+        return card
 
-    # ------------------------------------------------------------ 数据同步
+    # ------------------------------------------------------------ 辅助
+
+    @staticmethod
+    def _indent(widget: QWidget) -> QWidget:
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(6, 0, 0, 0)
+        layout.addWidget(widget)
+        return wrapper
+
+    @staticmethod
+    def _dim_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("hint")
+        return label
 
     def _notify(self, *_) -> None:
-        self.settingsChanged.emit()
+        if not self._loading:
+            self.settingsChanged.emit()
 
     def _pick_backup_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择备份目录")
         if folder:
             self.backup_dir_edit.setText(folder)
             self._notify()
+
+    # ------------------------------------------------------------ 数据同步
 
     def load_from(self, settings: Settings) -> None:
         self._loading = True
@@ -275,8 +287,7 @@ class SettingsPanel(QScrollArea):
             self._loading = False
 
     def apply_to(self, settings: Settings) -> Settings:
-        # ConflictMode / LyricsMode 是 str 枚举，经 Qt 往返后会退化成普通字符串，
-        # 所以这里读 value 而不是枚举对象本身
+        # ConflictMode / LyricsMode 是 str 枚举，经 Qt userData 往返后退化为字符串
         settings.conflict_mode = str(self.conflict_combo.currentData())
         settings.fill_album_from_cue = self.cue_check.isChecked()
         settings.match_threshold = float(self.threshold_spin.value())

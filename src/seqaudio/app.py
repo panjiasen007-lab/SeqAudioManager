@@ -44,12 +44,18 @@ def _install_excepthook(app: QApplication) -> None:
 
 
 def create_app(argv: list[str] | None = None) -> QApplication:
-    app = QApplication(argv if argv is not None else sys.argv)
+    # 复用已存在的实例：Qt 同一进程只允许一个 QApplication，
+    # 测试与嵌入式调用常常已经建好了实例
+    app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setOrganizationName("SeqAudio")
 
-    # Qt6 默认已启用高 DPI 缩放，这里只需统一圆整策略，避免 125%/150% 下控件错位
+    # Fusion 是唯一完全遵循 QSS 的内置样式；Windows 原生样式会用自己的绘制逻辑，
+    # 把圆角、配色、内边距全部覆盖掉，界面立刻"回退"成系统默认长相
+    app.setStyle("Fusion")
+
+    # Qt6 默认已启用高 DPI 缩放，这里统一圆整策略，避免 125%/150% 下控件错位
     try:
         app.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -57,7 +63,9 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     except Exception:
         pass
 
-    font = QFont("Microsoft YaHei UI", 9)
+    font = QFont("Microsoft YaHei UI")
+    font.setPixelSize(13)
+    font.setHintingPreference(QFont.PreferFullHinting)
     app.setFont(font)
     app.setStyleSheet(QSS)
 

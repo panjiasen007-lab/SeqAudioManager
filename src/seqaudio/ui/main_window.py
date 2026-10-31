@@ -1,30 +1,29 @@
-"""主窗口：曲目列表 + 参数面板 + 运行日志 + 一键全自动。"""
+"""主窗口：品牌条 + 数据卡片 + 曲目表格 + 参数面板 + 运行日志。"""
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
-    QDockWidget,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
+    QStatusBar,
     QTableView,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +35,8 @@ from ..core.config import PresetStore, Settings
 from ..core.logging_setup import add_listener, remove_listener
 from ..core.model import Track, TrackStatus
 from ..pipeline.processor import BatchOptions
+from . import theme
+from .delegate import TrackDelegate
 from .dialogs import CandidateDialog, RenamePreviewDialog, TagEditDialog
 from .settings_panel import SettingsPanel
 from .track_model import (
@@ -45,9 +46,18 @@ from .track_model import (
     TrackFilterProxy,
     TrackTableModel,
 )
+from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
 from .worker import MatchPreviewWorker, ProcessorWorker, ScanWorker
 
 log = logging.getLogger(__name__)
+
+LEVEL_COLORS = {
+    "ERROR": theme.BAD,
+    "CRITICAL": theme.BAD,
+    "WARNING": theme.WARN,
+    "INFO": theme.FG_DIM,
+    "DEBUG": theme.FG_MUTE,
+}
 
 
 class LogBridge(QObject):
@@ -64,7 +74,7 @@ class MainWindow(QMainWindow):
         self.worker: Optional[ProcessorWorker] = None
         self.scan_worker: Optional[ScanWorker] = None
         self._match_workers: list[MatchPreviewWorker] = []
-        self._current_scan_target: list[Path] = []
+        self._stat_cards: dict[str, StatCard] = {}
 
         self.model = TrackTableModel()
         self.proxy = TrackFilterProxy()
@@ -75,38 +85,158 @@ class MainWindow(QMainWindow):
         self._log_listener = lambda level, msg: self._log_bridge.message.emit(level, msg)
 
         self.setWindowTitle("音序管家 · 音乐元数据批量处理")
-        self.resize(1360, 820)
+        self.resize(1420, 880)
+        self.setMinimumSize(1040, 720)
         self.setAcceptDrops(True)
         self._build_ui()
-        self._build_actions()
+        self._init_shortcuts()
 
         add_listener(self._log_listener)
-        self._append_log("INFO", f"日志文件：{self._log_file_hint()}")
+        self._append_log("INFO", f"日志目录：{self._log_dir_hint()}")
         if settings.offline_mode:
             self._append_log("WARNING", "当前为离线模式：仅做本地标签编辑、水印清理与重命名")
 
-    # ------------------------------------------------------------ 界面搭建
+    # ------------------------------------------------------------ 布局
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(8, 6, 8, 6)
-        outer.setSpacing(6)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        outer.addWidget(self._build_toolbar())
+        self.brand_bar = BrandBar("0.1.0")
+        root.addWidget(self.brand_bar)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(14, 10, 14, 8)
+        body_layout.setSpacing(10)
+        root.addWidget(body, 1)
+
+        body_layout.addWidget(self._build_action_bar())
+        body_layout.addLayout(self._build_stat_row())
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_table_area())
 
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        self.settings_panel = SettingsPanel(self.settings)
+        self.settings_panel.settingsChanged.connect(self._on_settings_changed)
+        QTimer.singleShot(0, lambda: self.btn_toggle_panel.setChecked(True))
+        splitter.addWidget(self.settings_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([1040, 348])
+        body_layout.addWidget(splitter, 1)
+
+        body_layout.addWidget(self._build_log_area())
+
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        self.progress.setTextVisible(False)
+        body_layout.addWidget(self.progress)
+
+        status = QStatusBar()
+        status.setSizeGripEnabled(False)
+        status.setFixedHeight(26)
+        self.setStatusBar(status)
+        self.status_hint = QLabel("拖入音频文件，或点击「添加文件夹」")
+        status.addWidget(self.status_hint, 1)
+        self.mode_label = QLabel("")
+        self.mode_label.setStyleSheet(f"color:{theme.FG_MUTE};")
+        status.addPermanentWidget(self.mode_label)
+
+    def _build_action_bar(self) -> QWidget:
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.btn_add_files = self._button("添加文件", self.add_files, ghost=True)
+        self.btn_add_folder = self._button("添加文件夹", self.add_folder, ghost=True)
+        self.btn_remove = self._button("移除", self.remove_selected, ghost=True)
+        self.btn_clear = self._button("清空", self.clear_all, ghost=True)
+        for btn in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
+            layout.addWidget(btn)
+
+        layout.addWidget(self._vline())
+
+        self.btn_auto = self._button("一键全自动", self.run_auto)
+        self.btn_auto.setObjectName("primary")
+        self.btn_auto.setToolTip("匹配 → 补全 → 清理水印 → 写标签 → 歌词（按当前参数）")
+        self.btn_local = self._button("仅本地处理", self.run_local_only, ghost=True)
+        self.btn_local.setToolTip("不联网：清理水印、补全空白字段、写标签、重命名")
+        self.btn_stop = self._button("停止", self.stop, ghost=True)
+        self.btn_stop.setEnabled(False)
+        layout.addWidget(self.btn_auto)
+        layout.addWidget(self.btn_local)
+        layout.addWidget(self.btn_stop)
+
+        layout.addStretch(1)
+
+        self.btn_rename = self._button("重命名预览", self.rename_preview, ghost=True)
+        self.btn_report = self._button("导出报表", self.export_report, ghost=True)
+        layout.addWidget(self.btn_rename)
+        layout.addWidget(self.btn_report)
+
+        layout.addWidget(self._vline())
+
+        # 窄屏救星：收起参数面板，表格独占整宽
+        self.btn_toggle_panel = self._button("参数", self.toggle_settings_panel, ghost=True)
+        self.btn_toggle_panel.setCheckable(True)
+        self.btn_toggle_panel.setToolTip("显示 / 隐藏右侧参数面板（Ctrl+P）")
+        layout.addWidget(self.btn_toggle_panel)
+        return bar
+
+    def toggle_settings_panel(self) -> None:
+        visible = not self.settings_panel.isVisible()
+        self.settings_panel.setVisible(visible)
+        self.btn_toggle_panel.setChecked(visible)
+
+    def _button(self, text: str, slot, ghost: bool = False) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedHeight(34)
+        if ghost:
+            btn.setObjectName("ghost")
+        btn.clicked.connect(slot)
+        return btn
+
+    @staticmethod
+    def _vline() -> QFrame:
+        line = QFrame()
+        line.setFixedSize(1, 20)
+        line.setStyleSheet(f"background:{theme.LINE}; border:none;")
+        return line
+
+    def _build_stat_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        specs = [
+            ("total", "曲目总数", theme.FG),
+            ("lossless", "无损音源", theme.CYAN),
+            ("done", "已完成", theme.OK),
+            ("review", "待确认", theme.WARN),
+            ("failed", "失败", theme.BAD),
+        ]
+        for key, title, color in specs:
+            card = StatCard(key, title, color)
+            card.clicked.connect(self._on_stat_clicked)
+            self._stat_cards[key] = card
+            row.addWidget(card)
+        return row
+
+    def _build_table_area(self) -> QWidget:
+        area = QWidget()
+        layout = QVBoxLayout(area)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         filter_row = QHBoxLayout()
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索歌名 / 歌手 / 专辑 / 文件名…")
-        self.search_edit.setClearButtonEnabled(True)
+        filter_row.setSpacing(10)
+
+        self.search_edit = SearchInput("搜索歌名、歌手、专辑或文件名…")
         self.search_edit.textChanged.connect(self.proxy.set_text)
         filter_row.addWidget(self.search_edit, 1)
 
@@ -116,16 +246,20 @@ class MainWindow(QMainWindow):
         self.problems_check.toggled.connect(self.proxy.set_problems_only)
         filter_row.addWidget(self.lossless_check)
         filter_row.addWidget(self.problems_check)
-        left_layout.addLayout(filter_row)
+        layout.addLayout(filter_row)
 
         self.table = QTableView()
         self.table.setModel(self.proxy)
+        self.table.setItemDelegate(TrackDelegate(self.table))
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QTableView.SelectRows)
         self.table.setSelectionMode(QTableView.ExtendedSelection)
+        self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.horizontalHeader().setHighlightSections(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
         for index, (_, _, width) in enumerate(COLUMNS):
@@ -138,91 +272,65 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(lambda _: self.edit_selected())
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
-        left_layout.addWidget(self.table, 1)
 
-        splitter.addWidget(left)
+        # 空列表引导层：铺在 viewport 上，随尺寸变化自适应
+        self.empty_state = EmptyState(parent=self.table.viewport())
+        self.table.viewport().installEventFilter(self)
+        self.empty_state.setGeometry(self.table.viewport().rect())
 
-        self.settings_panel = SettingsPanel(self.settings)
-        self.settings_panel.settingsChanged.connect(self._on_settings_changed)
-        splitter.addWidget(self.settings_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setSizes([980, 360])
-        outer.addWidget(splitter, 1)
+        layout.addWidget(self.table, 1)
+        return area
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.table.viewport() and event.type() == QEvent.Resize:
+            self.empty_state.setGeometry(self.table.viewport().rect())
+        return super().eventFilter(obj, event)
+
+    def _build_log_area(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.addWidget(SectionHeader("运行日志", "识别失败的具体原因都在这里"))
+        head.addStretch(1)
+        self.btn_log_clear = QPushButton("清空")
+        self.btn_log_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_log_clear.setFixedHeight(22)
+        self.btn_log_clear.setStyleSheet(
+            f"QPushButton{{background:transparent;border:1px solid {theme.LINE_SOFT};"
+            f"border-radius:6px;color:{theme.FG_MUTE};padding:1px 10px;font-size:11px;}}"
+            f"QPushButton:hover{{color:{theme.FG};border-color:{theme.LINE};}}"
+        )
+        self.btn_log_clear.clicked.connect(lambda: self.log_view.clear())
+        head.addWidget(self.btn_log_clear)
+        layout.addLayout(head)
 
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setFixedHeight(140)
-        self.log_view.setStyleSheet(
-            "QPlainTextEdit{font-family:Consolas,'Cascadia Mono',monospace;font-size:11px;}"
-        )
-        outer.addWidget(self.log_view)
+        self.log_view.setFixedHeight(118)
+        self.log_view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(self.log_view)
+        return wrapper
 
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        self.progress.setTextVisible(False)
-        outer.addWidget(self.progress)
-
-        status = self.statusBar()
-        self.stats_label = QLabel("就绪")
-        status.addWidget(self.stats_label, 1)
-        self.mode_label = QLabel("")
-        status.addPermanentWidget(self.mode_label)
-        self._refresh_stats()
-
-    def _build_toolbar(self) -> QToolBar:
-        bar = QToolBar("主工具栏")
-        bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self.addToolBar(bar)
-        self.toolbar = bar
-
-        self.act_add_files = QAction("添加文件", self)
-        self.act_add_files.triggered.connect(self.add_files)
-        self.act_add_folder = QAction("添加文件夹", self)
-        self.act_add_folder.triggered.connect(self.add_folder)
-        self.act_remove = QAction("移除选中", self)
-        self.act_remove.triggered.connect(self.remove_selected)
-        self.act_clear = QAction("清空", self)
-        self.act_clear.triggered.connect(self.clear_all)
-
-        bar.addAction(self.act_add_files)
-        bar.addAction(self.act_add_folder)
-        bar.addAction(self.act_remove)
-        bar.addAction(self.act_clear)
-        bar.addSeparator()
-
-        self.act_auto = QAction("一键全自动", self)
-        self.act_auto.setToolTip("匹配 → 补全 → 清词水印 → 写标签 → 歌词（按当前参数）")
-        self.act_auto.triggered.connect(self.run_auto)
-
-        self.act_local = QAction("仅本地处理", self)
-        self.act_local.setToolTip("不联网：清理水印、补全空白字段、写标签、重命名")
-        self.act_local.triggered.connect(self.run_local_only)
-
-        self.act_stop = QAction("停止", self)
-        self.act_stop.setEnabled(False)
-        self.act_stop.triggered.connect(self.stop)
-
-        bar.addAction(self.act_auto)
-        bar.addAction(self.act_local)
-        bar.addAction(self.act_stop)
-        bar.addSeparator()
-
-        self.act_rename = QAction("重命名预览", self)
-        self.act_rename.triggered.connect(self.rename_preview)
-        self.act_report = QAction("导出报表", self)
-        self.act_report.triggered.connect(self.export_report)
-        bar.addAction(self.act_rename)
-        bar.addAction(self.act_report)
-        return bar
-
-    def _build_actions(self) -> None:
+    def _init_shortcuts(self) -> None:
         QShortcut(QKeySequence.Open, self, self.add_folder)
         QShortcut(QKeySequence.Delete, self, self.remove_selected)
         QShortcut(QKeySequence("Ctrl+Return"), self, self.run_auto)
         QShortcut(QKeySequence("Ctrl+E"), self, self.edit_selected)
+        QShortcut(QKeySequence("Ctrl+P"), self, self.toggle_settings_panel)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not getattr(self, "_titlebar_done", False):
+            from .win_effects import apply_dark_titlebar
+
+            apply_dark_titlebar(int(self.winId()))
+            self._titlebar_done = True
 
     # ------------------------------------------------------------ 导入
 
@@ -249,11 +357,11 @@ class MainWindow(QMainWindow):
         if self.scan_worker is not None and self.scan_worker.isRunning():
             QMessageBox.information(self, "请稍候", "正在扫描上一批文件，请等待完成。")
             return
-        self._current_scan_target = paths
-        self.stats_label.setText("正在扫描…")
+        self.brand_bar.set_status("扫描中", theme.CYAN)
+        self.status_hint.setText("正在扫描…")
         self.scan_worker = ScanWorker(paths, self.settings.recursive_scan)
         self.scan_worker.discovered.connect(
-            lambda n: self.stats_label.setText(f"正在扫描… 已发现 {n} 个音频")
+            lambda n: self.status_hint.setText(f"正在扫描… 已发现 {n} 个音频")
         )
         self.scan_worker.finishedScan.connect(self._on_scan_finished)
         self.scan_worker.failed.connect(lambda msg: self._append_log("ERROR", f"扫描失败：{msg}"))
@@ -272,6 +380,7 @@ class MainWindow(QMainWindow):
             + (f"，{unsupported} 个不支持" if unsupported else ""),
         )
         self._refresh_stats()
+        self.brand_bar.set_status("就绪", theme.FG_DIM)
 
     # ------------------------------------------------------------ 拖拽
 
@@ -290,26 +399,28 @@ class MainWindow(QMainWindow):
     def run_auto(self) -> None:
         if not self._ensure_ready():
             return
-        options = BatchOptions(
-            match_online=self.settings.online_enabled and not self.settings.offline_mode,
-            clean_watermark=self.settings.watermark_enabled,
-            write_tags=True,
-            fetch_lyrics=self.settings.use_lrclib or self.settings.use_local_lyrics,
-            do_rename=self.settings.rename_enabled,
+        self._start_worker(
+            BatchOptions(
+                match_online=self.settings.online_enabled and not self.settings.offline_mode,
+                clean_watermark=self.settings.watermark_enabled,
+                write_tags=True,
+                fetch_lyrics=self.settings.use_lrclib or self.settings.use_local_lyrics,
+                do_rename=self.settings.rename_enabled,
+            )
         )
-        self._start_worker(options)
 
     def run_local_only(self) -> None:
         if not self._ensure_ready():
             return
-        options = BatchOptions(
-            match_online=False,
-            clean_watermark=self.settings.watermark_enabled,
-            write_tags=True,
-            fetch_lyrics=True,
-            do_rename=self.settings.rename_enabled,
+        self._start_worker(
+            BatchOptions(
+                match_online=False,
+                clean_watermark=self.settings.watermark_enabled,
+                write_tags=True,
+                fetch_lyrics=True,
+                do_rename=self.settings.rename_enabled,
+            )
         )
-        self._start_worker(options)
 
     def _ensure_ready(self) -> bool:
         if self.worker is not None and self.worker.isRunning():
@@ -325,12 +436,9 @@ class MainWindow(QMainWindow):
         self.settings.save()
 
         tracks = self.model.tracks()
-        self.progress.setVisible(True)
+        self._set_running(True)
         self.progress.setMaximum(len(tracks))
         self.progress.setValue(0)
-        self.act_auto.setEnabled(False)
-        self.act_local.setEnabled(False)
-        self.act_stop.setEnabled(True)
         self.mode_label.setText("联网模式" if options.match_online else "离线模式")
         self._append_log(
             "INFO",
@@ -345,34 +453,41 @@ class MainWindow(QMainWindow):
         self.worker.finishedRun.connect(self._on_finished)
         self.worker.start()
 
+    def _set_running(self, running: bool) -> None:
+        self.progress.setVisible(running)
+        self.btn_auto.setEnabled(not running)
+        self.btn_local.setEnabled(not running)
+        self.btn_stop.setEnabled(running)
+        self.brand_bar.set_status(
+            "处理中" if running else "就绪", theme.PURPLE if running else theme.FG_DIM
+        )
+
     def stop(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             self.worker.cancel()
-            self.act_stop.setEnabled(False)
+            self.btn_stop.setEnabled(False)
             self._append_log("WARNING", "已请求停止，正在结束当前文件…")
 
     def _on_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
-        self.stats_label.setText(f"处理中 {index}/{total}")
+        self.status_hint.setText(f"处理中 {index} / {total}")
 
     def _on_finished(self, summary) -> None:
-        self.progress.setVisible(False)
-        self.act_auto.setEnabled(True)
-        self.act_local.setEnabled(True)
-        self.act_stop.setEnabled(False)
+        self._set_running(False)
         self.model.refresh_all()
         self._refresh_stats()
         self._append_log("INFO", summary.text())
+        self.status_hint.setText(summary.text())
         self.mode_label.setText("")
 
     # ------------------------------------------------------------ 行操作
 
     def _selected_rows(self) -> list[int]:
-        rows: list[int] = []
-        for index in self.table.selectionModel().selectedRows():
-            rows.append(self.proxy.mapToSource(index).row())
-        return rows
+        return [
+            self.proxy.mapToSource(index).row()
+            for index in self.table.selectionModel().selectedRows()
+        ]
 
     def _selected_tracks(self) -> list[Track]:
         return [t for t in (self.model.track_at(r) for r in self._selected_rows()) if t]
@@ -401,8 +516,11 @@ class MainWindow(QMainWindow):
             track.working = dialog.result_tags()
             track.status = TrackStatus.PENDING
             track.changed_fields = [
-                f for f in ("title", "artist", "album", "albumartist", "date", "genre",
-                            "track", "disc", "comment", "lyrics")
+                f
+                for f in (
+                    "title", "artist", "album", "albumartist", "date", "genre",
+                    "track", "disc", "comment", "lyrics",
+                )
                 if track.working.get(f) != track.original.get(f)
             ]
             if track.working.cover != track.original.cover:
@@ -422,7 +540,9 @@ class MainWindow(QMainWindow):
             lambda _t, msg: self._append_log("ERROR", f"检索失败：{msg}")
         )
         self._match_workers.append(worker)
-        worker.finished.connect(lambda: self._match_workers.remove(worker) if worker in self._match_workers else None)
+        worker.finished.connect(
+            lambda: self._match_workers.remove(worker) if worker in self._match_workers else None
+        )
         worker.start()
 
     def _on_candidates(self, track: Track, result) -> None:
@@ -447,9 +567,8 @@ class MainWindow(QMainWindow):
             return
         import os
 
-        folder = tracks[0].path.parent
         try:
-            os.startfile(str(folder))  # type: ignore[attr-defined]
+            os.startfile(str(tracks[0].path.parent))  # type: ignore[attr-defined]
         except OSError as exc:
             self._append_log("ERROR", f"打开目录失败：{exc}")
 
@@ -462,6 +581,19 @@ class MainWindow(QMainWindow):
             track.notes.clear()
             self.model.refresh_row(track)
         self._refresh_stats()
+
+    def _header_menu(self, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        for index, (label, _, _) in enumerate(COLUMNS):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(not self.table.isColumnHidden(index))
+            action.toggled.connect(
+                lambda checked, i=index: self.table.setColumnHidden(i, not checked)
+            )
+        menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
 
     def _show_context_menu(self, pos) -> None:
         index = self.table.indexAt(pos)
@@ -478,41 +610,30 @@ class MainWindow(QMainWindow):
         menu.addAction("仅处理选中项", self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
-    def _header_menu(self, pos) -> None:
-        """表头右键：勾选显示/隐藏任意列（窄屏下按需裁列）。"""
-        from PySide6.QtWidgets import QMenu
-
-        menu = QMenu(self)
-        for index, (label, _, _) in enumerate(COLUMNS):
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(not self.table.isColumnHidden(index))
-            action.toggled.connect(
-                lambda checked, i=index: self.table.setColumnHidden(i, not checked)
-            )
-        menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
-
     def _run_selected(self) -> None:
         tracks = self._selected_tracks()
         if not tracks:
             return
-        options = BatchOptions(
-            match_online=self.settings.online_enabled and not self.settings.offline_mode,
-            clean_watermark=self.settings.watermark_enabled,
-            write_tags=True,
-            fetch_lyrics=True,
-            do_rename=False,
-        )
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "请稍候", "已有任务在运行中。")
             return
         self.settings_panel.apply_to(self.settings)
-        self.progress.setVisible(True)
+        self._set_running(True)
         self.progress.setMaximum(len(tracks))
         self.progress.setValue(0)
-        self.act_stop.setEnabled(True)
-        self.worker = ProcessorWorker(self.settings, tracks, options)
+        self.worker = ProcessorWorker(
+            self.settings,
+            tracks,
+            BatchOptions(
+                match_online=self.settings.online_enabled and not self.settings.offline_mode,
+                clean_watermark=self.settings.watermark_enabled,
+                write_tags=True,
+                fetch_lyrics=True,
+                do_rename=False,
+            ),
+        )
         self.worker.trackUpdated.connect(self.model.refresh_row)
+        self.worker.trackUpdated.connect(lambda _: self._refresh_stats())
         self.worker.progressChanged.connect(self._on_progress)
         self.worker.finishedRun.connect(self._on_finished)
         self.worker.start()
@@ -527,12 +648,11 @@ class MainWindow(QMainWindow):
         self.settings_panel.apply_to(self.settings)
         plan = rename_mod.build_plan(tracks, self.settings.rename_template)
         if not plan.pending and not plan.blocked:
-            QMessageBox.information(self, "无需重命名", "按当前模板所有文件命名已符合规则。")
+            QMessageBox.information(self, "无需重命名", "按当前模板，所有文件命名已符合规则。")
             return
         dialog = RenamePreviewDialog(plan, self)
         if dialog.exec() == RenamePreviewDialog.Accepted:
             success, failed = rename_mod.execute_plan(plan)
-            # 同步歌词文件跟着改名
             for item in plan.items:
                 if item.changed and item.ok:
                     old_lrc = lyrics_mod.sidecar_path(item.old_path)
@@ -577,34 +697,52 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 日志与状态
 
     def _append_log(self, level: str, message: str) -> None:
-        color = {
-            "ERROR": "#f85149",
-            "CRITICAL": "#f85149",
-            "WARNING": "#d29922",
-            "INFO": "#8b909a",
-            "DEBUG": "#6e7681",
-        }.get(level.upper(), "#dcdfe4")
+        color = LEVEL_COLORS.get(level.upper(), theme.FG_DIM)
+        stamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendHtml(
-            f'<span style="color:{color}">{_escape(message)}</span>'
+            f'<span style="color:{theme.FG_MUTE}">{stamp}</span>'
+            f'<span style="color:{color}">&nbsp;&nbsp;{_escape(message)}</span>'
         )
+        bar = self.log_view.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _refresh_stats(self) -> None:
         tracks = self.model.tracks()
-        if not tracks:
-            self.stats_label.setText("就绪 · 拖入音频文件或点击「添加文件夹」")
-            return
         stats = report_mod.summarize(tracks)
         lossless = sum(1 for t in tracks if t.info.lossless)
-        done = stats.get("完成", 0)
-        failed = stats.get("失败", 0)
-        review = stats.get("待人工确认", 0)
-        unsupported = stats.get("不支持", 0)
-        self.stats_label.setText(
-            f"共 {len(tracks)} 首 · 无损 {lossless} · 完成 {done} · 待确认 {review}"
-            f" · 失败 {failed} · 不支持 {unsupported}"
-        )
+        values = {
+            "total": len(tracks),
+            "lossless": lossless,
+            "done": stats.get("完成", 0),
+            "review": stats.get("待人工确认", 0),
+            "failed": stats.get("失败", 0),
+        }
+        for key, value in values.items():
+            card = self._stat_cards.get(key)
+            if card is not None:
+                card.set_value(value)
 
-    def _log_file_hint(self) -> str:
+        self.empty_state.setVisible(not tracks)
+        if not tracks:
+            self.status_hint.setText("拖入音频文件，或点击「添加文件夹」")
+        else:
+            self.status_hint.setText(
+                f"共 {len(tracks)} 首 · 无损 {lossless} · 完成 {values['done']}"
+                f" · 待确认 {values['review']} · 失败 {values['failed']}"
+            )
+
+    def _on_stat_clicked(self, key: str) -> None:
+        if key == "total":
+            self.search_edit.clear()
+            self.lossless_check.setChecked(False)
+            self.problems_check.setChecked(False)
+        elif key == "lossless":
+            self.lossless_check.setChecked(not self.lossless_check.isChecked())
+        elif key in ("review", "failed"):
+            if not self.problems_check.isChecked():
+                self.problems_check.setChecked(True)
+
+    def _log_dir_hint(self) -> str:
         try:
             from ..core.paths import log_dir
 
@@ -637,9 +775,4 @@ class MainWindow(QMainWindow):
 
 
 def _escape(text: str) -> str:
-    return (
-        (text or "")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

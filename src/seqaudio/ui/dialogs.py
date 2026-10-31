@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 
 from ..core.model import MatchCandidate, Tags, Track
 from ..core.rename import RenamePlan
+from . import theme
+from .widgets import Card
 
 
 class TagEditDialog(QDialog):
@@ -46,67 +48,126 @@ class TagEditDialog(QDialog):
         super().__init__(parent)
         self.track = track
         self.setWindowTitle(f"编辑标签 — {track.path.name}")
-        self.resize(560, 620)
+        self.resize(620, 700)
+        self.setMinimumSize(560, 620)
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        # ---- 曲目信息 ----
+        info_card = Card("曲目信息", track.info.fmt)
         self.edits: dict[str, QLineEdit] = {}
-        for label, key in self.FIELDS:
+        rows: list[tuple[str, QWidget]] = []
+        left_form: list[tuple[str, QWidget]] = []
+        right_form: list[tuple[str, QWidget]] = []
+        for i, (label, key) in enumerate(self.FIELDS):
             edit = QLineEdit(track.working.get(key))
             self.edits[key] = edit
-            form.addRow(label, edit)
-        layout.addLayout(form)
+            (left_form if i % 2 == 0 else right_form).append((label, edit))
+
+        two_col = QHBoxLayout()
+        two_col.setSpacing(14)
+        two_col.addLayout(self._mini_form(left_form), 1)
+        two_col.addLayout(self._mini_form(right_form), 1)
+        info_card.add_layout(two_col)
 
         self.comment_edit = QTextEdit(track.working.comment)
-        self.comment_edit.setFixedHeight(60)
-        layout.addWidget(QLabel("注释"))
-        layout.addWidget(self.comment_edit)
+        self.comment_edit.setFixedHeight(56)
+        info_card.add_widget(self._dim_label("注释"))
+        info_card.add_widget(self.comment_edit)
+        layout.addWidget(info_card)
 
+        # ---- 歌词 ----
+        lyrics_card = Card("歌词", "支持 LRC 时间轴", theme.PURPLE)
         self.lyrics_edit = QTextEdit(track.working.lyrics)
-        self.lyrics_edit.setFixedHeight(110)
-        layout.addWidget(QLabel("歌词"))
-        layout.addWidget(self.lyrics_edit)
+        self.lyrics_edit.setFixedHeight(120)
+        lyrics_card.add_widget(self.lyrics_edit)
+        layout.addWidget(lyrics_card, 1)
 
-        # 封面区
+        # ---- 封面 ----
+        cover_card = Card("封面", "", theme.CYAN)
         cover_row = QHBoxLayout()
+        cover_row.setSpacing(14)
         self.cover_label = QLabel("无封面")
-        self.cover_label.setFixedSize(96, 96)
+        self.cover_label.setFixedSize(104, 104)
         self.cover_label.setAlignment(Qt.AlignCenter)
-        self.cover_label.setStyleSheet("border:1px solid #33363d; border-radius:4px;")
+        self.cover_label.setStyleSheet(
+            f"border:1px dashed {theme.LINE}; border-radius:8px; "
+            f"color:{theme.FG_MUTE}; background:{theme.BG_CARD};"
+        )
         cover_row.addWidget(self.cover_label)
 
         btn_col = QVBoxLayout()
+        btn_col.setSpacing(6)
         pick_btn = QPushButton("选择图片…")
+        pick_btn.setObjectName("ghost")
+        pick_btn.setCursor(Qt.PointingHandCursor)
         pick_btn.clicked.connect(self._pick_cover)
         clear_btn = QPushButton("清除封面")
+        clear_btn.setObjectName("ghost")
+        clear_btn.setCursor(Qt.PointingHandCursor)
         clear_btn.clicked.connect(self._clear_cover)
         btn_col.addWidget(pick_btn)
         btn_col.addWidget(clear_btn)
         btn_col.addStretch(1)
         cover_row.addLayout(btn_col)
         cover_row.addStretch(1)
-        layout.addLayout(cover_row)
+        cover_card.add_layout(cover_row)
+        layout.addWidget(cover_card)
 
         self._pending_cover: Optional[bytes] = track.working.cover
         self._pending_mime = track.working.cover_mime
         self._render_cover()
 
+        # ---- 底部操作 ----
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("保存到列表")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        ok_btn.setText("保存到列表")
+        ok_btn.setObjectName("primary")
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn = buttons.button(QDialogButtonBox.Cancel)
+        cancel_btn.setText("取消")
+        cancel_btn.setObjectName("ghost")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    @staticmethod
+    def _mini_form(rows: list[tuple[str, QWidget]]) -> QFormLayout:
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(7)
+        form.setHorizontalSpacing(8)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        for label, widget in rows:
+            form.addRow(label, widget)
+        return form
+
+    @staticmethod
+    def _dim_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("hint")
+        return label
+
     def _render_cover(self) -> None:
         if not self._pending_cover:
             self.cover_label.setText("无封面")
+            self.cover_label.setStyleSheet(
+                f"border:1px dashed {theme.LINE}; border-radius:8px; "
+                f"color:{theme.FG_MUTE}; background:{theme.BG_CARD};"
+            )
             self.cover_label.setPixmap(QPixmap())
             return
         pix = QPixmap()
         if pix.loadFromData(self._pending_cover):
+            self.cover_label.setStyleSheet(
+                f"border:1px solid {theme.LINE}; border-radius:8px;"
+            )
             self.cover_label.setPixmap(
-                pix.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pix.scaled(102, 102, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         else:
             self.cover_label.setText("无法预览")
