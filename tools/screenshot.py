@@ -79,9 +79,10 @@ def _demo_tracks(tmp: Path):
             bitrate=921600 if ll else 320000, channels=2, file_size=38_000_000,
             dsd_rate="DSD64" if fmt == "DSF" else None,
         )
-        track.working = track.original = Tags(
+        track.original = Tags(
             title=ti, artist=ar, album=al, date=yr, genre="流行", track=str(i + 1)
         )
+        track.working = track.original.copy()
         track.confidence, track.source = conf, src
         track.status = TrackStatus.NEEDS_REVIEW if conf < 0.62 else TrackStatus.DONE
         track.notes = (

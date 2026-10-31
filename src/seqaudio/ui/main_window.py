@@ -37,7 +37,7 @@ from ..core import rename as rename_mod
 from ..core import report as report_mod
 from ..core.config import PresetStore, Settings
 from ..core.logging_setup import add_listener, remove_listener
-from ..core.model import Track, TrackStatus
+from ..core.model import Tags, Track, TrackStatus
 from ..pipeline.processor import BatchOptions
 from . import i18n, theme
 from .delegate import TrackDelegate
@@ -192,21 +192,27 @@ class MainWindow(QMainWindow):
         self.btn_add_files = self._button(i18n.tr("add_files"), self.add_files, ghost=True, i18n_key="add_files")
         self.btn_add_folder = self._button(i18n.tr("add_folder"), self.add_folder, ghost=True, i18n_key="add_folder")
         self.btn_remove = self._button(i18n.tr("remove"), self.remove_selected, ghost=True, i18n_key="remove")
-        # 「清空」放进「更多」菜单：1080px 下 8 个按钮已接近一行的极限，
-        # 清空属于低频且可撤销性差的操作，不适合摆在手边
         for btn in (self.btn_add_files, self.btn_add_folder, self.btn_remove):
             layout.addWidget(btn)
 
         layout.addWidget(self._vline())
 
+        # 「清空列表」放回工具栏（一键全自动左侧）
+        self.btn_clear = self._button(i18n.tr("clear"), self.clear_all, ghost=True, i18n_key="clear")
+        self.btn_clear.setToolTip("清空当前列表（不删除磁盘文件）")
         self.btn_auto = self._button(i18n.tr("auto"), self.run_auto, i18n_key="auto")
         self.btn_auto.setObjectName("primary")
         self.btn_auto.setToolTip("匹配 → 补全 → 清理水印 → 写标签 → 歌词（按当前参数）")
+        self.btn_save_all = self._button(i18n.tr("save_all"), self.confirm_save_all, i18n_key="save_all")
+        self.btn_save_all.setObjectName("success")
+        self.btn_save_all.setToolTip("把列表里所有未写入的标签变更确认并保存到磁盘（会二次确认）")
         self.btn_local = self._button(i18n.tr("local_only"), self.run_local_only, ghost=True, i18n_key="local_only")
         self.btn_local.setToolTip("不联网：清理水印、补全空白字段、写标签、重命名")
         self.btn_stop = self._button(i18n.tr("stop"), self.stop, ghost=True, i18n_key="stop")
         self.btn_stop.setEnabled(False)
+        layout.addWidget(self.btn_clear)
         layout.addWidget(self.btn_auto)
+        layout.addWidget(self.btn_save_all)
         layout.addWidget(self.btn_local)
         layout.addWidget(self.btn_stop)
 
@@ -239,7 +245,6 @@ class MainWindow(QMainWindow):
 
         self.action_rename = menu.addAction("重命名预览…", self.rename_preview)
         self.action_report = menu.addAction("导出处理报表…", self.export_report)
-        menu.addAction("清空列表", self.clear_all)
         menu.addAction("批量导出封面…", self.export_covers)
         menu.addAction("生成文件夹封面", self.run_folder_covers)
         menu.addSeparator()
@@ -542,6 +547,51 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def confirm_save_all(self) -> None:
+        """全部确认保存：把列表里所有未写入的标签变更确认并落盘（二次确认）。"""
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "请稍候", "已有任务在运行中。")
+            return
+        tracks = self.model.tracks()
+        if not tracks:
+            QMessageBox.information(self, "没有曲目", "请先添加音频文件。")
+            return
+
+        changed = [t for t in tracks if self._has_pending_changes(t)]
+        if not changed:
+            QMessageBox.information(self, "无需保存", "列表中没有待写入的标签变更。")
+            return
+
+        # 二次确认：写磁盘是重要操作
+        reply = QMessageBox.question(
+            self,
+            "确认保存",
+            f"将把 {len(changed)} 首曲目的标签变更写入磁盘（列表共 {len(tracks)} 首）。\n\n"
+            "写入会修改音频文件的标签区块（有备份保护），确认继续吗？",
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._start_worker(
+            BatchOptions(
+                match_online=False,
+                clean_watermark=False,
+                write_tags=True,
+                fetch_lyrics=False,
+                do_rename=False,
+                ensure_covers=False,
+                write_only=True,
+            )
+        )
+
+    @staticmethod
+    def _has_pending_changes(track: Track) -> bool:
+        """判断曲目是否有未写入的变更（working 相对 original）。"""
+        fields = list(Tags.TEXT_FIELDS) + ["comment", "lyrics"]
+        if any(track.working.get(f) != track.original.get(f) for f in fields):
+            return True
+        return track.working.cover != track.original.cover
+
     def _ensure_ready(self) -> bool:
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "请稍候", "已有任务在运行中。")
@@ -560,12 +610,16 @@ class MainWindow(QMainWindow):
         self._set_running(True)
         self.progress.setMaximum(len(tracks))
         self.progress.setValue(0)
-        self.mode_label.setText("联网模式" if options.match_online else "离线模式")
-        self._append_log(
-            "INFO",
-            f"开始处理 {len(tracks)} 首（{'联网匹配' if options.match_online else '仅本地'}，"
-            f"覆盖策略：{self.settings.conflict()}）",
-        )
+        if options.write_only:
+            self.mode_label.setText("确认保存")
+            self._append_log("INFO", f"开始写入 {len(tracks)} 首的标签变更")
+        else:
+            self.mode_label.setText("联网模式" if options.match_online else "离线模式")
+            self._append_log(
+                "INFO",
+                f"开始处理 {len(tracks)} 首（{'联网匹配' if options.match_online else '仅本地'}，"
+                f"覆盖策略：{self.settings.conflict()}）",
+            )
 
         self.worker = ProcessorWorker(self.settings, tracks, options)
         self.worker.trackUpdated.connect(self.model.refresh_row)
@@ -581,8 +635,10 @@ class MainWindow(QMainWindow):
     def _set_running(self, running: bool) -> None:
         self.progress.setVisible(running)
         self.btn_auto.setEnabled(not running)
+        self.btn_save_all.setEnabled(not running)
         self.btn_local.setEnabled(not running)
         self.btn_auth.setEnabled(not running)
+        self.btn_clear.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         self.brand_bar.set_status(
             "处理中" if running else "就绪", theme.PURPLE if running else theme.FG_DIM

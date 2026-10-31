@@ -668,6 +668,53 @@ class TestClearComment(unittest.TestCase):
         self.assertNotIn("comment", track.changed_fields)
 
 
+class TestWriteOnly(unittest.TestCase):
+    """只写模式（「全部确认保存」）：跳过匹配/清洗，直接把 working 变更落盘。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_wo_"))
+        self.files = make_samples.build_all(self.tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_write_only_persists_changes(self) -> None:
+        from seqaudio.core.config import Settings
+        from seqaudio.core.tags import read_tags
+        from seqaudio.pipeline.processor import BatchOptions, Processor
+
+        path = self.files["mp3"]
+        track = probe.probe(path, with_cue=False)
+        track.working.title = "只写测试歌名"
+        track.working.artist = "只写测试歌手"
+        track.working.comment = ""
+
+        summary = Processor(Settings(backup_enabled=False, offline_mode=True)).run(
+            [track], BatchOptions(write_only=True, write_tags=True)
+        )
+        self.assertEqual(summary.done, 1, summary.text())
+
+        back = read_tags(path)
+        self.assertEqual(back.title, "只写测试歌名")
+        self.assertEqual(back.artist, "只写测试歌手")
+
+    def test_write_only_skips_cleaning(self) -> None:
+        """只写模式不应触发去序号/水印清理等清洗步骤。"""
+        from seqaudio.core.config import Settings
+        from seqaudio.pipeline.processor import BatchOptions, Processor
+
+        track = probe.probe(self.files["flac"], with_cue=False)
+        track.working.title = "01. 七里香"
+        track.working.artist = "周杰伦"
+
+        Processor(Settings(backup_enabled=False, offline_mode=True,
+                           strip_track_numbers=True, watermark_enabled=True)).run(
+            [track], BatchOptions(write_only=True, write_tags=True)
+        )
+        # 只写模式不做去序号，标题应保持「01. 七里香」
+        self.assertEqual(track.working.title, "01. 七里香")
+
+
 class TestQuarantine(unittest.TestCase):
     """隔离区：移动 / 还原 / 彻底删除。
 

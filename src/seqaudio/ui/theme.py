@@ -186,6 +186,12 @@ QPushButton#dangerSolid {{
 }}
 QPushButton#dangerSolid:hover {{ background: {p.bad}; }}
 QPushButton#dangerSolid:disabled {{ background: {_rgba(p.bad, 0.35)}; border-color: {_rgba(p.bad, 0.2)}; color: #c98f8f; }}
+QPushButton#success {{
+    background: {_rgba(p.ok, 0.90)}; border: 1px solid {_rgba(p.ok, 0.55)};
+    color: #ffffff; font-weight: 600;
+}}
+QPushButton#success:hover {{ background: {p.ok}; }}
+QPushButton#success:disabled {{ background: {_rgba(p.ok, 0.35)}; border-color: {_rgba(p.ok, 0.2)}; color: #8fc98f; }}
 
 /* ============================== 容器 ============================== */
 QFrame#card {{ background: {p.card}; border: 1px solid {p.line_soft}; border-radius: 10px; }}

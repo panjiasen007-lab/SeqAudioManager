@@ -24,7 +24,7 @@ from ..core import lyrics as lyrics_mod
 from ..core import rename as rename_mod
 from ..core import watermark, writer
 from ..core.config import Settings
-from ..core.model import ConflictMode, LyricsMode, Track, TrackStatus
+from ..core.model import ConflictMode, LyricsMode, Tags, Track, TrackStatus
 from ..core.probe import guess_album_from_folder, guess_from_filename
 from ..core.report import RunSummary
 from ..net.http import DiskCache, HttpClient
@@ -44,6 +44,7 @@ class BatchOptions:
     do_rename: bool = False
     force_write: bool = False
     ensure_covers: bool = False
+    write_only: bool = False     # 只写标签：跳过匹配/清洗，直接把 working 的变更落盘
     threshold: float = 0.62
 
 
@@ -125,6 +126,10 @@ class Processor:
         self.stats = BatchStats(total=len(tracks))
         self.emit("start", len(tracks))
 
+        # ---- 只写模式：用户已手动确认/编辑好，直接落盘，不做任何清洗 ----
+        if opts.write_only:
+            return self._run_write_only(tracks)
+
         matcher = self.matcher() if opts.match_online else None
 
         # ---- 阶段一：匹配与整理（只改内存，不落盘）----
@@ -193,6 +198,54 @@ class Processor:
         if track.status not in (TrackStatus.DONE, TrackStatus.FAILED):
             track.status = TrackStatus.SKIPPED
         self.emit("track", track)
+
+    # ------------------------------------------------------------ 只写模式
+
+    def _run_write_only(self, tracks: list[Track]) -> RunSummary:
+        """把用户已确认/编辑好的标签变更直接落盘，跳过匹配与清洗。
+
+        「全部确认保存」专用：用户可能在列表里手动编辑过、确认过候选，
+        这些改动只在内存（working），这里统一重建差异并写入磁盘。
+        """
+        writable = [
+            t for t in tracks
+            if t.status not in (TrackStatus.UNSUPPORTED, TrackStatus.SKIPPED, TrackStatus.FAILED)
+            and t.exists
+        ]
+        for track in writable:
+            self._rebuild_changed_fields(track)
+
+        self.emit("phase", "写入标签")
+        for index, track in enumerate(writable, start=1):
+            if self.cancel_event.is_set():
+                break
+            try:
+                self._write(track, BatchOptions(write_tags=True))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("写入失败：%s", track.path)
+                track.status = TrackStatus.FAILED
+                track.note(f"写入异常：{exc}")
+            self.emit("track", track)
+            self.emit("write_progress", (index, len(writable)))
+            time.sleep(0)
+
+        summary = RunSummary.of(tracks, elapsed=self.stats.elapsed)
+        self.emit("finish", summary)
+        log.info("只写完成：%s", summary.text())
+        return summary
+
+    @staticmethod
+    def _rebuild_changed_fields(track: Track) -> None:
+        """按 working 相对 original 的全字段差异重建 changed_fields。
+
+        不依赖之前累积的 changed_fields —— 用户可能绕过正常流程直接改过
+        working，统一在这里兜底，保证「全部确认保存」不漏写、不多写。
+        """
+        fields = list(Tags.TEXT_FIELDS) + ["comment", "lyrics"]
+        changed = [f for f in fields if track.working.get(f) != track.original.get(f)]
+        if track.working.cover != track.original.cover and "cover" not in changed:
+            changed.append("cover")
+        track.changed_fields = changed
 
     # ------------------------------------------------------------ 单首：准备
 
