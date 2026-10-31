@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         self._init_shortcuts()
 
         self._refresh_stats()
-        self.apply_theme(self.settings.theme)
+        self.apply_theme(self.settings.theme, persist=False)
         add_listener(self._log_listener)
         self._append_log("INFO", f"日志目录：{self._log_dir_hint()}")
         if settings.offline_mode:
@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
 
         self.settings_panel = SettingsPanel(self.settings)
         self.settings_panel.settingsChanged.connect(self._on_settings_changed)
+        self.settings_panel.saved.connect(self._on_settings_saved)
         self.settings_panel.spaceToggled.connect(self.toggle_space_background)
         QTimer.singleShot(0, lambda: self.btn_toggle_panel.setChecked(True))
         splitter.addWidget(self.settings_panel)
@@ -437,6 +438,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self, self.run_auto)
         QShortcut(QKeySequence("Ctrl+E"), self, self.edit_selected)
         QShortcut(QKeySequence("Ctrl+P"), self, self.toggle_settings_panel)
+        QShortcut(QKeySequence("Ctrl+S"), self, self.settings_panel.save)
         QShortcut(QKeySequence("Ctrl+Shift+D"), self, self.run_cleanup)
         QShortcut(QKeySequence("F1"), self, self.show_about)
 
@@ -552,6 +554,7 @@ class MainWindow(QMainWindow):
     def _start_worker(self, options: BatchOptions) -> None:
         self.settings_panel.apply_to(self.settings)
         self.settings.save()
+        self.settings_panel.mark_saved()
 
         tracks = self.model.tracks()
         self._set_running(True)
@@ -640,6 +643,12 @@ class MainWindow(QMainWindow):
         rows = self._selected_rows()
         if not rows:
             return
+        if QMessageBox.question(
+            self,
+            "移除选中项",
+            f"从列表移除 {len(rows)} 项？（不删除磁盘文件，但会丢失这些项的匹配/编辑状态，需重新导入）",
+        ) != QMessageBox.Yes:
+            return
         self.model.remove_rows(rows)
         self._refresh_stats()
 
@@ -705,6 +714,48 @@ class MainWindow(QMainWindow):
             self.model.refresh_row(track)
             self._append_log("INFO", f"{track.path.name} 已选定候选：{chosen.label}")
 
+    def confirm_selected(self) -> None:
+        """一键确认「待人工确认」曲目：检索后直接采纳最高分候选，无需逐个弹窗。"""
+        tracks = [
+            t for t in self._selected_tracks()
+            if t.status is TrackStatus.NEEDS_REVIEW
+        ]
+        if not tracks:
+            QMessageBox.information(
+                self, "无需确认",
+                "请先选中「待人工确认」状态的曲目（匹配置信度低于阈值的那批）。",
+            )
+            return
+        self._append_log("INFO", f"开始确认 {len(tracks)} 首（采纳最高分候选）")
+        for track in tracks:
+            worker = MatchPreviewWorker(self.settings, track)
+            worker.finishedMatch.connect(self._on_confirm)
+            worker.failedMatch.connect(
+                lambda t, msg: self._append_log("ERROR", f"确认失败 {t.path.name}：{msg}")
+            )
+            self._match_workers.append(worker)
+            worker.finished.connect(
+                lambda w=worker: self._match_workers.remove(w) if w in self._match_workers else None
+            )
+            worker.start()
+
+    def _on_confirm(self, track: Track, result) -> None:
+        if not result.candidates:
+            track.note("无可采纳的候选，请手动编辑标签")
+            self.model.refresh_row(track)
+            self._append_log("WARNING", f"{track.path.name} 未找到可确认的候选")
+            return
+        chosen = result.candidates[0]
+        changed = track.working.merge(chosen.to_tags(), self.settings.conflict())
+        track.confidence = chosen.confidence
+        track.source = chosen.source
+        track.status = TrackStatus.MATCHED
+        track.changed_fields.extend(c for c in changed if c not in track.changed_fields)
+        track.note(f"已确认：{chosen.label}（{chosen.confidence:.0%}）")
+        self.model.refresh_row(track)
+        self._refresh_stats()
+        self._append_log("INFO", f"{track.path.name} 已确认采纳：{chosen.label}")
+
     def open_folder(self) -> None:
         tracks = self._selected_tracks()
         if not tracks:
@@ -748,6 +799,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("编辑标签\tCtrl+E", self.edit_selected)
         menu.addAction("查看候选匹配", self.show_candidates)
+        menu.addAction("确认匹配（采纳最佳候选）", self.confirm_selected)
         menu.addAction("撤销本地修改", self.revert_selected)
         menu.addSeparator()
         menu.addAction("查看频谱", self.show_spectrum)
@@ -1076,7 +1128,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 主题
 
-    def apply_theme(self, name: str) -> None:
+    def apply_theme(self, name: str, *, persist: bool = True) -> None:
         if name not in theme.THEMES:
             return
         from PySide6.QtWidgets import QApplication
@@ -1097,17 +1149,18 @@ class MainWindow(QMainWindow):
             card.restyle()
         self.brand_bar.update()
         self.update()
-        try:
-            self.settings.save()
-        except OSError:
-            pass
+        if persist:
+            try:
+                self.settings.save()
+            except OSError:
+                pass
         self._append_log("INFO", f"主题已切换：{name}")
 
     # ------------------------------------------------------------ 星空背景
 
     def toggle_space_background(self, enabled: bool) -> None:
+        # 即时预览，不持久化 —— 持久化由参数面板的「保存参数」统一完成
         self.space.set_running(enabled)
-        self.settings.space_background = enabled
         self.scene_label.setVisible(enabled)
         # 菜单项与参数面板是同一开关的两个入口，要互相同步且不能互相触发
         for widget in (getattr(self, "action_space", None),
@@ -1117,11 +1170,6 @@ class MainWindow(QMainWindow):
             blocked = widget.blockSignals(True)
             widget.setChecked(enabled)
             widget.blockSignals(blocked)
-        try:
-            self.settings.save()
-        except OSError:
-            pass
-        self._append_log("INFO", f"星空背景已{'启用' if enabled else '关闭（省电模式）'}")
 
     def _on_scene_changed(self, name: str) -> None:
         self.scene_label.setText(f"星区 · {name}")
@@ -1237,14 +1285,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 设置
 
     def _on_settings_changed(self) -> None:
-        self.settings_panel.apply_to(self.settings)
-        QTimer.singleShot(400, self._save_settings_debounced)
+        # 参数修改只标记「未保存」，不再自动落盘；用户点「保存参数」才生效
+        self.status_hint.setText("参数已修改，点击右侧「保存参数」才会生效")
 
-    def _save_settings_debounced(self) -> None:
-        try:
-            self.settings.save()
-        except OSError as exc:
-            self._append_log("ERROR", f"设置保存失败：{exc}")
+    def _on_settings_saved(self) -> None:
+        # 保存后同步依赖设置的 UI 状态（星空、菜单勾选等）
+        self.status_hint.setText("参数已保存")
+        if getattr(self, "action_space", None) is not None:
+            blocked = self.action_space.blockSignals(True)
+            self.action_space.setChecked(self.settings.space_background)
+            self.action_space.blockSignals(blocked)
+        self.space.set_running(self.settings.space_background)
+        self.scene_label.setVisible(self.settings.space_background)
 
     # ------------------------------------------------------------ 日志与状态
 
@@ -1325,11 +1377,23 @@ class MainWindow(QMainWindow):
         if self.scan_worker is not None and self.scan_worker.isRunning():
             self.scan_worker.requestInterruption()
             self.scan_worker.wait(2000)
-        try:
-            self.settings_panel.apply_to(self.settings)
-            self.settings.save()
-        except OSError:
-            pass
+        # 未保存的参数修改：明确让用户选择，绝不静默自动保存 ——
+        # 否则「保存才生效」就是一句空话，关窗口一样能改配置
+        if self.settings_panel.is_dirty():
+            box = QMessageBox(self)
+            box.setWindowTitle("有未保存的参数")
+            box.setIcon(QMessageBox.Question)
+            box.setText("参数面板有未保存的修改，退出前要保存吗？")
+            save_btn = box.addButton("保存并退出", QMessageBox.AcceptRole)
+            box.addButton("不保存", QMessageBox.DestructiveRole)
+            cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                event.ignore()
+                return
+            if clicked is save_btn:
+                self.settings_panel.save()
         remove_listener(self._log_listener)
         event.accept()
 

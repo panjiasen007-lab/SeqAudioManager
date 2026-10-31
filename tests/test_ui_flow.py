@@ -120,6 +120,24 @@ def main() -> int:
         print("✗ 存在未完成曲目")
         ok = False
 
+    # 参数面板：修改 → 脏标记 → 还原（不写磁盘，避免污染用户配置）
+    panel = window.settings_panel
+    if panel.is_dirty():
+        print("✗ 参数面板初始不应处于未保存状态")
+        ok = False
+    original_recursive = panel.recursive_check.isChecked()
+    panel.recursive_check.setChecked(not original_recursive)
+    if not panel.is_dirty():
+        print("✗ 修改参数后应标记为未保存")
+        ok = False
+    if settings.recursive_scan == (not original_recursive):
+        print("✗ 未点保存前 settings 不应被改动")
+        ok = False
+    panel.revert()
+    if panel.is_dirty() or panel.recursive_check.isChecked() != original_recursive:
+        print("✗ 还原后应清除脏标记并恢复原值")
+        ok = False
+
     window.close()
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n界面流程测试：" + ("通过" if ok else "失败"))

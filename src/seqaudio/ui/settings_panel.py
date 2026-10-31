@@ -26,23 +26,32 @@ from . import theme
 from .widgets import Card
 
 
-class SettingsPanel(QScrollArea):
-    settingsChanged = Signal()
-    #: 星空背景开关需要立刻生效（不只是存进配置），单独发信号
+class SettingsPanel(QWidget):
+    settingsChanged = Signal()   # 有未保存的修改（不再自动落盘，仅标记脏）
+    saved = Signal()             # 「保存参数」成功后发出，主窗口据此刷新依赖设置的状态
+    #: 星空背景开关需要即时预览（不只是存进配置），单独发信号
     spaceToggled = Signal(bool)
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
         self._loading = False
-        self.setWidgetResizable(True)
-        self.setFrameShape(QScrollArea.NoFrame)
+        self._dirty = False
         self.setMinimumWidth(330)
         self.setMaximumWidth(420)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(8)
+
+        # 参数卡片区：可滚动；保存条固定在底部，不随卡片一起滚走
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         body = QWidget()
-        self.setWidget(body)
+        scroll.setWidget(body)
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 6, 0)
         layout.setSpacing(10)
@@ -57,7 +66,11 @@ class SettingsPanel(QScrollArea):
         layout.addWidget(self._build_ui_card())
         layout.addStretch(1)
 
+        root.addWidget(scroll, 1)
+        root.addWidget(self._build_save_bar())
+
         self.load_from(settings)
+        self._set_dirty(False)
 
     # ------------------------------------------------------------ 卡片构建
 
@@ -276,6 +289,73 @@ class SettingsPanel(QScrollArea):
         self.spaceToggled.emit(checked)
         self._notify()
 
+    def _build_save_bar(self) -> QWidget:
+        """底部保存条：修改参数后必须点「保存」才生效，未保存时高亮提示。"""
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(8)
+
+        self.dirty_label = QLabel("")
+        self.dirty_label.setObjectName("hint")
+        self.dirty_label.setStyleSheet(f"color:{theme.WARN};")
+
+        self.revert_btn = QPushButton("还原")
+        self.revert_btn.setObjectName("ghost")
+        self.revert_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_btn.setFixedHeight(32)
+        self.revert_btn.setToolTip("放弃本次未保存的修改，恢复为已保存的参数")
+        self.revert_btn.clicked.connect(self.revert)
+
+        self.save_btn = QPushButton("保存参数")
+        self.save_btn.setObjectName("primary")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.setFixedHeight(32)
+        self.save_btn.setToolTip("把当前参数写入并持久化（Ctrl+S）")
+        self.save_btn.clicked.connect(self.save)
+
+        layout.addWidget(self.dirty_label, 1)
+        layout.addWidget(self.revert_btn)
+        layout.addWidget(self.save_btn)
+        return bar
+
+    # ------------------------------------------------------------ 保存 / 还原
+
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    def _set_dirty(self, dirty: bool) -> None:
+        self._dirty = dirty
+        self.save_btn.setEnabled(dirty)
+        self.revert_btn.setEnabled(dirty)
+        self.dirty_label.setText("● 有未保存的修改" if dirty else "")
+        self.save_btn.setStyleSheet("" if dirty else "opacity:0.55;")
+
+    def save(self) -> None:
+        """把面板当前值写入 settings 并持久化。"""
+        self.apply_to(self.settings)
+        try:
+            self.settings.save()
+        except OSError as exc:
+            self.dirty_label.setText(f"保存失败：{exc}")
+            self.dirty_label.setStyleSheet(f"color:{theme.BAD};")
+            return
+        self._set_dirty(False)
+        self.saved.emit()
+
+    def revert(self) -> None:
+        """放弃未保存的修改，恢复为已保存的参数。"""
+        self.load_from(self.settings)
+        self._set_dirty(False)
+
+    def mark_saved(self) -> None:
+        """外部在 apply_to + save 之后调用，清除「未保存」标记。
+
+        运行按钮（一键全自动等）会在启动前把面板参数写入并保存，
+        这时面板的脏标记也应一并清除，避免「明明已保存却仍提示未保存」。
+        """
+        self._set_dirty(False)
+
     # ------------------------------------------------------------ 辅助
 
     @staticmethod
@@ -294,6 +374,7 @@ class SettingsPanel(QScrollArea):
 
     def _notify(self, *_) -> None:
         if not self._loading:
+            self._set_dirty(True)
             self.settingsChanged.emit()
 
     def _pick_backup_dir(self) -> None:
