@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -852,6 +852,17 @@ class MainWindow(QMainWindow):
             return
         from PySide6.QtWidgets import QMenu
 
+        # 修复：右键点击的行若不在当前选中集合里，先选中它（并清掉旧多选）。
+        # 否则「移入隔离区 / 删除歌曲」等操作拿到的 _selected_tracks() 是
+        # 之前选中的行，跟用户右键点的那一行对不上，表现就是「点了没反应」。
+        selected = self.table.selectionModel().selectedRows()
+        if index not in selected:
+            self.table.selectionModel().select(
+                index,
+                QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
+            )
+            self.table.setCurrentIndex(index)
+
         menu = QMenu(self)
         menu.addAction("编辑标签\tCtrl+E", self.edit_selected)
         menu.addAction("查看候选匹配", self.show_candidates)
@@ -860,6 +871,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("查看频谱", self.show_spectrum)
         menu.addAction("移入隔离区", self._quarantine_selected)
+        menu.addAction("删除歌曲…", self.delete_selected)
         menu.addSeparator()
         menu.addAction("打开所在文件夹", self.open_folder)
         menu.addAction("仅处理选中项", self._run_selected)
@@ -895,6 +907,77 @@ class MainWindow(QMainWindow):
         self.model.remove_tracks(removed)
         self._refresh_stats()
         self._append_log("WARNING", f"已隔离 {len(created)} 个文件，{len(failed)} 个失败")
+
+    def delete_selected(self) -> None:
+        """删除歌曲：把选中项的本地文件移入回收站或彻底删除（二次确认）。
+
+        与「移入隔离区」的区别：隔离区是软件自己的暂存（记录判定依据），
+        这里面向「用户就是不想再要这个文件」的场景，直接走系统回收站。
+        """
+        from ..core.quarantine import (
+            QuarantineStore,
+            delete_permanently,
+            send_to_recycle_bin,
+        )
+
+        tracks = [t for t in self._selected_tracks() if t.path.exists()]
+        if not tracks:
+            QMessageBox.information(self, "没有文件", "选中项没有可删除的本地文件。")
+            return
+        total = sum(t.path.stat().st_size for t in tracks)
+        paths = [t.path for t in tracks]
+
+        box = QMessageBox(self)
+        box.setWindowTitle("删除歌曲")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            f"将处理 {len(tracks)} 个音频文件（{total / 1024 / 1024:.0f} MB）。\n\n"
+            "「移入回收站」可还原；「彻底删除」不可恢复，请谨慎。"
+        )
+        box.addButton("移入回收站", QMessageBox.AcceptRole)
+        perm_btn = box.addButton("彻底删除", QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+
+        if clicked is cancel_btn or clicked is None:
+            return
+
+        if clicked is perm_btn:
+            # 彻底删除：不可恢复，再问一次
+            if QMessageBox.question(
+                self,
+                "最后确认",
+                f"确定要【彻底删除】{len(tracks)} 个文件吗？\n此操作不可恢复！",
+            ) != QMessageBox.Yes:
+                return
+            done, failed = delete_permanently(paths)
+            removed = [t for t in tracks if not t.path.exists()]
+            self._append_log(
+                "WARNING",
+                f"已彻底删除 {done} 个文件" + (f"，{len(failed)} 个失败" if failed else ""),
+            )
+            for path, reason in failed:
+                self._append_log("ERROR", f"删除失败 {path.name}：{reason}")
+        else:
+            count, error = send_to_recycle_bin(paths)
+            if count == 0:
+                # 回收站不可用（非 Windows 或策略禁用），回退隔离区，绝不丢文件
+                self._append_log("WARNING", f"回收站不可用（{error}），改用隔离区")
+                store = QuarantineStore()
+                created, failed = store.move_in([(t.path, "", "") for t in tracks])
+                removed = [t for t in tracks if not t.path.exists()]
+                self._append_log("WARNING", f"已隔离 {len(created)} 个文件（可还原）")
+            else:
+                removed = [t for t in tracks if not t.path.exists()]
+                self._append_log("WARNING", f"已移入回收站 {count} 个文件（可在资源管理器还原）")
+
+        if removed:
+            self.model.remove_tracks(removed)
+            self._refresh_stats()
+        self.status_hint.setText(
+            f"已删除 {len(removed)} 个文件" if removed else "删除未生效：文件仍存在，请检查权限"
+        )
 
     def _strip_selected_numbers(self) -> None:
         """对选中曲目的标题做一次「去序号」，立即可见。"""

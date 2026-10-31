@@ -15,16 +15,35 @@ from typing import Iterable
 
 from .model import Tags
 
-#: 默认强匹配词库：命中即认为整段是站点广告
+#: 常见域名后缀（大小写不敏感，见 compile_patterns 的 re.IGNORECASE）
+_TLD = r"(com|net|cn|org|cc|top|xyz|info|me|vip|club|shop|biz|co|tv|fm|mobi|la|link|site|online|store|xyz|wang)"
+
+#: 默认强匹配词库：命中即认为整段是站点广告（用于 comment 整段清空、尾部后缀删除）
 DEFAULT_STRONG_PATTERNS: tuple[str, ...] = (
-    r"www\.[\w\-]+\.(com|net|cn|org|cc|top|xyz|info)",
+    # ---- 域名 / 网址 / 邮箱（大小写不敏感）----
+    r"www\.[\w\-]+\." + _TLD,
     r"https?://",
-    r"[\w\-]+\.(com|net|cn|org|cc|top|xyz)(/|$)",
-    r"微信公众号",
+    r"[\w\-]+\.(?:" + _TLD + r")(/|$)",
+    r"[\w.+-]+@[\w\-]+\.(?:" + _TLD + r")",
+    # ---- 电话 / 手机 / QQ / 微信（大小写不敏感）----
+    r"1[3-9]\d{9}",                                  # 纯 11 位手机号
+    r"(微信|QQ|扣扣|电话|手机|联系|微)[：:\s]*1[3-9]\d{9}",
+    r"QQ[：:\s号]*\d{5,}",
+    r"微信[：:\s]*[A-Za-z0-9_\-]{4,}",
+    r"vx[：:\s]",
+    r"0\d{2,3}[-－]\d{7,8}",                          # 座机号
+    # ---- 社交 / 平台账号（大小写不敏感）----
+    r"微博[：:\s]",
     r"公众号[：:]",
-    r"QQ群",
-    r"微信[：:]",
-    r"交流群",
+    r"微信公众号",
+    r"@[\w\u4e00-\u9fff]{2,}",
+    r"(抖音|快手|小红书|B站|哔哩|知乎|淘宝|天猫|京东|拼多多)[：:\s]*",
+    r"(关注|订阅|点赞|转发|分享|收藏)[：:]",
+    # ---- 网盘 / 资源 ----
+    r"(百度云|网盘|蓝奏云|阿里云盘|夸克|迅雷|磁力|种子)[：:\s]*",
+    r"(加群|进群|入群|粉丝群|交流群|QQ群)",
+    r"(优惠|邀请|兑换|激活)码[：:\s]*",
+    # ---- 推广 / 版权话术 ----
     r"更多(音乐|歌曲|资源)",
     r"音乐(网|站|论坛|社区)",
     r"(下载|转载|首发|整理|制作|压制|抓轨|翻录)[\s]*[：:]",
@@ -35,31 +54,27 @@ DEFAULT_STRONG_PATTERNS: tuple[str, ...] = (
     r"(下载|获取|访问)[\s]*[A-Za-z0-9\-\.]{3,}",
     r"(整理|制作|压制|抓轨|翻录|首发|转载)(版)?$",
     r"歌词.{0,12}(提供|制作|下载|编辑)",
-    # ---- 联系方式 / 社交账号（常见于 comment 与名字后缀）----
-    r"[\w.\-]+@[\w\-]+\.(com|net|cn|org)",
-    r"微博[：:\s]",
-    r"@[\w\u4e00-\u9fff]{2,}",
-    r"(微信|QQ|扣扣|电话|手机|联系|微)[：:\s]*1[3-9]\d{9}",
-    r"QQ[：:\s]*\d{5,}",
-    r"(关注|订阅|点赞|转发|分享)[：:]",
-    r"(百度云|网盘|蓝奏云|阿里云盘|夸克|迅雷|磁力)[：:\s]*",
-    r"(加群|进群|入群|粉丝群|交流群)",
-    r"vx[：:]",
 )
 
-#: 片段匹配词库：出现在括号里时删除该括号片段（用于标题/专辑/流派清理）
+#: 片段匹配词库：出现在括号里时删除该括号片段（用于标题/专辑/流派等识别字段）
 DEFAULT_SEGMENT_PATTERNS: tuple[str, ...] = (
     r"www\.",
     r"https?://",
-    r"[\w\-]+\.(com|net|cn|org|cc|top|xyz)",
-    r"[\w.\-]+@[\w\-]+\.",
+    r"[\w\-]+\.(?:" + _TLD + r")",
+    r"[\w.+-]+@[\w\-]+\.",
+    r"1[3-9]\d{9}",
+    r"QQ[：:]?\d{4,}",
+    r"微信[：:]?",
+    r"vx[：:]?",
     r"微博",
     r"公众号",
-    r"QQ[：:]?",
-    r"微信",
+    r"抖音",
+    r"快手",
+    r"小红书",
     r"关注",
     r"订阅",
     r"网盘",
+    r"百度云",
     r"高音质",
     r"无损音质",
     r"免费下载",
@@ -134,6 +149,21 @@ def _strip_tail_suffix(text: str, strong: list[re.Pattern[str]]) -> str:
     return text
 
 
+def _strip_tail_space_segment(text: str, strong: list[re.Pattern[str]]) -> str:
+    """删除「空格分隔」的尾部广告片段（如 ``3 www.xxx.com`` → ``3``）。
+
+    只删「明确是广告」的片段（命中强规则：域名/邮箱/手机号/QQ 等），
+    正常的 ``Hotel California`` 之类不会动。
+    """
+    match = re.search(r"\s+([^\s\-_|/–—]{2,40})$", text)
+    if not match:
+        return text
+    tail = match.group(1)
+    if is_watermark(tail, strong):
+        return text[: match.start()].rstrip()
+    return text
+
+
 def clean_text(
     text: str,
     strong: list[re.Pattern[str]],
@@ -154,6 +184,7 @@ def clean_text(
         return ""
     candidate = _strip_bracket_segments(candidate, segment)
     candidate = _strip_tail_suffix(candidate, strong)
+    candidate = _strip_tail_space_segment(candidate, strong)
     candidate = re.sub(r"\s{2,}", " ", candidate).strip(" -_|/–—\t")
     return candidate
 
@@ -202,7 +233,7 @@ def clean_tags(
             tags.albumartist = cleaned
             report.changed_fields.append("albumartist")
 
-    for field_name in ("album", "artist", "genre"):
+    for field_name in ("album", "artist", "genre", "date", "track", "disc"):
         value = tags.get(field_name)
         if not value:
             continue

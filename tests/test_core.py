@@ -102,6 +102,36 @@ class TestWatermark(unittest.TestCase):
         watermark.clean_tags(t)
         self.assertEqual(t.comment, "")
 
+    def test_uppercase_domain_recognized(self) -> None:
+        """大小写都要识别：WWW.XXX.COM / ABC@QQ.COM 这类全大写同样清理。"""
+        t = Tags(comment="WWW.MUSIC-SHARE.COM 下载 ABC@QQ.COM")
+        watermark.clean_tags(t)
+        self.assertEqual(t.comment, "")
+        t2 = Tags(genre="流行【WWW.XXX.COM】")
+        watermark.clean_tags(t2)
+        self.assertEqual(t2.genre, "流行")
+
+    def test_phone_and_qq_in_structured_fields(self) -> None:
+        """所有字段都要清：date/track 这类结构化字段含广告也要去。"""
+        t = Tags(track="3 www.xxx.com", date="2007 [无损音质]")
+        watermark.clean_tags(t)
+        self.assertEqual(t.track, "3")
+        self.assertEqual(t.date, "2007")
+
+    def test_tail_space_segment_removed(self) -> None:
+        t = Tags(artist="周杰伦 QQ12345678", album="七里香 无损音乐下载")
+        watermark.clean_tags(t)
+        self.assertEqual(t.artist, "周杰伦")
+        self.assertEqual(t.album, "七里香")
+
+    def test_tail_space_normal_kept(self) -> None:
+        """空格分隔的正常内容（Hotel California）不应被误删。"""
+        t = Tags(title="Hotel California", track="3/12")
+        report = watermark.clean_tags(t)
+        self.assertEqual(t.title, "Hotel California")
+        self.assertEqual(t.track, "3/12")
+        self.assertNotIn("title", report.changed_fields)
+
 
 class TestScript(unittest.TestCase):
     """书写体检测与繁→简转换。"""
