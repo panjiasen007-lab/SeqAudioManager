@@ -7,5 +7,7 @@ PySide6>=6.7.0         # Qt6 界面（LGPL，商业友好，Win10/11 稳定）
 #   - 减少打包体积与 DLL 冲突面，Win7 兼容模式也更稳
 
 # ---- 打包（开发期）----
-# nuitka>=2.4
+# pyinstaller>=6.0       # 默认打包器：python build.py（零编译依赖）
+# nuitka>=2.4            # 可选：更小更快，需 MSVC 且 Python ≤ 3.12
 # zstandard
+# ordered-set

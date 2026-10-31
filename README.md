@@ -14,7 +14,7 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 | 标签引擎 | **mutagen** | 唯一同时覆盖 FLAC/APE/WV/TTA/DSF/DFF/MP4/ID3 的成熟库；`save()` 只替换标签区块，天然满足无损要求 |
 | 界面 | **PySide6 (Qt 6)** | Qt 官方维护，Win10/11 高分屏与 125%/150% 缩放表现稳定；LGPL 授权，商业分发无负担 |
 | 网络 | 标准库 `urllib` | 目标 API 都是简单 GET，无需 HTTP/2；少一层依赖就少一层 DLL 冲突，打包更小 |
-| 打包 | **Nuitka** | 编译成 C，启动快、体积小、杀软误报显著少于 PyInstaller |
+| 打包 | **PyInstaller**（默认） / Nuitka（可选） | PyInstaller 零编译依赖，装完即出包；Nuitka 更快更小但需要 MSVC，且 Python 3.13 起不再支持 MinGW |
 
 被排除的方案：C# + TagLib#（DSD/TTA/WV 支持残缺、DFF 基本没有）、Rust + Tauri + lofty（DFF 仍需手写，周期过长）、C++ + Qt（维护成本高）。
 
@@ -81,11 +81,26 @@ python tests/make_samples.py
 ## 打包单文件 EXE
 
 ```bash
+pip install pyinstaller
+python build.py               # 产物：dist/音序管家.exe（约 45 MB）
+python build.py --debug       # 保留控制台窗口排查启动问题
+python build.py --onedir      # 目录版，启动最快，便于定位缺失 DLL
+```
+
+已验证产物：`dist/音序管家.exe` 45.3 MB，双击即开，配置与日志写在 EXE 同级 `data/`（绿色），同级不可写时自动回落 `%APPDATA%/SeqAudioManager`。
+
+### 想要更快启动 / 更小体积
+
+Nuitka 编译版启动快 30%~50%、误报更少，但有两个硬性前提：
+
+1. **Python ≤ 3.12** —— 3.13 起 Nuitka 已禁用 `--mingw64`，必须装 MSVC；
+2. 安装 Visual Studio Build Tools（MSVC v143 + Windows SDK），且环境允许 `reg.exe` 查询注册表（Nuitka 靠它探测 MSVC，被安全策略禁用会卡在编译器检测阶段）。
+
+满足后：
+
+```bash
 pip install nuitka zstandard ordered-set
-python tools/make_icon.py     # 生成 assets/app.ico
-python build.py               # 产物：dist/音序管家.exe
-python build.py --debug       # 保留控制台窗口排查问题
-python build.py --onedir      # 目录版，启动更快
+python build.py --toolkit nuitka
 ```
 
 ---
