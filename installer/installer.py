@@ -443,6 +443,11 @@ class Installer(QWidget):
     # ------------------------------------------------------------ 交互
 
     def _refresh_buttons(self) -> None:
+        # 构造期会被提前调用：_build_options_page 里调 _on_path_changed，
+        # 而后者会走到这里 —— 此时底部按钮（btn_next/btn_back）还没建出来。
+        # 加上守卫，构造期直接跳过，等 _build_footer 完成后 __init__ 末尾再统一刷新。
+        if not hasattr(self, "btn_next"):
+            return
         index = self.stack.currentIndex()
         self.btn_back.setVisible(index == 1)
         if index == 0:
