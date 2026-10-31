@@ -43,6 +43,7 @@ class BatchOptions:
     fetch_lyrics: bool = True
     do_rename: bool = False
     force_write: bool = False
+    ensure_covers: bool = False
     threshold: float = 0.62
 
 
@@ -171,6 +172,13 @@ class Processor:
         if opts.do_rename and not self.cancel_event.is_set():
             self._batch_rename(tracks)
 
+        # ---- 阶段五：文件夹封面 ----
+        # 强制每个文件夹至少一张 cover：专辑封面 > 歌手照片。
+        # 放在重命名之后，因为重命名模板可能创建子文件夹，最终落点才准确。
+        if opts.ensure_covers and not self.cancel_event.is_set():
+            self.emit("phase", "生成文件夹封面")
+            self._ensure_folder_covers(tracks)
+
         summary = RunSummary.of(tracks, elapsed=self.stats.elapsed)
         self.emit("finish", summary)
         log.info("批处理结束：%s", summary.text())
@@ -240,7 +248,6 @@ class Processor:
                 track.lyrics_src = "本地"
 
         # ---- 5. 联网匹配 ----
-        accepted = False
         result: Optional[MatchResult] = None
         album_hint = self._album_hint(track)
         if matcher is not None:
@@ -254,7 +261,6 @@ class Processor:
                 changed = track.working.merge(incoming, s.conflict())
                 track.changed_fields.extend(c for c in changed if c not in track.changed_fields)
                 track.status = TrackStatus.MATCHED
-                accepted = True
                 track.note(f"匹配：{cand.label}（{cand.confidence:.0%}，{cand.source}）")
                 if cand.cover:
                     track.note("已获取封面")
@@ -475,6 +481,27 @@ class Processor:
         else:
             track.status = TrackStatus.FAILED
             track.note(outcome.message)
+
+    def _ensure_folder_covers(self, tracks: list[Track]) -> None:
+        """阶段五：每个文件夹确保一张 cover（专辑封面 → 歌手照片）。"""
+        from .covers import ensure_folder_covers
+
+        s = self.settings
+
+        def on_progress(index: int, total: int, folder: Path) -> None:
+            self.emit("cover_progress", (index, total))
+
+        summary = ensure_folder_covers(
+            tracks,
+            self.client,
+            use_itunes=s.use_itunes,
+            use_netmusic=s.use_netmusic,
+            use_deezer=True,
+            on_progress=on_progress,
+            cancel=self.cancel_event,
+        )
+        self.emit("log", ("INFO", summary.text()))
+        self.emit("cover_summary", summary)
 
     def _batch_rename(self, tracks: list[Track]) -> None:
         s = self.settings

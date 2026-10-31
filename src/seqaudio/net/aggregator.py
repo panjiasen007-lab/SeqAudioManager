@@ -17,8 +17,9 @@ import logging
 from typing import Callable, Optional
 
 from ..core.model import MatchCandidate
+from . import artist as artist_mod
 from . import coverart, itunes, lrclib, musicbrainz, netmusic
-from .http import HttpClient
+from .http import HttpClient, sniff_image_mime
 
 log = logging.getLogger(__name__)
 
@@ -106,3 +107,74 @@ def fetch_cover(
         if data:
             return data, mime
     return None, ""
+
+
+def _download_remote(client: HttpClient, url: str) -> tuple[Optional[bytes], str]:
+    if not url:
+        return None, ""
+    try:
+        data = client.get_bytes(url, max_size=5 * 1024 * 1024, attempts=1, timeout=6.0)
+    except Exception:  # noqa: BLE001
+        return None, ""
+    if not data or len(data) <= 128:
+        return None, ""
+    return data, sniff_image_mime(data)
+
+
+def fetch_album_cover(
+    client: HttpClient,
+    title: str,
+    artist: str = "",
+    album: str = "",
+    *,
+    use_itunes: bool = True,
+    use_netmusic: bool = True,
+) -> tuple[Optional[bytes], str, str]:
+    """按「专辑 + 歌手」搜一张封面，返回 (字节, mime, 来源)。
+
+    这是「每文件夹一张 cover」的二级兜底：曲目本身没匹配到封面时，
+    用专辑名再搜一次。用专辑名优先（比歌名更稳），搜不到再退回歌名。
+    """
+    query_title = (album or title).strip()
+    if not query_title:
+        return None, "", ""
+
+    if use_itunes:
+        candidates = itunes.search(client, query_title, artist)
+        for cand in candidates:
+            img, mime = _download_remote(client, cand.cover_url)
+            if img:
+                return img, mime, "iTunes"
+        # 专辑名搜不到再按歌名搜一次
+        if album and album != title:
+            for cand in itunes.search(client, title, artist):
+                img, mime = _download_remote(client, cand.cover_url)
+                if img:
+                    return img, mime, "iTunes"
+
+    if use_netmusic:
+        candidates = netmusic.search(client, query_title, artist)
+        for cand in candidates:
+            img, mime = _download_remote(client, cand.cover_url)
+            if img:
+                return img, mime, "网易云"
+        if album and album != title:
+            for cand in netmusic.search(client, title, artist):
+                img, mime = _download_remote(client, cand.cover_url)
+                if img:
+                    return img, mime, "网易云"
+
+    return None, "", ""
+
+
+def fetch_artist_photo(
+    client: HttpClient,
+    artist: str = "",
+    *,
+    use_deezer: bool = True,
+    use_netmusic: bool = True,
+) -> tuple[Optional[bytes], str, str]:
+    """歌手照片兜底：Deezer → 网易云。返回 (字节, mime, 来源)。"""
+    return artist_mod.fetch_artist_photo(
+        client, artist, use_deezer=use_deezer, use_netmusic=use_netmusic
+    )

@@ -658,5 +658,68 @@ class TestUninstallScript(unittest.TestCase):
         self.assertIn("Uninstall\\SeqAudioManager", script)
 
 
+class TestFolderCover(unittest.TestCase):
+    """每文件夹至少一张 cover：本地识别/写入 + 离线编排（不依赖网络）。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_cover_"))
+        self.cover = __import__("seqaudio.core.cover", fromlist=["cover"])
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_folder_has_cover_detects_common_names(self) -> None:
+        folder = self.tmp / "a"
+        folder.mkdir()
+        self.assertFalse(self.cover.folder_has_cover(folder))
+        (folder / "cover.jpg").write_bytes(b"x")
+        self.assertTrue(self.cover.folder_has_cover(folder))
+        (folder / "cover.jpg").unlink()
+        (folder / "folder.png").write_bytes(b"x")
+        self.assertTrue(self.cover.folder_has_cover(folder))
+
+    def test_write_folder_cover_uses_mime_ext(self) -> None:
+        folder = self.tmp / "b"
+        folder.mkdir()
+        self.cover.write_folder_cover(folder, b"\x89PNG\r\n\x1a\n" + b"0" * 100, "image/png")
+        self.assertTrue((folder / "cover.png").exists())
+        self.cover.write_folder_cover(folder, b"\xff\xd8\xff" + b"0" * 100, "image/jpeg")
+        self.assertTrue((folder / "cover.jpg").exists())
+
+    def test_first_cover_prefers_working(self) -> None:
+        track = Track(path=self.tmp / "x.flac")
+        track.original.cover = b"\x89PNG\r\n\x1a\n" + b"A" * 100
+        track.original.cover_mime = "image/png"
+        data, mime = self.cover.first_cover([track])
+        self.assertIsNotNone(data)
+        self.assertEqual(mime, "image/png")
+
+    def test_ensure_folder_covers_offline(self) -> None:
+        """离线：内存封面直接写、已有封面跳过、无封面则失败，不崩。"""
+        from seqaudio.core.model import TrackStatus
+        from seqaudio.net.http import HttpClient
+        from seqaudio.pipeline.covers import ensure_folder_covers
+
+        fa = self.tmp / "有封面"
+        fa.mkdir()
+        fb = self.tmp / "已有"
+        fb.mkdir()
+        (fb / "cover.jpg").write_bytes(b"EXIST")
+
+        t1 = Track(path=fa / "a.flac")
+        t1.status = TrackStatus.DONE
+        t1.working.cover = b"\x89PNG\r\n\x1a\n" + b"B" * 200
+        t1.working.cover_mime = "image/png"
+        t2 = Track(path=fb / "b.flac")
+        t2.status = TrackStatus.DONE
+
+        client = HttpClient(offline=True)
+        summary = ensure_folder_covers([t1, t2], client)
+        self.assertTrue((fa / "cover.png").exists())
+        self.assertEqual((fb / "cover.jpg").read_bytes(), b"EXIST")  # 未被覆盖
+        self.assertEqual(summary.created, 1)
+        self.assertEqual(summary.existing, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

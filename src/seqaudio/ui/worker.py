@@ -54,6 +54,8 @@ class ProcessorWorker(QThread):
     trackUpdated = Signal(object)
     progressChanged = Signal(int, int)
     writeProgress = Signal(int, int)      # 第二阶段（落盘）进度
+    coverProgress = Signal(int, int)      # 第五阶段（文件夹封面）进度
+    coverSummary = Signal(object)         # CoverSummary
     phaseChanged = Signal(str)            # 当前阶段名
     logMessage = Signal(str, str)
     finishedRun = Signal(object)
@@ -91,6 +93,11 @@ class ProcessorWorker(QThread):
         elif kind == "write_progress":
             index, total = payload  # type: ignore[misc]
             self.writeProgress.emit(int(index), int(total))
+        elif kind == "cover_progress":
+            index, total = payload  # type: ignore[misc]
+            self.coverProgress.emit(int(index), int(total))
+        elif kind == "cover_summary":
+            self.coverSummary.emit(payload)
         elif kind == "phase":
             self.phaseChanged.emit(str(payload))
         elif kind == "start":
@@ -186,3 +193,61 @@ class AuthenticityWorker(QThread):
             log.exception("批量鉴定失败")
             self.failed.emit(str(exc))
         self.finishedAll.emit(true_count, suspect, unknown)
+
+
+class CoverWorker(QThread):
+    """独立的「生成文件夹封面」操作：为每个文件夹确保一张 cover。"""
+
+    progressChanged = Signal(int, int)
+    summaryReady = Signal(object)         # CoverSummary
+    logMessage = Signal(str, str)
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, settings: Settings, tracks: list[Track], parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.tracks = list(tracks)
+        self._cancel_event = None
+
+    def run(self) -> None:
+        import threading
+
+        from ..core.model import TrackStatus
+        from ..net.http import DiskCache, HttpClient
+        from ..pipeline.covers import ensure_folder_covers
+
+        cancel = threading.Event()
+        self._cancel_event = cancel
+
+        client = HttpClient(
+            proxy=self.settings.http_proxy,
+            timeout=self.settings.request_timeout,
+            concurrency=self.settings.concurrency,
+            cache=DiskCache(ttl_days=self.settings.cache_ttl_days),
+            offline=self.settings.offline_mode,
+        )
+        targets = [
+            t for t in self.tracks
+            if t.status is not TrackStatus.UNSUPPORTED and t.path.exists()
+        ]
+        try:
+            summary = ensure_folder_covers(
+                targets,
+                client,
+                use_itunes=self.settings.use_itunes,
+                use_netmusic=self.settings.use_netmusic,
+                use_deezer=True,
+                on_progress=lambda i, n, folder: self.progressChanged.emit(i, n),
+                cancel=cancel,
+            )
+            self.summaryReady.emit(summary)
+            self.logMessage.emit("INFO", summary.text())
+        except Exception as exc:  # noqa: BLE001
+            log.exception("文件夹封面生成失败")
+            self.failed.emit(str(exc))
+        self.finished.emit()
+
+    def cancel(self) -> None:
+        if self._cancel_event is not None:
+            self._cancel_event.set()

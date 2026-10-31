@@ -82,6 +82,9 @@ class Settings:
     space_background: bool = True          # 星空动态背景
     cleanup_include_suspect: bool = True   # 清理时是否包含「疑似」项
 
+    # ---- 文件夹封面 ----
+    ensure_folder_cover: bool = True       # 处理完成后每个文件夹至少一张 cover（专辑封面→歌手照片）
+
     # ---- 其他 ----
     offline_mode: bool = False
     last_folder: str = ""

@@ -52,7 +52,7 @@ from .track_model import (
 )
 from .space import SpaceView
 from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
-from .worker import AuthenticityWorker, MatchPreviewWorker, ProcessorWorker, ScanWorker
+from .worker import AuthenticityWorker, CoverWorker, MatchPreviewWorker, ProcessorWorker, ScanWorker
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.scan_worker: Optional[ScanWorker] = None
         self._match_workers: list[MatchPreviewWorker] = []
         self.auth_worker: Optional[AuthenticityWorker] = None
+        self.cover_worker: Optional[CoverWorker] = None
         self._stat_cards: dict[str, StatCard] = {}
         self._i18n_buttons: dict[QPushButton, str] = {}
         self._i18n_stat_keys: dict[str, str] = {}
@@ -239,6 +240,7 @@ class MainWindow(QMainWindow):
         self.action_report = menu.addAction("导出处理报表…", self.export_report)
         menu.addAction("清空列表", self.clear_all)
         menu.addAction("批量导出封面…", self.export_covers)
+        menu.addAction("生成文件夹封面", self.run_folder_covers)
         menu.addSeparator()
         menu.addAction("去除选中标题的序号", self._strip_selected_numbers)
         menu.addSeparator()
@@ -520,6 +522,7 @@ class MainWindow(QMainWindow):
                 write_tags=True,
                 fetch_lyrics=self.settings.use_lrclib or self.settings.use_local_lyrics,
                 do_rename=self.settings.rename_enabled,
+                ensure_covers=self.settings.ensure_folder_cover,
             )
         )
 
@@ -533,6 +536,7 @@ class MainWindow(QMainWindow):
                 write_tags=True,
                 fetch_lyrics=True,
                 do_rename=self.settings.rename_enabled,
+                ensure_covers=self.settings.ensure_folder_cover,
             )
         )
 
@@ -565,6 +569,8 @@ class MainWindow(QMainWindow):
         self.worker.trackUpdated.connect(lambda _: self._refresh_stats())
         self.worker.progressChanged.connect(self._on_progress)
         self.worker.writeProgress.connect(self._on_write_progress)
+        self.worker.coverProgress.connect(self._on_cover_progress)
+        self.worker.coverSummary.connect(self._on_cover_summary)
         self.worker.phaseChanged.connect(self._on_phase)
         self.worker.finishedRun.connect(self._on_finished)
         self.worker.start()
@@ -584,6 +590,10 @@ class MainWindow(QMainWindow):
             self.worker.cancel()
             self.btn_stop.setEnabled(False)
             self._append_log("WARNING", "已请求停止，正在结束当前文件…")
+        if self.cover_worker is not None and self.cover_worker.isRunning():
+            self.cover_worker.cancel()
+            self.btn_stop.setEnabled(False)
+            self._append_log("WARNING", "已请求停止文件夹封面生成…")
 
     def _on_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
@@ -594,6 +604,14 @@ class MainWindow(QMainWindow):
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
         self.status_hint.setText(f"写入标签 {index} / {total}")
+
+    def _on_cover_progress(self, index: int, total: int) -> None:
+        self.progress.setMaximum(max(1, total))
+        self.progress.setValue(index)
+        self.status_hint.setText(f"生成文件夹封面 {index} / {total}")
+
+    def _on_cover_summary(self, summary) -> None:
+        self.status_hint.setText(summary.text() if hasattr(summary, "text") else "")
 
     def _on_phase(self, name: str) -> None:
         self.brand_bar.set_status(name, theme.CYAN)
@@ -1130,6 +1148,47 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "导出完成", f"成功导出 {exported} 张封面，跳过 {skipped} 个无封面文件。"
         )
+
+    # ------------------------------------------------------------ 文件夹封面
+
+    def run_folder_covers(self) -> None:
+        """独立操作：为每个文件夹生成一张 cover（专辑封面 → 歌手照片）。"""
+        from ..core.model import TrackStatus
+
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "请稍候", "批处理正在运行，先等它完成。")
+            return
+        if self.cover_worker is not None and self.cover_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "文件夹封面正在生成中。")
+            return
+
+        tracks = [
+            t for t in self.model.tracks()
+            if t.status is not TrackStatus.UNSUPPORTED and t.path.exists()
+        ]
+        if not tracks:
+            QMessageBox.information(self, "没有曲目", "请先添加音频文件。")
+            return
+
+        self._set_running(True)
+        self.progress.setMaximum(max(1, len(tracks)))
+        self.progress.setValue(0)
+        self.brand_bar.set_status("生成封面", theme.CYAN)
+        self._append_log("INFO", f"开始为 {len(tracks)} 首所在文件夹生成封面")
+
+        self.cover_worker = CoverWorker(self.settings, tracks)
+        self.cover_worker.progressChanged.connect(self._on_cover_progress)
+        self.cover_worker.summaryReady.connect(self._on_cover_summary)
+        self.cover_worker.logMessage.connect(self._append_log)
+        self.cover_worker.finished.connect(self._on_folder_covers_finished)
+        self.cover_worker.failed.connect(lambda m: self._append_log("ERROR", f"文件夹封面失败：{m}"))
+        self.cover_worker.start()
+
+    def _on_folder_covers_finished(self) -> None:
+        self._set_running(False)
+        self.brand_bar.set_status("就绪", theme.FG_DIM)
+        self.model.refresh_all()
+        self._refresh_stats()
 
     # ------------------------------------------------------------ 重命名 / 报表
 

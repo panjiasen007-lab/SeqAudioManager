@@ -47,3 +47,6 @@ desktop.ini
 
 # Nuitka 崩溃报告
 nuitka-crash-report.xml
+
+# 提交信息的临时文件（勿跟踪）
+.git-commit-msg.txt

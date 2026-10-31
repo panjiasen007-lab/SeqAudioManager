@@ -250,6 +250,14 @@ class SettingsPanel(QScrollArea):
         self.suspect_check.toggled.connect(self._notify)
         card.add_widget(self.suspect_check)
 
+        self.cover_check = QCheckBox("每个文件夹生成封面")
+        self.cover_check.setToolTip(
+            "处理完成后，为每个文件夹写入一张 cover 图：\n"
+            "专辑封面优先，匹配不到时用歌手照片兜底"
+        )
+        self.cover_check.toggled.connect(self._notify)
+        card.add_widget(self.cover_check)
+
         hint = QLabel("判定只在本地做频谱分析，不会上传任何音频。")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -327,6 +335,7 @@ class SettingsPanel(QScrollArea):
             self.min_duration_spin.setValue(int(settings.min_duration_sec))
             self.space_check.setChecked(settings.space_background)
             self.suspect_check.setChecked(settings.cleanup_include_suspect)
+            self.cover_check.setChecked(settings.ensure_folder_cover)
         finally:
             self._loading = False
 
@@ -370,4 +379,5 @@ class SettingsPanel(QScrollArea):
 
         settings.space_background = self.space_check.isChecked()
         settings.cleanup_include_suspect = self.suspect_check.isChecked()
+        settings.ensure_folder_cover = self.cover_check.isChecked()
         return settings
