@@ -17,8 +17,8 @@ from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Iterable, Optional
 
-from ..core.model import MatchCandidate, Tags, Track
-from ..core.watermark import DEFAULT_SEGMENT_PATTERNS, DEFAULT_STRONG_PATTERNS
+from ..core.model import MatchCandidate, Track
+from ..core.script import to_simplified
 from ..net import aggregator, lrclib
 from ..net.http import HttpClient
 
@@ -27,28 +27,6 @@ _VERSION_HINTS = (
     "live", "remix", "acoustic", "instrumental", "伴奏", "现场", "翻唱", "dj", "demo",
     "演唱会", "演奏会", "音乐会", "karaoke", "ktv", "remastered", "重制",
 )
-
-#: 繁体 -> 简体（仅覆盖音乐标签高频字）。
-#: MusicBrainz 中文条目绝大多数用繁体，不做归一会导致相似度偏低、版本标记失配。
-_T2S_SRC = """
-陳陈 張张 劉刘 黃黄 楊杨 趙赵 吳吴 鄭郑 許许 鄧邓 謝谢 羅罗 蕭萧 盧卢 葉叶 蘇苏 呂吕
-蔣蒋 韓韩 賈贾 馮冯 陸陆 週周 龔龚 譚谭 鍾钟 鐘钟 嚴严 歐欧 賴赖 溫温 萬万 賴赖 麥麦
-語语 樂乐 風风 學学 國国 愛爱 夢梦 說说 時时 間间 現现 場场 會会 聲声 聽听 無无 為为
-這这 個个 們们 來来 對对 開开 關关 後后 麼么 樣样 過过 還还 經经 給给 讓让 從从 問问
-題题 東东 車车 門门 見见 電电 話话 頭头 長长 與与 點点 陽阳 雲云 續续 龍龙 鳳凤 蘭兰
-華华 歡欢 氣气 遠远 錢钱 錯错 難难 變变 邊边 歲岁 歸归 誰谁 傷伤 淚泪 離离 記记 憶忆
-願愿 約约 親亲 獨独 藍蓝 綠绿 紅红 銀银 鐵铁 嗎吗 麗丽 裡里 著着 於于 僅仅 妳你 牠它
-無无 際际 際际 傳传 統统 順顺 檢检 視视 覺觉 傑杰 倫伦 儀仪 優优 偉伟 側侧 債债 傳传
-"""
-
-_T2S = {}
-for _pair in _T2S_SRC.split():
-    if len(_pair) == 2:
-        _T2S[ord(_pair[0])] = _pair[1]
-
-
-def to_simplified(text: str) -> str:
-    return text.translate(_T2S)
 
 
 def normalize(text: str) -> str:

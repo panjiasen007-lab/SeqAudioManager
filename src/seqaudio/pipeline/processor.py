@@ -150,6 +150,10 @@ class Processor:
         if not self.cancel_event.is_set():
             self._unify_album_fields(tracks)
 
+        # ---- 阶段二 b：艺术家名字书写体统一（简繁不混搭）----
+        if not self.cancel_event.is_set():
+            self._unify_artist_names(tracks)
+
         # ---- 阶段三：落盘 ----
         if opts.write_tags and not self.cancel_event.is_set():
             self.emit("phase", "写入标签")
@@ -384,6 +388,57 @@ class Processor:
             if touched:
                 log.info("专辑收敛 %s：%d 首统一为《%s》%s", group[0].path.parent.name,
                          touched, best_album, best_year)
+
+    def _unify_artist_names(self, tracks: list[Track]) -> None:
+        """同一目录下艺术家名字书写体统一（简繁不混搭）。
+
+        MusicBrainz 返回繁体（陳奕迅 / 周杰倫），iTunes 与本地标签多为简体，
+        逐首写回就是「一张专辑两种写法」。这里按目录分组、按「繁转简后的
+        语义簇」聚合，把繁体写法统一到组内出现最多的简体写法。
+
+        只做**繁→简**（确定映射、零歧义）；纯繁体曲库（组内没有简体写法）保持原样。
+        英文名与中文名语义不同簇，互不转换。
+        """
+        if not self.settings.unify_artist_script:
+            return
+
+        from collections import Counter, defaultdict
+
+        from ..core.script import has_traditional, to_simplified
+
+        groups: dict[str, list[Track]] = defaultdict(list)
+        for track in tracks:
+            if track.status in (TrackStatus.UNSUPPORTED, TrackStatus.SKIPPED, TrackStatus.FAILED):
+                continue
+            groups[str(track.path.parent).lower()].append(track)
+
+        for group in groups.values():
+            # 收集 (字段, track, 值)
+            entries: list[tuple[str, Track, str]] = []
+            for track in group:
+                for field_name in ("artist", "albumartist"):
+                    value = track.working.get(field_name).strip()
+                    if value:
+                        entries.append((field_name, track, value))
+
+            # 按「繁转简」语义簇聚合
+            clusters: dict[str, list[tuple[str, Track, str]]] = defaultdict(list)
+            for entry in entries:
+                clusters[to_simplified(entry[2])].append(entry)
+
+            for cluster in clusters.values():
+                # 目标 = 簇内出现次数最多的简体写法
+                counter = Counter(e[2] for e in cluster if not has_traditional(e[2]))
+                if not counter:
+                    # 簇内全是繁体（纯繁体曲库），保持原样，避免反向转换出错
+                    continue
+                target, _hits = counter.most_common(1)[0]
+                for field_name, track, value in cluster:
+                    if value != target:
+                        track.working.set(field_name, target)
+                        if field_name not in track.changed_fields:
+                            track.changed_fields.append(field_name)
+                        track.note(f"书写体统一：{value} → {target}")
 
     # ------------------------------------------------------------ 子步骤
 

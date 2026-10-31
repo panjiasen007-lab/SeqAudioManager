@@ -85,6 +85,9 @@ class Settings:
     # ---- 文件夹封面 ----
     ensure_folder_cover: bool = True       # 处理完成后每个文件夹至少一张 cover（专辑封面→歌手照片）
 
+    # ---- 书写体统一 ----
+    unify_artist_script: bool = True       # 同目录艺术家名字统一为简体（简繁不混搭）
+
     # ---- 其他 ----
     offline_mode: bool = False
     last_folder: str = ""

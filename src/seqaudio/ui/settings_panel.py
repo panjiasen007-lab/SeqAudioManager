@@ -186,6 +186,14 @@ class SettingsPanel(QScrollArea):
         self.clean_title_check.toggled.connect(self._notify)
         card.add_widget(self.clean_title_check)
 
+        self.unify_script_check = QCheckBox("同目录艺术家名字统一简体（简繁不混搭）")
+        self.unify_script_check.setToolTip(
+            "MusicBrainz 返回繁体、iTunes/本地多为简体，混写进标签就成了「一张专辑两种写法」。\n"
+            "勾选后按目录多数投票，把繁体名字统一成简体；纯繁体曲库保持原样。"
+        )
+        self.unify_script_check.toggled.connect(self._notify)
+        card.add_widget(self.unify_script_check)
+
         card.add_widget(self._dim_label("自定义屏蔽词（每行一个）"))
         self.words_edit = QPlainTextEdit()
         self.words_edit.setPlaceholderText("例如：某某音乐网\n更多资源请访问")
@@ -326,6 +334,7 @@ class SettingsPanel(QScrollArea):
             self.watermark_check.setChecked(settings.watermark_enabled)
             self.strip_number_check.setChecked(settings.strip_track_numbers)
             self.clean_title_check.setChecked(settings.clean_title_watermark)
+            self.unify_script_check.setChecked(settings.unify_artist_script)
             self.words_edit.setPlainText("\n".join(settings.custom_words))
 
             self.rename_check.setChecked(settings.rename_enabled)
@@ -367,6 +376,7 @@ class SettingsPanel(QScrollArea):
         settings.watermark_enabled = self.watermark_check.isChecked()
         settings.strip_track_numbers = self.strip_number_check.isChecked()
         settings.clean_title_watermark = self.clean_title_check.isChecked()
+        settings.unify_artist_script = self.unify_script_check.isChecked()
         settings.custom_words = [
             line.strip() for line in self.words_edit.toPlainText().splitlines() if line.strip()
         ]

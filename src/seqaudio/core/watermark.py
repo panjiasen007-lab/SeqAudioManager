@@ -35,13 +35,31 @@ DEFAULT_STRONG_PATTERNS: tuple[str, ...] = (
     r"(下载|获取|访问)[\s]*[A-Za-z0-9\-\.]{3,}",
     r"(整理|制作|压制|抓轨|翻录|首发|转载)(版)?$",
     r"歌词.{0,12}(提供|制作|下载|编辑)",
+    # ---- 联系方式 / 社交账号（常见于 comment 与名字后缀）----
+    r"[\w.\-]+@[\w\-]+\.(com|net|cn|org)",
+    r"微博[：:\s]",
+    r"@[\w\u4e00-\u9fff]{2,}",
+    r"(微信|QQ|扣扣|电话|手机|联系|微)[：:\s]*1[3-9]\d{9}",
+    r"QQ[：:\s]*\d{5,}",
+    r"(关注|订阅|点赞|转发|分享)[：:]",
+    r"(百度云|网盘|蓝奏云|阿里云盘|夸克|迅雷|磁力)[：:\s]*",
+    r"(加群|进群|入群|粉丝群|交流群)",
+    r"vx[：:]",
 )
 
-#: 片段匹配词库：出现在括号里时删除该括号片段（用于标题/专辑清理）
+#: 片段匹配词库：出现在括号里时删除该括号片段（用于标题/专辑/流派清理）
 DEFAULT_SEGMENT_PATTERNS: tuple[str, ...] = (
     r"www\.",
     r"https?://",
     r"[\w\-]+\.(com|net|cn|org|cc|top|xyz)",
+    r"[\w.\-]+@[\w\-]+\.",
+    r"微博",
+    r"公众号",
+    r"QQ[：:]?",
+    r"微信",
+    r"关注",
+    r"订阅",
+    r"网盘",
     r"高音质",
     r"无损音质",
     r"免费下载",
@@ -184,15 +202,15 @@ def clean_tags(
             tags.albumartist = cleaned
             report.changed_fields.append("albumartist")
 
-    for field in ("album", "artist"):
-        value = tags.get(field)
+    for field_name in ("album", "artist", "genre"):
+        value = tags.get(field_name)
         if not value:
             continue
         cleaned = clean_text(value, strong, segment, allow_wipe=False)
         if cleaned and cleaned != value:
-            report.details.append(f"{field}: {value!r} -> {cleaned!r}")
-            tags.set(field, cleaned)
-            report.changed_fields.append(field)
+            report.details.append(f"{field_name}: {value!r} -> {cleaned!r}")
+            tags.set(field_name, cleaned)
+            report.changed_fields.append(field_name)
 
     return report
 

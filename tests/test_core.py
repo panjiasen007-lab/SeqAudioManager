@@ -86,6 +86,77 @@ class TestWatermark(unittest.TestCase):
         watermark.clean_tags(t, custom_words=["某论坛首发"])
         self.assertEqual(t.title, "夜曲")
 
+    def test_genre_cleaned(self) -> None:
+        t = Tags(genre="流行【www.xxx.com】")
+        report = watermark.clean_tags(t)
+        self.assertEqual(t.genre, "流行")
+        self.assertIn("genre", report.changed_fields)
+
+    def test_contact_watermark_in_comment(self) -> None:
+        t = Tags(comment="更多无损请加微信：13800138000 或 QQ：12345678")
+        watermark.clean_tags(t)
+        self.assertEqual(t.comment, "")
+
+    def test_email_and_weibo_in_comment(self) -> None:
+        t = Tags(comment="联系 abc@qq.com，微博 @某某音乐")
+        watermark.clean_tags(t)
+        self.assertEqual(t.comment, "")
+
+
+class TestScript(unittest.TestCase):
+    """书写体检测与繁→简转换。"""
+
+    def test_to_simplified(self) -> None:
+        from seqaudio.core.script import to_simplified
+
+        self.assertEqual(to_simplified("陳奕迅"), "陈奕迅")
+        self.assertEqual(to_simplified("周杰倫"), "周杰伦")
+        self.assertEqual(to_simplified("中島美嘉"), "中岛美嘉")
+
+    def test_has_traditional(self) -> None:
+        from seqaudio.core.script import has_traditional
+
+        self.assertTrue(has_traditional("陳奕迅"))
+        self.assertFalse(has_traditional("陈奕迅"))
+        self.assertFalse(has_traditional("Jay Chou"))
+
+    def test_script_of(self) -> None:
+        from seqaudio.core.script import script_of
+
+        self.assertEqual(script_of("陈奕迅"), "simplified")
+        self.assertEqual(script_of("陳奕迅"), "traditional")
+        self.assertEqual(script_of("Jay Chou"), "latin")
+        self.assertEqual(script_of("中島美嘉"), "traditional")
+        self.assertEqual(script_of("久石讓"), "traditional")
+
+    def test_unify_artist_names(self) -> None:
+        """同目录简繁混搭统一为简体，纯繁体保持原样。"""
+        from seqaudio.core.config import Settings
+        from seqaudio.core.model import Track, TrackStatus
+        from seqaudio.pipeline.processor import Processor
+
+        folder = Path(tempfile.mkdtemp(prefix="seq_uni_"))
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+
+        def mk(title: str, artist: str, albumartist: str = "") -> Track:
+            t = Track(path=folder / f"{title}.flac")
+            t.status = TrackStatus.DONE
+            t.working = Tags(title=title, artist=artist, albumartist=albumartist)
+            return t
+
+        tracks = [
+            mk("七里香", "周杰伦", "周杰倫"),
+            mk("借口", "周杰倫", "周杰倫"),
+            mk("将军", "周杰伦", "周杰伦"),
+            mk("外婆", "陳奕迅"),
+        ]
+        Processor(Settings(unify_artist_script=True))._unify_artist_names(tracks)
+        self.assertEqual(tracks[0].working.artist, "周杰伦")
+        self.assertEqual(tracks[0].working.albumartist, "周杰伦")
+        self.assertEqual(tracks[1].working.artist, "周杰伦")
+        # 纯繁体歌手保持原样
+        self.assertEqual(tracks[3].working.artist, "陳奕迅")
+
 
 class TestRename(unittest.TestCase):
     def test_template(self) -> None:
