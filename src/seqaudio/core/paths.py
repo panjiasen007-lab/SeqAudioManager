@@ -26,6 +26,28 @@ def _writable(directory: Path) -> bool:
         return False
 
 
+def asset_path(name: str) -> Path | None:
+    """定位随包资源（图标等）。
+
+    三种运行形态的路径完全不同，之前 app.py 与 widgets.py 各自拼路径，
+    都少了一层目录导致图标一直加载失败：
+      * 源码运行：<仓库根>/assets/
+      * PyInstaller 打包：<_MEIPASS>/assets/
+      * Nuitka/绿色版：<EXE 目录>/assets/
+    """
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / name)
+    # core/paths.py -> core -> seqaudio -> src -> 仓库根
+    candidates.append(Path(__file__).resolve().parents[3] / "assets" / name)
+    candidates.append(app_dir() / "assets" / name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def data_dir() -> Path:
     """配置与缓存根目录。绿色优先：程序目录可写就用它，否则用 AppData。"""
     portable = app_dir() / "data"

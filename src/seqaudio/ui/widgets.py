@@ -7,6 +7,8 @@ Qt 的 QSS 能力有限（无阴影、无过渡），"现代感"主要靠三件�
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
@@ -22,6 +24,25 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
+
+
+def app_icon_path() -> Path | None:
+    """定位应用图标文件（源码 / 打包 / 绿色版三种形态统一处理）。"""
+    from ..core.paths import asset_path
+
+    return asset_path("app.png")
+
+
+def app_icon_pixmap(size: int) -> "QPixmap | None":
+    from PySide6.QtGui import QPixmap
+
+    path = app_icon_path()
+    if path is None:
+        return None
+    pix = QPixmap(str(path))
+    if pix.isNull():
+        return None
+    return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
 class StatCard(QFrame):
@@ -121,7 +142,15 @@ class BrandBar(QFrame):
         layout.setContentsMargins(16, 8, 16, 8)
         layout.setSpacing(11)
 
-        layout.addWidget(LogoMark(30))
+        pix = app_icon_pixmap(30)
+        if pix is not None:
+            mark = QLabel()
+            mark.setFixedSize(30, 30)
+            mark.setPixmap(pix)
+            mark.setStyleSheet("background: transparent;")
+            layout.addWidget(mark)
+        else:
+            layout.addWidget(LogoMark(30))
 
         text_col = QVBoxLayout()
         text_col.setSpacing(1)

@@ -69,8 +69,10 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     app.setFont(font)
     app.setStyleSheet(QSS)
 
-    icon_path = Path(__file__).resolve().parent / "assets" / "app.ico"
-    if icon_path.exists():
+    from .core.paths import asset_path
+
+    icon_path = asset_path("app.ico")
+    if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
     return app
 

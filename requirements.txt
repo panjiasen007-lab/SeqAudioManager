@@ -8,6 +8,10 @@ imageio-ffmpeg>=0.5    # 内置 ffmpeg 二进制：解码 DSD/APE/WV/FLAC 做频
 #   - 这几个公开 API 均不支持/不需要 HTTP/2
 #   - 减少打包体积与 DLL 冲突面，Win7 兼容模式也更稳
 
+# ---- 开发期工具（不进 EXE）----
+# pillow>=10            # tools/make_icon.py：源图抠透明底 + 导出多尺寸 ICO
+# scipy>=1.11           # tools/make_icon.py：形态学填洞 / 距离场羽化
+
 # ---- 打包（开发期）----
 # pyinstaller>=6.0       # 默认打包器：python build.py（零编译依赖）
 # nuitka>=2.4            # 可选：更小更快，需 MSVC 且 Python ≤ 3.12
