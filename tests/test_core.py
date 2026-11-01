@@ -1181,28 +1181,32 @@ class TestDsdJudgement(unittest.TestCase):
     def test_genuine_dsd(self) -> None:
         from seqaudio.core.authenticity import _judge_dsd
 
-        verdict, score, _ = _judge_dsd(12.0, -20.0, 20000.0, 5.0)
+        verdict, score, _ = _judge_dsd(12.0, -20.0, 30000.0, 5.0, -45.0)
         self.assertEqual(verdict, "真 DSD")
         self.assertGreaterEqual(score, 0.8)
 
     def test_flat_ultrasonic_is_fake(self) -> None:
         from seqaudio.core.authenticity import _judge_dsd
 
-        verdict, _, _ = _judge_dsd(0.0, -90.0, 22050.0, 60.0)
+        verdict, _, _ = _judge_dsd(0.0, -90.0, 22050.0, 60.0, -90.0)
         self.assertEqual(verdict, "疑似假 DSD")
 
     def test_cd_sourced_dsd_is_fake(self) -> None:
-        """噪声整形成立但基带 20kHz 硬截止 → CD/有损源转制。"""
+        """噪声整形成立，但基带在 CD 的 22.05kHz 边界截止且之上是数字静音。
+
+        真实数据（周杰伦 DFF）：slope +10.8dB/oct、base_cutoff 22179Hz、
+        基带陡度 12.7dB/kHz、22.5~24kHz -85.6dB。
+        """
         from seqaudio.core.authenticity import _judge_dsd
 
-        verdict, _, reasons = _judge_dsd(10.0, -25.0, 20000.0, 50.0)
+        verdict, _, reasons = _judge_dsd(10.8, -7.0, 22179.0, 12.7, -85.6)
         self.assertEqual(verdict, "疑似假 DSD")
-        self.assertTrue(any("硬截止" in r for r in reasons))
+        self.assertTrue(any("22.05kHz" in r for r in reasons))
 
     def test_weak_shaping_is_suspect(self) -> None:
         from seqaudio.core.authenticity import _judge_dsd
 
-        verdict, _, _ = _judge_dsd(2.0, -45.0, 0.0, 0.0)
+        verdict, _, _ = _judge_dsd(2.0, -45.0, 0.0, 0.0, 0.0)
         self.assertEqual(verdict, "疑似假 DSD")
 
     def test_noise_shaping_slope(self) -> None:

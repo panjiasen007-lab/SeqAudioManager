@@ -223,16 +223,18 @@ Visual Studio Build Tools。
 | 疑似升频 | 采样率很高但带宽利用率不足 55% |
 | 真 DSD / 疑似假 DSD | 见下 |
 
-**DSD 的判据和 PCM 完全不同**（参考 check-dsd）：真 DSD 的 Sigma-Delta 量化噪声
-被整形到超声区，50kHz→100kHz 呈明显上升（典型 +6 ~ +18dB/oct）；PCM 转制的假 DSD
-在该频段平坦。判定用三个指标：
+**DSD 的判据和 PCM 完全不同**（参考 check-dsd）。关键认知：**CD 转 DSD 经过调制器后
+同样会产生噪声整形**，所以只看「超声能量」会把 CD 转制的假 DSD 判成真货。真正的破绽在基带：
 
-1. **噪声整形斜率**（主判据，dB/oct）—— 50~100kHz 每倍频程的能量变化；
-2. **超声能量比** —— 50kHz 以上的相对能量；
-3. **基带截止** —— 只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
+1. **噪声整形斜率**（50→100kHz，dB/oct）—— 确认是不是真的 DSD 比特流
+   （PCM 改后缀的假 DSD 在超声区是平坦的）；
+2. **CD 边界检测**（主判据）—— 基带截止是否落在 22.05kHz（CD 的 Nyquist）附近，
+   且截止之上是否为数字静音。实测 CD 转 DSD：基带截止 21.8~22.2kHz、
+   22.5~24kHz 只有 -83 ~ -96dB；真 DSD 的噪声整形在那里仍有 -60 ~ -75dB；
+3. **超声能量比** —— 50kHz 以上的相对能量，辅助确认噪声整形成立。
 
-真 DSD 的基带自然滚降是正常母带特征，不算问题；只有基带出现「硬悬崖」
-（<21.5kHz 且陡度 >36dB/kHz）才判定源头是 CD/有损。
+基带截止只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
+噪声整形成立、基带又不在 CD 边界截止，才判真 DSD。
 
 **验证过的样本**（同一段音乐）：
 
@@ -457,13 +459,13 @@ Lossy encoding always cuts the high frequencies, leaving a cliff on the spectrum
 | Suspect upsample | High sample rate but bandwidth utilization under 55% |
 | Genuine DSD / suspect fake DSD | See below |
 
-**DSD criteria are completely different from PCM** (following check-dsd): genuine DSD shapes its Sigma-Delta quantization noise into the ultrasonic band, rising noticeably from 50 kHz to 100 kHz (typically +6 to +18 dB/oct); PCM-sourced fake DSD is flat in that region. Three metrics are used:
+**DSD criteria are completely different from PCM** (following check-dsd). Key insight: **a CD-sourced DSD also has noise shaping** — the modulator generates it — so ultrasonic energy alone cannot separate it from a genuine master. The real giveaway is the baseband:
 
-1. **Noise-shaping slope** (primary, dB/oct) — energy change per octave across 50–100 kHz;
-2. **Ultrasonic energy ratio** — relative energy above 50 kHz;
-3. **Baseband cutoff** — scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall.
+1. **Noise-shaping slope** (50→100 kHz, dB/oct) — confirms whether it is a real DSD bitstream (a PCM file renamed to .dsf/.dff is flat in the ultrasonic region);
+2. **CD-boundary check** (primary) — whether the baseband cutoff falls near 22.05 kHz (CD Nyquist) and whether the region above it is digital silence. Measured CD-sourced DSD: cutoff at 21.8–22.2 kHz, with only −83 to −96 dB across 22.5–24 kHz; genuine DSD still carries −60 to −75 dB there from noise shaping;
+3. **Ultrasonic energy ratio** — relative energy above 50 kHz, as a supporting check.
 
-Natural baseband roll-off in genuine DSD is a normal master characteristic; only a hard cliff (below 21.5 kHz with steepness over 36 dB/kHz) indicates a CD/lossy source.
+The baseband cutoff is scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall. Genuine DSD requires noise shaping *and* a baseband that does not stop at the CD boundary.
 
 **Verified samples** (same music):
 

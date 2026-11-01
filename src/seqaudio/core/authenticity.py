@@ -65,9 +65,17 @@ DSD_BASEBAND_MAX = 24_000.0
 DSD_SLOPE_GENUINE = 6.0
 DSD_SLOPE_SUSPECT = 0.5
 
-#: 基带"硬悬崖"：低于该频率且陡度超过阈值，视为 CD/有损源转制的痕迹
-DSD_BASEBAND_CLIFF_HZ = 21_500.0
-DSD_BASEBAND_CLIFF_STEEP = 36.0
+#: CD 的 Nyquist 边界（22.05kHz）+ 检测容差。
+#: 基带截止落在这条线以下，说明源头最高只到 CD 规格。
+DSD_CD_BOUNDARY_HZ = 22_550.0
+#: 基带截止之上的「数字静音」阈值。
+#: CD 转 DSD 在 22.05kHz 之上是数字静音（实测 -83 ~ -94dB）；
+#: 真 DSD 的噪声整形在那里仍有 -60 ~ -75dB 的能量，不会低于这条线。
+DSD_DIGITAL_SILENCE_DB = -78.0
+#: 数字静音检测频段（CD Nyquist 之上、噪声整形主峰之前）
+DSD_SILENCE_BAND = (22_500.0, 24_000.0)
+#: 基带陡度辅助阈值：断崖式截止同样视为 CD/有损源
+DSD_BASEBAND_CLIFF_STEEP = 30.0
 
 VERDICT_TRUE = "真无损"
 VERDICT_SUSPECT = "疑似假无损"
@@ -101,6 +109,7 @@ class AuthenticityResult:
     noise_shaping_slope: float = 0.0   # DSD 噪声整形斜率（dB/oct，真 DSD 为正）
     ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
     baseband_cutoff: int = 0           # 基带（≤24kHz）截止频率
+    baseband_silence: float = 0.0      # 基带截止之上（22.5~24kHz）的相对能量
     analyzed_seconds: float = 0.0
     reasons: list[str] = field(default_factory=list)
     error: str = ""
@@ -401,47 +410,61 @@ def _judge_dsd(
     ultra: float,
     base_cutoff: float,
     base_steep: float,
+    base_silence: float,
 ) -> tuple[str, float, list[str]]:
-    """DSD 判定（参考 check-dsd）：噪声整形斜率是主判据。
+    """DSD 判定（参考 check-dsd）：噪声整形斜率 + CD 边界双重判据。
 
-    * 真 DSD 的 Sigma-Delta 量化噪声被整形到超声区，50→100kHz 呈明显上升
-      （典型 +6 ~ +18dB/oct）；
-    * PCM 转制的假 DSD 在该频段平坦（≈0）或下降；
-    * 基带截止只作辅助 —— 噪声整形成立时，基带的自然滚降是正常母带特征，
-      只有「硬悬崖」（<21.5kHz 且陡度 >36dB/kHz）才说明源头是 CD/有损。
+    * 噪声整形斜率（50→100kHz，dB/oct）确认「是不是真的 DSD 比特流」——
+      PCM 直接改后缀的假 DSD 在超声区是平坦的；
+    * **CD 边界检测**确认「源头是不是 CD」—— CD 转 DSD 经过调制器后
+      **同样会有噪声整形**，所以斜率不能区分它；真正的破绽在基带：
+      截止落在 22.05kHz（CD 的 Nyquist）附近，且截止之上是数字静音
+      （实测 -83 ~ -94dB）。真 DSD 的噪声整形在 22.5~24kHz 仍有
+      -60 ~ -75dB 的能量，不会低于 -78dB。
     """
     reasons: list[str] = []
 
-    if slope >= DSD_SLOPE_GENUINE and ultra > -50:
-        if (
-            base_cutoff > 0
-            and base_cutoff < DSD_BASEBAND_CLIFF_HZ
-            and base_steep > DSD_BASEBAND_CLIFF_STEEP
-        ):
-            reasons.append(
-                f"噪声整形斜率 {slope:+.1f}dB/oct，但基带在 "
-                f"{base_cutoff / 1000:.1f}kHz 硬截止（陡度 {base_steep:.0f}dB/kHz），"
-                "疑似 CD/有损源经调制器转成 DSD"
-            )
-            return VERDICT_FAKE_DSD, 0.4, reasons
+    # ---- 1. 噪声整形：区分「真 DSD 比特流」与「PCM 改后缀」 ----
+    if slope < DSD_SLOPE_SUSPECT or ultra < -58:
         reasons.append(
-            f"噪声整形斜率 {slope:+.1f}dB/oct、50kHz 以上能量 {ultra:.0f}dB，"
-            "符合 Sigma-Delta 调制特征"
+            f"超声区平坦（斜率 {slope:+.1f}dB/oct、50kHz 以上仅 {ultra:.0f}dB），"
+            "缺少 Sigma-Delta 噪声整形，疑似 PCM 升频/转制为 DSD"
         )
-        return VERDICT_DSD, 0.9, reasons
+        return VERDICT_FAKE_DSD, 0.25, reasons
 
-    if slope >= DSD_SLOPE_SUSPECT and ultra > -58:
+    # ---- 2. CD 边界：区分「CD 转 DSD」与「真 DSD 录音」 ----
+    cd_boundary = 0.0 < base_cutoff < DSD_CD_BOUNDARY_HZ
+    digital_silence = base_silence < DSD_DIGITAL_SILENCE_DB
+    hard_cliff = base_steep > DSD_BASEBAND_CLIFF_STEEP
+
+    if cd_boundary and (digital_silence or hard_cliff):
+        detail = []
+        if digital_silence:
+            detail.append(f"截止之上为数字静音（{base_silence:.0f}dB）")
+        if hard_cliff:
+            detail.append(f"断崖截止（陡度 {base_steep:.0f}dB/kHz）")
+        reasons.append(
+            f"基带在 {base_cutoff / 1000:.2f}kHz 截止（CD 的 22.05kHz 边界），"
+            f"且{'、'.join(detail)}；"
+            f"噪声整形（{slope:+.1f}dB/oct）来自 PCM→DSD 调制器，"
+            "疑似 CD/有损源转制"
+        )
+        return VERDICT_FAKE_DSD, 0.3, reasons
+
+    # ---- 3. 噪声整形弱、但基带不是 CD 边界：可能是高规格 PCM 转制 ----
+    if slope < DSD_SLOPE_GENUINE:
         reasons.append(
             f"噪声整形偏弱（斜率 {slope:+.1f}dB/oct、50kHz 以上 {ultra:.0f}dB），"
-            "可能是高规格 PCM 转制、模拟母带转录，或解码器做了超声低通"
+            "可能是高规格 PCM 转制或解码器做了超声低通"
         )
         return VERDICT_FAKE_DSD, 0.5, reasons
 
     reasons.append(
-        f"超声区平坦（斜率 {slope:+.1f}dB/oct、50kHz 以上仅 {ultra:.0f}dB），"
-        "缺少 Sigma-Delta 噪声整形，疑似 PCM 升频/转制为 DSD"
+        f"噪声整形斜率 {slope:+.1f}dB/oct、50kHz 以上能量 {ultra:.0f}dB，"
+        f"且基带未在 CD 边界截止（{base_cutoff / 1000:.1f}kHz），"
+        "符合真 DSD 录音特征"
     )
-    return VERDICT_FAKE_DSD, 0.25, reasons
+    return VERDICT_DSD, 0.9, reasons
 
 
 def _judge(
@@ -455,6 +478,7 @@ def _judge(
     ultra: float = 0.0,
     base_cutoff: float = 0.0,
     base_steep: float = 0.0,
+    base_silence: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     reasons: list[str] = []
     sample_rate = info.sample_rate or 44100
@@ -463,7 +487,7 @@ def _judge(
     ratio = (cutoff / nyquist) if nyquist else 0.0
 
     if is_dsd:
-        return _judge_dsd(slope, ultra, base_cutoff, base_steep)
+        return _judge_dsd(slope, ultra, base_cutoff, base_steep, base_silence)
 
     if nyquist <= 24000:
         # CD 标准音源（44.1k / 48k）。
@@ -628,18 +652,24 @@ def analyze(
     ultra = 0.0
     base_cutoff = 0.0
     base_steep = 0.0
+    base_silence = 0.0
     if is_dsd:
         nyq = float(result.nyquist_hz or 352800)
-        # 噪声整形斜率（主判据）
+        # 噪声整形斜率（确认是不是真的 DSD 比特流）
         slope = _noise_shaping_slope(freqs, db, nyq)
         # 超声能量比（辅助）
         ultra = _band_energy(freqs, db, DSD_ULTRA_BAND[0], min(DSD_ULTRA_BAND[1], nyq))
         # 基带截止只在 24kHz 以下找，避免 DXD 的 176kHz 缺口被误当 CD 墙
         base_cutoff, base_steep = _find_cutoff(freqs, db, max_hz=DSD_BASEBAND_MAX)
+        # 基带截止之上是否数字静音（CD 转 DSD 的核心破绽）
+        base_silence = _band_energy(
+            freqs, db, DSD_SILENCE_BAND[0], min(DSD_SILENCE_BAND[1], nyq)
+        )
         high_band = _band_energy(freqs, db, 40000, min(nyq, 140000))
         result.noise_shaping_slope = slope
         result.ultrasonic_ratio = ultra
         result.baseband_cutoff = int(base_cutoff)
+        result.baseband_silence = base_silence
     else:
         high_band = _band_energy(freqs, db, 20000, min(result.nyquist_hz or 22050, 40000))
     result.cutoff_hz = int(cutoff)
@@ -658,6 +688,7 @@ def analyze(
         ultra=ultra,
         base_cutoff=base_cutoff,
         base_steep=base_steep,
+        base_silence=base_silence,
     )
     result.verdict = verdict
     result.score = score
