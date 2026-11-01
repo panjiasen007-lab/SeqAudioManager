@@ -544,11 +544,19 @@ class Installer(QWidget):
 
         try:
             exe = self.target / EXE_NAME
+            # 卸载入口：安装目录里始终放一个「卸载」快捷方式，指向主程序 --uninstall。
+            # 不依赖「是否创建开始菜单快捷方式」—— 卸载是必备功能，不能变成可选项。
+            create_shortcut(
+                self.target / f"卸载 {APP_NAME}.lnk",
+                exe,
+                self.target,
+                exe,
+                arguments="--uninstall",
+            )
             if self.desktop_check.isChecked():
                 create_shortcut(desktop_dir() / f"{APP_NAME}.lnk", exe, self.target, exe)
             if self.startmenu_check.isChecked():
                 create_shortcut(start_menu_dir() / f"{APP_NAME}.lnk", exe, self.target, exe)
-                # 卸载入口：开始菜单里放一个「卸载」快捷方式，指向 --uninstall
                 create_shortcut(
                     start_menu_dir() / f"卸载 {APP_NAME}.lnk",
                     exe,
@@ -618,6 +626,14 @@ def silent_install(target: Path, *, shortcuts: bool = True) -> int:
             exe = target / EXE_NAME
             report["exe"] = str(exe)
             report["exe_exists"] = exe.exists()
+            # 安装目录卸载入口：始终创建，不依赖 shortcuts 开关
+            report["local_uninstall_lnk"] = create_shortcut(
+                target / f"卸载 {APP_NAME}.lnk",
+                exe,
+                target,
+                exe,
+                arguments="--uninstall",
+            )
             if shortcuts:
                 report["desktop_lnk"] = create_shortcut(
                     desktop_dir() / f"{APP_NAME}.lnk", exe, target, exe

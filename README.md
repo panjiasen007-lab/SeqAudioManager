@@ -190,7 +190,7 @@ onefile 每次启动都要把 250MB 内容解压到临时目录，首次要 3~5 
 **安装程序**是一个用 PySide6 写的三页向导（欢迎/授权 → 选择目录 → 安装进度）：
 
 - 装到 `%LOCALAPPDATA%\Programs\SeqAudioManager`，**不需要管理员权限**；
-- 写 HKCU 卸载项，在「设置 → 应用」里能正常卸载；**开始菜单同时创建「卸载 音序管家」快捷方式**，双击即进入卸载流程；
+- 写 HKCU 卸载项，在「设置 → 应用」里能正常卸载；**安装目录与开始菜单都创建「卸载 音序管家」快捷方式**，双击即进入卸载流程（安装目录那个始终创建，不依赖快捷方式选项）；
 - 桌面与开始菜单快捷方式可取消；
 - 卸载由主程序 `--uninstall` 完成：先把 `data/`（配置、日志、**备份的原始音频**）
   移到 `%APPDATA%`，再删安装目录 —— 顺序反了备份就找不回来了；
@@ -427,7 +427,7 @@ The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile 
 The **installer** is a three-page wizard (welcome/license → choose directory → progress) written in PySide6:
 
 - Installs to `%LOCALAPPDATA%\Programs\SeqAudioManager`, **no admin rights required**;
-- Writes an HKCU uninstall entry (visible in Settings → Apps), and also creates an **"Uninstall SeqAudio Manager" shortcut in the Start menu** — double-click it to start uninstalling;
+- Writes an HKCU uninstall entry (visible in Settings → Apps), and creates an **"Uninstall SeqAudio Manager" shortcut in both the install directory and the Start menu** — double-click it to start uninstalling (the install-directory shortcut is always created, independent of the shortcut options);
 - Desktop and Start-menu shortcuts are optional;
 - Uninstall runs through the main program's `--uninstall`: it moves `data/` (config, logs, **backed-up original audio**) to `%APPDATA%` first, then removes the install directory — reversing the order would lose the backups;
 - The installer and the portable edition share the same 7z payload — compress once, use twice.
