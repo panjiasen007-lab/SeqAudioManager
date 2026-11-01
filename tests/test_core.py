@@ -1537,6 +1537,18 @@ class TestAuthenticityV13(unittest.TestCase):
         db[(freqs >= 15500) & (freqs <= 16800)] = -60.0   # 20dB 凹陷
         self.assertGreater(_sfb21_notch(freqs, db), 10.0)
 
+    def test_spectral_roughness_measures_jaggedness(self) -> None:
+        """频谱粗糙度：平滑频谱相邻频点差 RMS 低、锯齿频谱高。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _spectral_roughness
+
+        freqs = np.arange(0, 22050, 5.4)
+        smooth = np.full(freqs.size, -40.0)
+        jagged = np.where(np.arange(freqs.size) % 2 == 0, -40.0, -50.0)
+        self.assertLess(_spectral_roughness(freqs, smooth), 0.5)
+        self.assertGreater(_spectral_roughness(freqs, jagged), 2.0)
+
     @unittest.skipUnless(
         __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
         "需要 ffmpeg",

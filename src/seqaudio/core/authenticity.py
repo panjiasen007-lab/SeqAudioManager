@@ -191,6 +191,7 @@ class AuthenticityResult:
     bit_above_16: bool = False         # 存在超过 16bit 上限的样本
     bit_depth_declared: int = 0
     bit_depth_effective: int = 0
+    spectral_roughness: float = 0.0    # 4~16kHz 相邻频点幅度差 RMS（有损编码"锯齿"度）
     high_band_energy_db: float = 0.0   # 20kHz 以上相对能量
     noise_shaping_slope: float = 0.0   # DSD 噪声整形斜率（dB/oct，真 DSD 为正）
     ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
@@ -600,6 +601,25 @@ def _sfb21_notch(freqs: np.ndarray, db: np.ndarray) -> float:
     reference = float(np.mean(refs))
     dip = float(np.min(db[band]))
     return max(0.0, reference - dip)
+
+
+def _spectral_roughness(freqs: np.ndarray, db: np.ndarray) -> float:
+    """4~16kHz 内相邻频点幅度差的均方根（dB）。
+
+    有损编码把频谱系数逐个量化成离散台阶，相邻频点之间会留下不自然的幅度
+    跳变（"锯齿"）；真无损的频谱包络平滑，相邻频点差异小。与
+    :func:`_spectral_holes` 互补 —— 空洞看"窄而深的缺口"，这里看"整段的
+    锯齿程度"，主要用来抓 256~320k / AAC 这种"高频看似完整、实则被量化
+    打得稀碎"的高码率转码（现有 cutoff 判据的盲区）。
+    """
+    mask = (freqs >= HOLE_BAND[0]) & (freqs <= HOLE_BAND[1])
+    if np.count_nonzero(mask) < 64:
+        return 0.0
+    seg = db[mask]
+    if seg.size < 2:
+        return 0.0
+    diff = np.diff(seg)
+    return float(np.sqrt(np.mean(diff * diff)))
 
 
 def _bit_depth_evidence(samples: np.ndarray) -> tuple[bool, float]:
@@ -1069,7 +1089,7 @@ def _judge(
         # （通常 <15dB/kHz）。陡度为 0 表示无法计算，保守按转码处理。
         smooth_rolloff = 0.5 < steepness < 25.0
 
-        # 频谱空洞与 sfb21 凹陷：低码率 MP3 的辅助证据，只用来加重措辞
+        # 频谱空洞、sfb21 凹陷：低码率 MP3 的辅助证据，只用来加重措辞
         mp3_marks = []
         if holes >= 3.0:
             mp3_marks.append(f"4~16kHz 有 {holes:.1f} 个/帧窄带空洞")
@@ -1320,6 +1340,7 @@ def analyze(
             upsample_src, upsample_step = 44100.0, 0.0
     holes = float(np.median(hole_counts)) if hole_counts else 0.0
     notch = float(np.median(notch_depths)) if notch_depths else 0.0
+    roughness = _spectral_roughness(freqs, db)
     # 位深注水：声明 24bit 却从没用到 16bit 以上（且电平正常，排除近乎无声的文件）
     depth_padding = bool(
         info.bit_depth
@@ -1334,6 +1355,7 @@ def analyze(
     result.sfb21_notch_db = notch
     result.bit_above_16 = above_16
     result.bit_depth_padding = depth_padding
+    result.spectral_roughness = roughness
 
     verdict, score, reasons = _judge(
         info,
