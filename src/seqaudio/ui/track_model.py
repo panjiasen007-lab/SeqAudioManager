@@ -18,12 +18,14 @@ COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
     ("年份", lambda t: (t.working.date or t.original.date)[:4], 46),
     ("格式", lambda t: t.info.fmt, 50),
     ("规格", lambda t: t.info.spec_text, 114),
-    ("时长", lambda t: t.info.duration_text, 46),
+    ("时长", lambda t: t.duration_text, 46),
     ("无损", lambda t: t.info.kind_text, 42),
     ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 54),
     ("鉴定", lambda t: (t.authenticity.verdict if t.authenticity else ""), 80),
     ("来源", lambda t: t.source, 80),
-    ("文件名", lambda t: t.path.name, 150),
+    ("文件名", lambda t: (
+        f"{t.path.name} · #{t.cue_track_entry.number}" if t.cue_track_entry else t.path.name
+    ), 150),
     ("说明", lambda t: " | ".join(t.notes), 180),
 ]
 

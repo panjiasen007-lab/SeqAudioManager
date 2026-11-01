@@ -57,6 +57,46 @@ class TestCue(unittest.TestCase):
         self.assertEqual(sheet.tracks, [])
         self.assertTrue(sheet.warnings)
 
+    def test_expand_cue_tracks(self) -> None:
+        """多轨 CUE 整轨展开成分轨，让列表显示所有歌曲。"""
+        from seqaudio.core.model import Track
+        from seqaudio.core.probe import expand_cue_tracks
+
+        cue_path = make_samples.make_cue(self.tmp / "album.cue", encoding="gbk")
+        track = Track(path=self.tmp / "album.wav")
+        track.cue = cue_mod.parse_cue(cue_path)
+
+        expanded = expand_cue_tracks([track])
+        self.assertEqual(len(expanded), 3)
+        self.assertEqual(expanded[0].title, "好久不见")
+        self.assertEqual(expanded[0].working.track, "1/3")
+        self.assertEqual(expanded[0].cue_track, 0)
+        self.assertEqual(expanded[2].cue_track, 2)
+        # 分轨时长来自 CUE，而非整轨文件时长
+        self.assertEqual(expanded[0].duration_text, "4:10")
+
+    def test_expand_cue_skips_single_track(self) -> None:
+        """单轨 CUE 或无 CUE 不展开。"""
+        from seqaudio.core.model import Track
+        from seqaudio.core.probe import expand_cue_tracks
+
+        # 无 CUE
+        plain = Track(path=self.tmp / "plain.wav")
+        self.assertEqual(expand_cue_tracks([plain]), [plain])
+
+        # 单轨 CUE（1 轨不展开，保持整轨）
+        content = (
+            'PERFORMER "周杰伦"\nTITLE "范特西"\nFILE "a.flac" WAVE\n'
+            '  TRACK 01 AUDIO\n    TITLE "简单爱"\n    INDEX 01 00:00:00\n'
+        )
+        cue_path = self.tmp / "single.cue"
+        cue_path.write_text(content, encoding="utf-8")
+        single = Track(path=self.tmp / "a.flac")
+        single.cue = cue_mod.parse_cue(cue_path)
+        out = expand_cue_tracks([single])
+        self.assertEqual(len(out), 1)
+        self.assertIsNone(out[0].cue_track)
+
 
 class TestWatermark(unittest.TestCase):
     def test_comment_cleared(self) -> None:

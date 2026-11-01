@@ -936,6 +936,9 @@ class MainWindow(QMainWindow):
         from ..core.quarantine import QuarantineStore
 
         tracks = [t for t in self._selected_tracks() if t.path.exists()]
+        _seen: set[str] = set()
+        tracks = [t for t in tracks
+                  if not (str(t.path).lower() in _seen or _seen.add(str(t.path).lower()))]
         if not tracks:
             return
         total = sum(t.path.stat().st_size for t in tracks)
@@ -951,7 +954,7 @@ class MainWindow(QMainWindow):
             [(t.path, t.authenticity.verdict if t.authenticity else "",
               t.authenticity.detail_text if t.authenticity else "") for t in tracks]
         )
-        removed = [t for t in tracks if not t.path.exists()]
+        removed = [t for t in self.model.tracks() if not t.path.exists()]
         self.model.remove_tracks(removed)
         self._refresh_stats()
         self._append_log("WARNING", f"已隔离 {len(created)} 个文件，{len(failed)} 个失败")
@@ -969,6 +972,10 @@ class MainWindow(QMainWindow):
         )
 
         tracks = [t for t in self._selected_tracks() if t.path.exists()]
+        # 分轨条目共享同一文件，按 path 去重避免对同一文件重复删除
+        _seen: set[str] = set()
+        tracks = [t for t in tracks
+                  if not (str(t.path).lower() in _seen or _seen.add(str(t.path).lower()))]
         if not tracks:
             QMessageBox.information(self, "没有文件", "选中项没有可删除的本地文件。")
             return
@@ -1000,7 +1007,7 @@ class MainWindow(QMainWindow):
             ) != QMessageBox.Yes:
                 return
             done, failed = delete_permanently(paths)
-            removed = [t for t in tracks if not t.path.exists()]
+            removed = [t for t in self.model.tracks() if not t.path.exists()]
             self._append_log(
                 "WARNING",
                 f"已彻底删除 {done} 个文件" + (f"，{len(failed)} 个失败" if failed else ""),
@@ -1014,10 +1021,10 @@ class MainWindow(QMainWindow):
                 self._append_log("WARNING", f"回收站不可用（{error}），改用隔离区")
                 store = QuarantineStore()
                 created, failed = store.move_in([(t.path, "", "") for t in tracks])
-                removed = [t for t in tracks if not t.path.exists()]
+                removed = [t for t in self.model.tracks() if not t.path.exists()]
                 self._append_log("WARNING", f"已隔离 {len(created)} 个文件（可还原）")
             else:
-                removed = [t for t in tracks if not t.path.exists()]
+                removed = [t for t in self.model.tracks() if not t.path.exists()]
                 self._append_log("WARNING", f"已移入回收站 {count} 个文件（可在资源管理器还原）")
 
         if removed:
@@ -1101,6 +1108,10 @@ class MainWindow(QMainWindow):
             t for t in self.model.tracks()
             if t.status is not TrackStatus.UNSUPPORTED and t.info.lossless
         ]
+        # 分轨展开后同一整轨文件可能有多行，按 path 去重，避免对同一文件重复鉴定
+        seen: set[str] = set()
+        deduped = [t for t in targets if not (str(t.path).lower() in seen or seen.add(str(t.path).lower()))]
+        targets = deduped
         if not targets:
             QMessageBox.information(
                 self, "没有可鉴定的曲目",
@@ -1124,8 +1135,12 @@ class MainWindow(QMainWindow):
         self.auth_worker.start()
 
     def _on_auth_track(self, track: Track, result) -> None:
-        track.authenticity = result
-        self.model.refresh_row(track)
+        # 同一整轨文件的多个分轨条目共享鉴定结果（按 path 同步）
+        key = str(track.path).lower()
+        for t in self.model.tracks():
+            if str(t.path).lower() == key:
+                t.authenticity = result
+                self.model.refresh_row(t)
         # 每判完一首就刷新统计卡，让「假无损」数字随扫描实时上涨
         self._refresh_stats()
         if result.reasons:
@@ -1174,6 +1189,10 @@ class MainWindow(QMainWindow):
         candidates = removable_tracks(
             scope, include_suspect=self.settings.cleanup_include_suspect
         )
+        # 分轨条目共享同一整轨文件，删除/隔离只需对每个文件操作一次
+        seen: set[str] = set()
+        candidates = [t for t in candidates
+                      if not (str(t.path).lower() in seen or seen.add(str(t.path).lower()))]
         if not candidates:
             unexamined = [t for t in scope if t.authenticity is None]
             message = "当前列表没有判定为假无损的文件。"
@@ -1195,7 +1214,7 @@ class MainWindow(QMainWindow):
         removed: list[Track] = []
         if mode == MODE_DELETE:
             done, failed = delete_permanently(paths)
-            removed = [t for t in candidates if not t.path.exists()]
+            removed = [t for t in self.model.tracks() if not t.path.exists()]
             self._append_log(
                 "WARNING", f"已彻底删除 {done} 个文件" + (f"，{len(failed)} 个失败" if failed else "")
             )
@@ -1210,7 +1229,7 @@ class MainWindow(QMainWindow):
                     for t in candidates
                 ]
             )
-            removed = [t for t in candidates if not t.path.exists()]
+            removed = [t for t in self.model.tracks() if not t.path.exists()]
             self._append_log(
                 "WARNING",
                 f"已隔离 {len(created)} 个文件到 {store.root}，可在「隔离区管理」中还原",
@@ -1231,10 +1250,10 @@ class MainWindow(QMainWindow):
                         for t in candidates
                     ]
                 )
-                removed = [t for t in candidates if not t.path.exists()]
+                removed = [t for t in self.model.tracks() if not t.path.exists()]
                 self._append_log("WARNING", f"已隔离 {len(created)} 个文件（可还原）")
             else:
-                removed = [t for t in candidates if not t.path.exists()]
+                removed = [t for t in self.model.tracks() if not t.path.exists()]
                 self._append_log("WARNING", f"已移入回收站 {count} 个文件（可在资源管理器还原）")
 
         if removed:

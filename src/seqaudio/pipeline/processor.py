@@ -141,6 +141,14 @@ class Processor:
             if self.cancel_event.is_set():
                 self._mark_cancelled(track)
                 continue
+            # 整轨 CUE 展开出的分轨条目：标签已来自 CUE、且无法单独写整轨文件，
+            # 跳过匹配与写入，避免对同一文件重复处理 N 次。
+            if track.cue_track is not None:
+                track.status = TrackStatus.SKIPPED
+                track.note("整轨分轨条目，已按 CUE 显示，无需批处理")
+                self.emit("track", track)
+                self.emit("progress", (index, len(tracks)))
+                continue
             self.stats.index = index
             try:
                 self.prepare_one(track, opts, matcher)
@@ -212,6 +220,7 @@ class Processor:
             t for t in tracks
             if t.status not in (TrackStatus.UNSUPPORTED, TrackStatus.SKIPPED, TrackStatus.FAILED)
             and t.exists
+            and t.cue_track is None   # 分轨条目无法单独写整轨文件，跳过
         ]
         for track in writable:
             self._rebuild_changed_fields(track)

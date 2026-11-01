@@ -9,7 +9,7 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from ..core.model import Track
-from ..core.probe import probe, scan_folder
+from ..core.probe import probe, scan_folder, expand_cue_tracks
 from ..core.report import RunSummary
 from ..core.config import Settings
 from ..pipeline.processor import BatchOptions, Processor
@@ -42,6 +42,8 @@ class ScanWorker(QThread):
                 elif path.is_file():
                     tracks.append(probe(path))
                     self.discovered.emit(len(tracks))
+            # 多轨 CUE 整轨展开成分轨，让列表显示所有歌曲
+            tracks = expand_cue_tracks(tracks)
             self.finishedScan.emit(tracks)
         except Exception as exc:  # noqa: BLE001
             log.exception("扫描失败")

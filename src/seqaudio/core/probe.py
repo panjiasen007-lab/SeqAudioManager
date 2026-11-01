@@ -218,6 +218,46 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
     return track
 
 
+def expand_cue_tracks(tracks: list[Track]) -> list[Track]:
+    """多轨 CUE 整轨展开成多个 Track（每轨一个），让列表显示所有歌曲。
+
+    整轨 WAV/APE/FLAC 抓轨通常带一个 CUE 索引，里面是多首歌。展开后每一轨
+    成为列表里独立的一行，标题/歌手/专辑/轨道号/时长都取自 CUE；单轨 CUE
+    或没有 CUE 的文件保持原样。
+
+    展开出的分轨条目共享同一个磁盘文件（``cue_track`` 记录它是第几轨），
+    供鉴定去重、写标签跳过等下游逻辑识别，避免对同一文件重复处理。
+    """
+    out: list[Track] = []
+    for track in tracks:
+        cue = track.cue
+        if cue is None or len(cue.tracks) <= 1:
+            out.append(track)
+            continue
+        total = len(cue.tracks)
+        for index, entry in enumerate(cue.tracks):
+            title = entry.title or f"Track {entry.number:02d}"
+            artist = entry.performer or cue.performer or ""
+            tags = Tags(
+                title=title,
+                artist=artist,
+                album=cue.album or cue.title or "",
+                albumartist=cue.performer or "",
+                date=cue.date or "",
+                genre=cue.genre or "",
+                track=f"{entry.number}/{total}",
+            )
+            t = Track(path=track.path, info=track.info)
+            t.cue = cue
+            t.cue_track = index
+            t.original = tags
+            t.working = tags.copy()
+            t.status = track.status
+            t.notes = list(track.notes)
+            out.append(t)
+    return out
+
+
 def scan_folder(folder: Path | str, *, recursive: bool = True) -> list[Track]:
     """扫描目录下全部受支持音频（跳过加密格式并记录提示）。"""
     folder = Path(folder)

@@ -314,6 +314,7 @@ class Track:
     source: str = ""                               # 匹配来源
     notes: list[str] = field(default_factory=list)  # 处理说明 / 错误详情
     cue: Optional[CueSheet] = None
+    cue_track: Optional[int] = None                 # 分轨索引（指向 cue.tracks，整轨展开后的第几轨）
     lyrics_src: str = ""                           # 歌词来源（本地/网络）
     lyrics_sidecar: str = ""                       # 待写入 .lrc 的歌词正文
     authenticity: Optional[Any] = None              # 真假无损鉴定结果（AuthenticityResult）
@@ -337,6 +338,23 @@ class Track:
     @property
     def album(self) -> str:
         return self.working.album or self.original.album
+
+    @property
+    def cue_track_entry(self) -> Optional["CueTrack"]:
+        """当前分轨对应的 CueTrack（整轨展开后才非空）。"""
+        if self.cue is not None and self.cue_track is not None:
+            if 0 <= self.cue_track < len(self.cue.tracks):
+                return self.cue.tracks[self.cue_track]
+        return None
+
+    @property
+    def duration_text(self) -> str:
+        """时长展示：分轨显示该轨时长，整轨显示文件总时长。"""
+        entry = self.cue_track_entry
+        if entry is not None:
+            total = int(entry.duration)
+            return f"{total // 60}:{total % 60:02d}"
+        return self.info.duration_text
 
     @property
     def exists(self) -> bool:
