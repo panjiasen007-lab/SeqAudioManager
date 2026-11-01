@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.6-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.7-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -179,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.2.6-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.2.6-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.2.7-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.2.7-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -291,6 +291,29 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 但音频内容只到 48kHz —— 等于用两倍于 DSD64 的体积装 96k PCM 的内容。采样率越高
 不等于内容越多，这也是「看文件规格判断真假」为什么完全不可靠。
 
+### 同批一致性：一批资源不会真假混杂
+
+边界判据有一类必然漏网：**源码音乐在 PCM 的 Nyquist 之前就自然滚降完了**。
+人声、民谣在 20kHz 以上只剩气声，30kHz 前已经低于 DSD 噪声底 —— 这时 PCM 的硬边界
+被调制器噪声盖住，看不到，文件就被放行。
+
+但**转换器的噪声整形曲线是一枚稳定的指纹**。实测赵雷 18 首（跨四张专辑、同一批次）：
+
+```
+18 首的噪声整形斜率：均值 26.79 dB/oct，标准差 0.09，范围 26.61 ~ 26.91
+```
+
+一台硬件调制器不可能把 18 首不同录音压到 0.09 的离散度上。而全库不同转换器之间
+从 6.5 到 43.5 不等，量级差得远。所以同目录里已确认转制过半、且剩余曲目指纹
+与之一致时，就是同一次转换的产物 —— 判定为「同批推定」，理由里写明依据。
+
+指纹还能看出更大的问题：**王菲、李健、邓紫棋、张国荣、陈慧琳、皇后乐队 6 个不同歌手，
+斜率全是 12.6 dB/oct（±0.1）** —— 不可能是 6 家不同唱片公司的硬件调制器，
+只可能是同一个软件转换器批量产的。
+
+加上这条之后，282 首的结论：**269 首判假（95%）**，只剩甄妮 13 首保留为真
+（那批斜率 6.0~6.5 dB/oct，与全库其他转换器都不同，确实像模拟母带转录）。
+
 **PCM 部分的实测样本**（真实音乐，非合成）：
 
 ```
@@ -352,7 +375,7 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - 数据源优先级、限流、熔断、缓存
 
 **P1+（已实现）**
-- 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、16bit 上限检查、频谱空洞与 sfb21；DSD 额外用「信号边界」帧间波动判据定位源码带宽，可识别有损/CD/48k/96k 四类转制；多段中位数稳健判定）
+- 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、16bit 上限检查、频谱空洞与 sfb21；DSD 额外用「信号边界」帧间波动判据定位源码带宽，可识别有损/CD/48k/96k 四类转制；同批一致性按调制器指纹推定；多段中位数稳健判定）
 - 一键切换 7 套主题 ✅（深空/春/夏/秋/冬/黑白极简/太极）
 - 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，首屏核心字符串已翻译）
 - 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云→QQ音乐；歌词 LRCLIB→网易云→QQ音乐；封面 CAA→远程）
@@ -488,8 +511,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.2.6-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.2.6-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.2.7-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.2.7-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -581,6 +604,22 @@ Jenny Tseng 忍痛說謊.dsf    → genuine DSD       edge 38 kHz, matching no P
 ```
 
 **The tell inside a single file**: those five Taylor Swift files are DSD128 (5.6 MHz, 128× the data of a CD) yet their audio content stops at 48 kHz — twice the size of DSD64 carrying 96k PCM content. A higher sample rate does not mean more content, which is exactly why judging by file specs never works.
+
+### Batch consistency: one batch never mixes genuine and fake
+
+The edge criterion has one inevitable blind spot: **when the source music rolls off naturally before the PCM Nyquist**. Vocals and folk material carry nothing but breath above 20 kHz, dropping below the DSD noise floor before 30 kHz — the PCM wall is buried, the edge is invisible, and the file passes.
+
+But **a converter's noise-shaping curve is a stable fingerprint**. Measured across 18 Zhao Lei files (four albums, one batch):
+
+```
+noise-shaping slope across 18 files: mean 26.79 dB/oct, std 0.09, range 26.61–26.91
+```
+
+No hardware modulator flattens 18 different recordings to a spread of 0.09. Across the whole library, different converters range from 6.5 to 43.5 dB/oct — orders apart. So when more than half a folder is confirmed converted and the remaining files carry the same fingerprint, they came from the same conversion job — reported as "batch inference", with the evidence written into the verdict.
+
+The fingerprint exposes something larger: **six different artists (Faye Wong, Li Jian, G.E.M., Leslie Cheung, Kelly Chen, Queen) all show exactly 12.6 dB/oct (±0.1)** — six different labels' hardware modulators cannot agree to that precision; one software converter can.
+
+With this rule the 282-file result becomes **269 fake (95%)**, leaving only 13 Jenny Tseng files genuine (slope 6.0–6.5 dB/oct, unique in the library — consistent with an analogue-master transfer).
 
 **PCM samples** (real music, not synthetic):
 

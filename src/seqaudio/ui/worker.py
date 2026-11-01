@@ -157,14 +157,18 @@ class AuthenticityWorker(QThread):
     def run(self) -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        from ..core.authenticity import AuthenticityResult, analyze
+        from ..core.authenticity import (
+            AuthenticityResult,
+            analyze,
+            apply_batch_consensus,
+        )
 
         total = len(self.tracks)
         if total == 0:
             self.finishedAll.emit(0, 0, 0)
             return
 
-        true_count = suspect = unknown = 0
+        pairs: list[tuple] = []
         try:
             with ThreadPoolExecutor(max_workers=self.workers) as pool:
                 futures = {
@@ -177,21 +181,39 @@ class AuthenticityWorker(QThread):
                     except Exception as exc:  # noqa: BLE001
                         log.exception("鉴定异常：%s", track.path)
                         result = AuthenticityResult(error=f"分析异常：{exc}")
+                    pairs.append((track, result))
                     self.trackDone.emit(track, result)
-                    if result.verdict == "无法判定":
-                        unknown += 1
-                    elif result.is_suspicious:
-                        suspect += 1
-                    else:
-                        true_count += 1
                     self.progressChanged.emit(index, total)
                     if self.isInterruptionRequested():
                         for pending in futures:
                             pending.cancel()
                         break
+
+            # ---- 同批一致性：同一文件夹出处一致，个别漏网的按调制器指纹补判 ----
+            revised = apply_batch_consensus([(t.path, r) for t, r in pairs])
+            if revised:
+                by_path = {str(t.path): t for t, _ in pairs}
+                for path, result in revised:
+                    track = by_path.get(str(path))
+                    if track is not None:
+                        self.trackDone.emit(track, result)
+                log.info(
+                    "同批推定改判 %d 首：%s",
+                    len(revised),
+                    "、".join(p.name for p, _ in revised[:6]),
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("批量鉴定失败")
             self.failed.emit(str(exc))
+
+        true_count = suspect = unknown = 0
+        for _track, result in pairs:
+            if result.verdict == "无法判定":
+                unknown += 1
+            elif result.is_suspicious:
+                suspect += 1
+            else:
+                true_count += 1
         self.finishedAll.emit(true_count, suspect, unknown)
 
 

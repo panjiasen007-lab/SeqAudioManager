@@ -1440,7 +1440,73 @@ def analyze_many(
                 for pending in futures:
                     pending.cancel()
                 break
+    # 同批一致性：同一文件夹的曲目出处一致，个别漏网的按调制器指纹补判
+    apply_batch_consensus([(Path(key), value) for key, value in results.items()])
     return results
+
+
+# ---------------------------------------------------------------- 同批一致性
+
+#: 同批推定：同目录里已确认 PCM 转制的比例达到该值，就对剩余曲目做指纹比对
+BATCH_FAKE_RATIO = 0.5
+#: 同批推定：调制器指纹（噪声整形斜率 dB/oct）允许的偏差。
+#: 实测同一批转换内部标准差 ≤0.2（赵雷 18 首全在 26.79±0.09），
+#: 不同转换器之间相差 3~20（全库 6.5~43.5），0.8 是非常宽松的界限。
+BATCH_SLOPE_TOLERANCE = 0.8
+
+
+def apply_batch_consensus(
+    items: list[tuple[Path | str, AuthenticityResult]],
+) -> list[tuple[Path, AuthenticityResult]]:
+    """同目录一致性推定：一批文件出处相同，不会真假混杂。
+
+    现实中「同一文件夹里一首假、其余真」几乎不会发生 —— 同一批资源的来源
+    只有一次。而边界判据会漏掉一类情况：**源码音乐本身在 PCM Nyquist 之前
+    就自然滚降完了**（人声/民谣的 20kHz 以上只剩气声，30kHz 前已低于 DSD
+    噪声），此时 PCM 的硬边界被调制器噪声盖住，看不到，文件就被放行。
+
+    但转换器的噪声整形曲线是一枚稳定的指纹 —— 实测赵雷 18 首跨四张专辑，
+    斜率全在 26.79±0.09；而全库不同转换器之间从 6.5 到 43.5 不等。
+    所以：同目录里已确认转制的曲目过半时，剩余曲目只要指纹与之一致，
+    就是同一次转换的产物。
+
+    只在 DSD 上生效：PCM 侧的「同目录」可能真的是不同来源拼的合辑，
+    而 DSD 的批量转制几乎总是一次性作业。
+
+    返回被改判的条目，供界面刷新。
+    """
+    groups: dict[Path, list[tuple[Path, AuthenticityResult]]] = {}
+    for path, result in items:
+        groups.setdefault(Path(path).parent, []).append((Path(path), result))
+
+    changed: list[tuple[Path, AuthenticityResult]] = []
+    for group in groups.values():
+        dsd = [
+            (p, r)
+            for p, r in group
+            if r.verdict in (VERDICT_DSD, VERDICT_FAKE_DSD)
+        ]
+        if len(dsd) < 3:
+            continue
+        confirmed = [(p, r) for p, r in dsd if r.verdict == VERDICT_FAKE_DSD]
+        if len(confirmed) < 2 or len(confirmed) / len(dsd) < BATCH_FAKE_RATIO:
+            continue
+        reference = float(np.median([r.noise_shaping_slope for _, r in confirmed]))
+        for path, result in dsd:
+            if result.verdict != VERDICT_DSD or not result.noise_shaping_slope:
+                continue
+            if abs(result.noise_shaping_slope - reference) > BATCH_SLOPE_TOLERANCE:
+                continue
+            result.verdict = VERDICT_FAKE_DSD
+            result.score = 0.3
+            result.reasons = [
+                f"同目录 {len(confirmed)}/{len(dsd)} 首已确认是 PCM 转制；本首虽未找到 "
+                f"PCM 边界，但噪声整形斜率 {result.noise_shaping_slope:.1f}dB/oct 与之一致"
+                f"（{reference:.1f}±{BATCH_SLOPE_TOLERANCE}），出自同一次转换",
+                "同一批资源的出处只有一次：真 SACD 与转制文件不会混在同一批里",
+            ] + result.reasons[:1]
+            changed.append((path, result))
+    return changed
 
 
 # ---------------------------------------------------------------- 分组（界面筛选 / 批量清理共用）
