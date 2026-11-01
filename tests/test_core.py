@@ -1175,6 +1175,32 @@ class TestQQMusicSource(unittest.TestCase):
         self.assertIsNone(qqmusic.lyrics(FakeClient(), "不存在", "", song_mid="x"))
 
 
+class TestInstallerMode(unittest.TestCase):
+    """安装器版本检测：全新 / 修复 / 升级（V1.1.1）。"""
+
+    def setUp(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT / "installer"))
+        try:
+            import installer  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"无法导入安装器：{exc}")
+        self.installer = installer
+
+    def test_modes(self) -> None:
+        i = self.installed = self.installer
+        self.assertEqual(i.install_mode(""), "fresh")
+        self.assertEqual(i.install_mode(i.VERSION), "repair")
+        self.assertEqual(i.install_mode("0.9.0"), "upgrade")
+
+    def test_parse_version(self) -> None:
+        i = self.installer
+        self.assertEqual(i._parse_version("1.0.0"), (1, 0, 0))
+        self.assertEqual(i._parse_version(""), (0,))
+        self.assertEqual(i._parse_version("1.1"), (1, 1))
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 

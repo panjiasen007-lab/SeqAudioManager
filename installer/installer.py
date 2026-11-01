@@ -167,6 +167,47 @@ def write_registry(install_dir: Path, size_kb: int) -> None:
             winreg.SetValueEx(key, name, 0, winreg.REG_DWORD if isinstance(value, int) else winreg.REG_SZ, value)
 
 
+def _parse_version(text: str) -> tuple[int, ...]:
+    """把 ``1.0.0`` 解析成 ``(1, 0, 0)``，用于版本比较。"""
+    parts: list[int] = []
+    for seg in (text or "").strip().split("."):
+        try:
+            parts.append(int(seg))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts) or (0,)
+
+
+def detect_installed() -> tuple[str, Optional[Path]]:
+    """读注册表判断是否已安装，返回 ``(版本号, 安装目录)``。未安装返回 ``("", None)``。"""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+            version, _ = winreg.QueryValueEx(key, "DisplayVersion")
+            try:
+                location, _ = winreg.QueryValueEx(key, "InstallLocation")
+            except OSError:
+                location = ""
+        return str(version or "").strip(), (Path(location) if location else None)
+    except OSError:
+        return "", None
+
+
+def install_mode(installed_version: str) -> str:
+    """根据已安装版本判断安装模式。
+
+    * ``fresh``   —— 未安装，全新安装；
+    * ``repair``  —— 已装同版本，修复安装（覆盖程序文件，保留配置与备份）；
+    * ``upgrade`` —— 已装其它版本，升级安装（保留配置与备份）。
+    """
+    if not installed_version:
+        return "fresh"
+    if _parse_version(installed_version) == _parse_version(VERSION):
+        return "repair"
+    return "upgrade"
+
+
 class _Progress:
     """把 py7zr 的逐文件回调折算成百分比。"""
 
@@ -254,12 +295,17 @@ class InstallWorker(QThread):
 class Installer(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"安装 {APP_NAME} {VERSION}")
+        self.installed_version, self.installed_dir = detect_installed()
+        self.mode = install_mode(self.installed_version)
+        # 修复/升级时默认装回原位置，避免在机器上装出两份
+        self.target = self.installed_dir or default_install_dir()
+
+        action = {"repair": "修复", "upgrade": "升级"}.get(self.mode, "安装")
+        self.setWindowTitle(f"{action} {APP_NAME} {VERSION}")
         self.resize(720, 540)
         self.setMinimumSize(660, 500)
 
         self.worker: Optional[InstallWorker] = None
-        self.target = default_install_dir()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 18)
@@ -296,7 +342,8 @@ class Installer(QWidget):
 
         column = QVBoxLayout()
         column.setSpacing(2)
-        title = QLabel(f"安装 {APP_NAME}")
+        action = {"repair": "修复", "upgrade": "升级"}.get(self.mode, "安装")
+        title = QLabel(f"{action} {APP_NAME}")
         title.setStyleSheet(f"font-size:20px; font-weight:700; color:{FG};")
         column.addWidget(title)
         sub = QLabel(f"版本 {VERSION} · 本地音乐元数据批量处理与真假无损鉴定")
@@ -307,6 +354,19 @@ class Installer(QWidget):
 
     # ------------------------------------------------------------ 页面
 
+    def _mode_text(self) -> str:
+        if self.mode == "repair":
+            return (
+                f"检测到已安装 v{self.installed_version}，将进行修复安装"
+                "（覆盖程序文件，保留配置与备份）。"
+            )
+        if self.mode == "upgrade":
+            return (
+                f"检测到已安装 v{self.installed_version}，将升级到 v{VERSION}"
+                "（保留配置与备份）。"
+            )
+        return "未检测到已安装版本，将进行全新安装。"
+
     def _build_license_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -316,6 +376,13 @@ class Installer(QWidget):
         hint = QLabel("请阅读以下授权条款")
         hint.setStyleSheet(f"color:{DIM};")
         layout.addWidget(hint)
+
+        mode_label = QLabel(self._mode_text())
+        mode_label.setWordWrap(True)
+        mode_label.setStyleSheet(
+            f"color:{OK if self.mode != 'fresh' else ACCENT}; font-size:12px;"
+        )
+        layout.addWidget(mode_label)
 
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
@@ -353,7 +420,7 @@ class Installer(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.path_edit = QLineEdit(str(default_install_dir()))
+        self.path_edit = QLineEdit(str(self.target))
         self.path_edit.textChanged.connect(self._on_path_changed)
         browse = QPushButton("浏览…")
         browse.clicked.connect(self._browse)
@@ -378,7 +445,8 @@ class Installer(QWidget):
 
         note = QLabel(
             "安装到当前用户目录，不需要管理员权限。\n"
-            "卸载：设置 → 应用 → 已安装的应用 → 音序管家 → 卸载。"
+            + ("修复/升级前请先关闭正在运行的音序管家。\n" if self.mode != "fresh" else "")
+            + "卸载：安装目录的「卸载 音序管家」，或「设置 → 应用」。"
         )
         note.setStyleSheet(f"color:{MUTE}; font-size:12px; line-height:160%;")
         layout.addWidget(note)
@@ -512,7 +580,13 @@ class Installer(QWidget):
         if not payload.exists():
             QMessageBox.critical(self, "安装包损坏", f"找不到安装数据：{payload}")
             return
-        if self.target.exists() and any(self.target.iterdir()):
+        # 只有全新安装才需要确认「目录非空」；修复/升级本来就是覆盖安装，
+        # 原安装目录里必然有文件，再弹一次只会让用户多点一下。
+        if (
+            self.mode == "fresh"
+            and self.target.exists()
+            and any(self.target.iterdir())
+        ):
             reply = QMessageBox.question(
                 self,
                 "目录非空",
@@ -569,12 +643,14 @@ class Installer(QWidget):
         except OSError as exc:
             message = f"文件已就位，但写注册表/快捷方式失败：{exc}"
 
+        title = {"repair": "修复完成", "upgrade": "升级完成"}.get(self.mode, "安装完成")
         self.progress.setValue(100)
-        self.progress_label.setText("安装完成")
-        self.done_title.setText("安装完成")
+        self.progress_label.setText(title)
+        self.done_title.setText(title)
         self.done_text.setText(
             (message + "\n\n" if message else "")
-            + f"已安装到：{self.target}\n可以随时在「设置 → 应用」中卸载。"
+            + f"已安装到：{self.target}\n"
+            + "可以随时双击安装目录里的「卸载 音序管家」，或在「设置 → 应用」中卸载。"
         )
         self.stack.setCurrentIndex(3)
         self._refresh_buttons()
@@ -607,6 +683,9 @@ def silent_install(target: Path, *, shortcuts: bool = True) -> int:
     import time as _time
 
     report: dict = {"target": str(target), "ok": False}
+    installed_version, _installed_dir = detect_installed()
+    report["installed_version"] = installed_version
+    report["mode"] = install_mode(installed_version)
     payload = resource_path(PAYLOAD)
     report["payload"] = str(payload)
     if not payload.exists():
