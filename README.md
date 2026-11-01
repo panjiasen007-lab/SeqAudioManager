@@ -229,6 +229,7 @@ Visual Studio Build Tools。
 | 截止位置 + 陡度 | 128k≈16kHz、192k≈18.5kHz、320k≈20kHz、CD≈22.05kHz | 转码分档 |
 | 陡度（dB/oct） | 编码器 >60dB/oct，话筒/磁带更平缓 | 辅助 |
 | 频谱空洞 / sfb21 凹陷 | 低码率编码器「位不够」留下的窄凹，MP3 在 16kHz 有特征凹陷 | 辅助证据 |
+| **SBR copy-up（高低频去趋势相关）** | HE-AAC 用 SBR 把低频子带平移复制到高频，去趋势后高频仍是低频镜像（≈0.97）；普通音乐去趋势后各自独立（0.19~0.46） | HE-AAC 转码 |
 | 频谱粗糙度（相邻频点差 RMS） | 有损量化把频谱打成锯齿，相邻频点幅度跳变大（真 CD 抓轨实测 0.05~0.12dB，128k 转码 0.13dB 以上） | 诊断指标 |
 
 **「噪声填充型升采样」是 V1.2.8 新抓的一类**。44.1kHz 升到 48kHz 时，正经的重采样器
@@ -565,6 +566,7 @@ be forged*.
 | Cutoff position + steepness | 128k≈16 kHz, 192k≈18.5 kHz, 320k≈20 kHz, CD≈22.05 kHz | Transcode grading |
 | Steepness (dB/oct) | Encoders exceed 60 dB/oct; microphones and tape roll off far more gently | Supporting |
 | Spectral holes / sfb21 notch | Narrow gaps left where a low-bitrate encoder ran out of bits; MP3 has a characteristic notch at 16 kHz | Supporting |
+| **SBR copy-up (detrended low/high correlation)** | HE-AAC's SBR shifts low sub-bands up to the highs; after detrending the highs remain a mirror of the lows (≈0.97), while normal music is independent (0.19–0.46) | HE-AAC transcode |
 | Spectral roughness (adjacent-bin RMS) | Lossy quantisation turns the spectrum jagged; adjacent-bin level jumps grow (real CD rips measure 0.05–0.12 dB, 128k transcodes 0.13 dB+) | Diagnostic |
 
 **"Noise-filled upsampling" is newly caught in v1.2.8.** A proper resampler leaves digital silence above 22.05 kHz; some tools deliberately add dither to fill it to −50 to −70 dB and fake ultrasonic content — edge energy alone would then read it as genuine. The tell is the step itself: a natural roll-off never drops 18 dB exactly on a sample-rate boundary. Two Avril Lavigne tracks (Nobody's Home, Who Knows) show a 21–28 dB step at 22.05 kHz with flat noise above it, and are now caught.

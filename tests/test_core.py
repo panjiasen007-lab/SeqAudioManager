@@ -1642,6 +1642,48 @@ class TestAuthenticityV13(unittest.TestCase):
         )
         self.assertNotEqual(verdict, "疑似升频", reasons)
 
+    def test_sbr_copyup_score_high_when_replicated(self) -> None:
+        """SBR copy-up：高频是低频的平移复制时，去趋势相关性高。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _sbr_copyup_score
+
+        freqs = np.arange(0, 22050, 5.4)
+        rng = np.random.default_rng(2)
+        db = np.full(freqs.size, -70.0)
+        lo = (freqs >= 1000) & (freqs <= 6000)
+        hi = (freqs >= 7000) & (freqs <= 12000)
+        # 低频段造一段随机峰谷包络
+        lo_env = -40.0 + 8.0 * rng.standard_normal(int(np.count_nonzero(lo)))
+        db[lo] = lo_env
+        # SBR：高频段 = 低频段平移复制（同样的峰谷）
+        li = np.where(lo)[0]
+        hh = np.where(hi)[0]
+        n = min(li.size, hh.size)
+        db[hh[:n]] = db[li[:n]]
+        self.assertGreater(_sbr_copyup_score(freqs, db, 22050), 0.7)
+
+    def test_sbr_copyup_score_low_when_independent(self) -> None:
+        """独立高低频（非复制）→ 去趋势相关性低。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _sbr_copyup_score
+
+        freqs = np.arange(0, 22050, 5.4)
+        rng = np.random.default_rng(3)
+        db = rng.standard_normal(freqs.size) * 8.0 - 50.0
+        self.assertLess(_sbr_copyup_score(freqs, db, 22050), 0.5)
+
+    def test_sbr_verdict_when_copyup(self) -> None:
+        """SBR copy-up 相关性高 → 判疑似假无损（HE-AAC 转码）。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 21000.0, 20.0, -70.0, 16,
+            edge_db=-80.0, ratio=0.95, sbr_score=0.9,
+        )
+        self.assertIn(verdict, ("假无损", "疑似假无损"), reasons)
+
     @unittest.skipUnless(
         __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
         "需要 ffmpeg",

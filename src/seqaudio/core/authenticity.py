@@ -105,6 +105,11 @@ PCM_UPSAMPLE_STEP_DB = 18.0
 #: 的真实 hi-res（人声/民谣的超声区可能以本底噪声为主）。
 EXTENDED_FLATNESS_NOISE = 0.7
 
+#: SBR copy-up 去趋势相关性阈值（0~1）。HE-AAC 的 SBR 把低频子带精确复制
+#: 到高频（频率平移），去趋势后高频仍是低频的镜像（实测 ≈0.97）；普通音乐
+#: 高低频去趋势后各自独立（实测真 CD 抓轨 0.19~0.46）。0.6 位于两者之间。
+SBR_COPYUP_CORR = 0.6
+
 #: 信号边界判据（V1.2.6）：分频段统计**帧间电平波动**。
 #:
 #: 为什么需要它：上面两条判据看的都是「电平台阶」，而台阶会被噪声盖住 ——
@@ -201,6 +206,7 @@ class AuthenticityResult:
     bit_depth_effective: int = 0
     spectral_roughness: float = 0.0    # 4~16kHz 相邻频点幅度差 RMS（有损编码"锯齿"度）
     extended_flatness: float = 0.0     # 扩展带频谱平坦度（噪声填充型升频的兜底证据）
+    sbr_copyup_score: float = 0.0      # SBR copy-up 去趋势相关性（HE-AAC 转码特征）
     high_band_energy_db: float = 0.0   # 20kHz 以上相对能量
     noise_shaping_slope: float = 0.0   # DSD 噪声整形斜率（dB/oct，真 DSD 为正）
     ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
@@ -656,6 +662,64 @@ def _spectral_flatness(freqs: np.ndarray, db: np.ndarray, low: float, high: floa
     return float(np.clip(geo / arith, 0.0, 1.0))
 
 
+def _band_corr_detrend(
+    freqs: np.ndarray, db: np.ndarray,
+    lo1: float, hi1: float, lo2: float, hi2: float,
+) -> float:
+    """两个频段「去趋势后的对数幅度」相关系数（SBR copy-up 检测）。
+
+    HE-AAC 的 SBR 把低频子带**精确复制**到高频（频率平移），所以高频段的
+    频谱形状（包括峰谷起伏）是低频段的镜像。普通音乐的高低频虽然也有共同
+    的「随频率衰减」宏观趋势，但去趋势（中值滤波）之后，各自的峰谷是独立
+    的，相关性会掉下来 —— 实测真无损去趋势后约 0.2~0.36，SBR 复制仍高达
+    0.97。正是这个「去趋势」把两者分开。
+    """
+    def detrend(x: np.ndarray, span: int) -> np.ndarray:
+        # 中值滤波（约 500Hz 窗口）估计宏观包络，减去得到峰谷残余
+        if span < 3 or span >= len(x):
+            return x
+        pad = np.pad(x, (span // 2, span // 2), mode="edge")
+        windows = np.lib.stride_tricks.sliding_window_view(pad, span)
+        return x - np.median(windows, axis=1)
+
+    m1 = (freqs >= lo1) & (freqs <= hi1)
+    m2 = (freqs >= lo2) & (freqs <= hi2)
+    a = db[m1]
+    b = db[m2]
+    n = min(a.size, b.size)
+    if n < 32:
+        return 0.0
+    bin_hz = float(freqs[1] - freqs[0]) if freqs.size > 1 else 5.4
+    span = max(9, int(round(500.0 / bin_hz)))
+    if span % 2 == 0:
+        span += 1
+    a = detrend(a[:n], span)
+    b = detrend(b[:n], span)
+    if float(np.std(a)) < 1e-6 or float(np.std(b)) < 1e-6:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _sbr_copyup_score(freqs: np.ndarray, db: np.ndarray, nyquist: float) -> float:
+    """SBR copy-up 评分：低频段与其「频率平移复制品」的最大去趋势相关性。
+
+    扫描多个平移量（3~11kHz），取最大相关 —— HE-AAC 的 crossover 不固定，
+    取最大能覆盖不同编码器。返回 0~1，越高越像 SBR 复制（高频是低频的镜像）。
+    """
+    lo_lo, lo_hi = 1000.0, min(6000.0, nyquist * 0.4)
+    if lo_hi - lo_lo < 2000.0:
+        return 0.0
+    best = 0.0
+    shift = 3000.0
+    while shift <= 12000.0:
+        if lo_hi + shift > nyquist * 0.9:
+            break
+        corr = _band_corr_detrend(freqs, db, lo_lo, lo_hi, lo_lo + shift, lo_hi + shift)
+        best = max(best, corr)
+        shift += 1000.0
+    return best
+
+
 def _bit_depth_evidence(samples: np.ndarray) -> tuple[bool, float]:
     """返回 ``(是否存在超过 16bit 上限的样本, 峰值电平 dBFS)``。
 
@@ -1007,6 +1071,7 @@ def _judge(
     upsample_src: float = 0.0,
     upsample_step: float = 0.0,
     extended_flat: float = 0.0,
+    sbr_score: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -1144,6 +1209,23 @@ def _judge(
         if ratio < 0.85:
             return VERDICT_FAKE, 0.85, reasons
         return VERDICT_SUSPECT, 0.5, reasons
+
+    # ---- 3b. SBR copy-up：HE-AAC 的高频是低频的平移复制 ----
+    #
+    # HE-AAC 用 SBR 把低频子带「频率平移」复制到高频，去趋势后高频段的频谱
+    # 形状仍是低频段的镜像（实测相关性 ≈0.97）；普通音乐高低频去趋势后各自
+    # 独立（真 CD 抓轨 0.19~0.46）。这是 cutoff 判据抓不到的：SBR 让高频
+    # 「看起来有内容」，但那份内容是低频复制出来的，不是录音。
+    if sbr_score >= SBR_COPYUP_CORR:
+        reasons.append(
+            f"高频段与低频段去趋势后频谱形状高度相关（copy-up 相关性 {sbr_score:.2f}），"
+            "高频是低频的平移复制"
+        )
+        reasons.append(
+            "这是 HE-AAC SBR 的带宽复制特征：高频不是真实录音而是低频复制出来的，"
+            "源码是有损编码，不可能是原生无损"
+        )
+        return VERDICT_SUSPECT, 0.55, reasons
 
     # ---- 4. 转码检测：按截止位置分档 ----
     if nyquist <= 24000:
@@ -1414,6 +1496,10 @@ def analyze(
     extended_flat = 0.0
     if not is_dsd and nyq >= 23000 and 0 < cutoff < nyq * 0.95:
         extended_flat = _spectral_flatness(freqs, db, cutoff, nyq)
+    # SBR copy-up 相关性：HE-AAC 的高频是低频的平移复制（去趋势后仍高度相关）
+    sbr_score = 0.0
+    if not is_dsd and nyq >= 22050:
+        sbr_score = _sbr_copyup_score(freqs, db, nyq)
     # 位深注水：声明 24bit 却从没用到 16bit 以上（且电平正常，排除近乎无声的文件）
     depth_padding = bool(
         info.bit_depth
@@ -1430,6 +1516,7 @@ def analyze(
     result.bit_depth_padding = depth_padding
     result.spectral_roughness = roughness
     result.extended_flatness = extended_flat
+    result.sbr_copyup_score = sbr_score
 
     verdict, score, reasons = _judge(
         info,
@@ -1460,6 +1547,7 @@ def analyze(
         upsample_src=upsample_src,
         upsample_step=upsample_step,
         extended_flat=extended_flat,
+        sbr_score=sbr_score,
     )
     result.verdict = verdict
     result.score = score
