@@ -1649,6 +1649,112 @@ class TestDsdSourceCliff(unittest.TestCase):
         self.assertGreaterEqual(score, 0.8)
 
 
+class TestDsdSignalEdge(unittest.TestCase):
+    """DSD 信号边界判据（V1.2.6）。
+
+    断崖判据看的是「电平台阶」，会被调制器带内噪声盖住；波动判据只看
+    「这个频段还跟不跟着音乐起伏」，因此能补上台阶被淹没的盲区。
+    """
+
+    def _rows(self, edge: float, nyquist: float = 352_800.0, frames: int = 120):
+        """构造分帧频谱：``edge`` 以下随时间起伏，以上是恒定噪声。"""
+        import numpy as np
+
+        freqs = np.arange(0.0, nyquist / 2.0, 40.0)
+        rows = np.full((frames, freqs.size), -60.0)
+        t = np.linspace(0.0, 6.0, frames)[:, None]
+        swing = 9.0 * np.sin(2.0 * np.pi * 0.7 * t)
+        variable = (freqs >= 5_000.0) & (freqs < edge)
+        rows[:, variable] += swing
+        rows += np.random.default_rng(7).normal(0.0, 0.2, rows.shape)
+        return rows, freqs
+
+    def test_edge_at_cd_boundary(self) -> None:
+        from seqaudio.core.authenticity import _variation_edge
+
+        rows, freqs = self._rows(22_050.0)
+        edge, std, floor = _variation_edge(rows, freqs, 176_400.0)
+        self.assertAlmostEqual(edge, 22_000.0, delta=2_100.0, msg=(std, floor))
+
+    def test_edge_at_96k_boundary(self) -> None:
+        from seqaudio.core.authenticity import _variation_edge
+
+        rows, freqs = self._rows(48_000.0)
+        edge, _, _ = _variation_edge(rows, freqs, 352_800.0)
+        self.assertAlmostEqual(edge, 48_000.0, delta=2_100.0)
+
+    def test_no_edge_when_content_extends(self) -> None:
+        """内容一路延伸到扫描上限 → 不该报边界。"""
+        from seqaudio.core.authenticity import _variation_edge
+
+        rows, freqs = self._rows(200_000.0)
+        edge, _, _ = _variation_edge(rows, freqs, 352_800.0)
+        self.assertEqual(edge, 0.0)
+
+    def test_empty_input_is_safe(self) -> None:
+        import numpy as np
+
+        from seqaudio.core.authenticity import _variation_edge
+
+        edge, std, floor = _variation_edge(np.empty((0, 0)), np.empty(0), 176_400.0)
+        self.assertEqual((edge, std, floor), (0.0, 0.0, 0.0))
+
+    def test_grid_matching(self) -> None:
+        from seqaudio.core.authenticity import _match_edge_grid
+
+        self.assertEqual(_match_edge_grid(22_000.0), 44_100.0)
+        self.assertEqual(_match_edge_grid(23_000.0), 44_100.0)
+        self.assertEqual(_match_edge_grid(26_000.0), 48_000.0)
+        self.assertEqual(_match_edge_grid(46_000.0), 96_000.0)
+        self.assertEqual(_match_edge_grid(98_000.0), 192_000.0)
+        # 落在网格之间的自然滚降不该被硬套
+        self.assertEqual(_match_edge_grid(37_000.0), 0.0)
+        self.assertEqual(_match_edge_grid(70_000.0), 0.0)
+
+    def test_judge_flags_96k_source(self) -> None:
+        """台阶被噪声淹没的 DSD128（Taylor 那类）靠边界判据抓出来。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, score, reasons = _judge_dsd(
+            9.0, -5.0, 29_000.0, 20.0, -45.0,
+            pcm_source=0.0, ultra_body=-39.0,
+            edge_hz=46_000.0, edge_std=2.4, edge_floor=1.5,
+        )
+        self.assertEqual(verdict, "疑似假 DSD", reasons)
+        self.assertLess(score, 0.5)
+        self.assertTrue(any("96.0kHz" in r for r in reasons), reasons)
+
+    def test_judge_flags_sub_cd_bandwidth(self) -> None:
+        """带宽连 CD 都不到的（20kHz 就像 320k MP3）要单独报出来。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            12.0, -10.0, 20_000.0, 15.0, -55.0,
+            pcm_source=0.0, ultra_body=-45.0,
+            edge_hz=20_000.0, edge_std=1.4, edge_floor=1.0,
+        )
+        self.assertEqual(verdict, "疑似假 DSD", reasons)
+        self.assertTrue(any("有损编码器" in r for r in reasons), reasons)
+
+    def test_judge_keeps_genuine_when_edge_off_grid(self) -> None:
+        """边界落在网格之外（自然滚降）→ 仍然判真 DSD。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            9.0, -5.0, 29_000.0, 20.0, -50.0,
+            pcm_source=0.0, ultra_body=-39.0,
+            edge_hz=37_000.0, edge_std=1.8, edge_floor=1.2,
+        )
+        self.assertEqual(verdict, "真 DSD", reasons)
+
+    def test_judge_without_edge_still_works(self) -> None:
+        """没算出边界（默认 0）时不能误触发，保持原有行为。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, _ = _judge_dsd(12.0, -20.0, 30_000.0, 5.0, -50.0)
+        self.assertEqual(verdict, "真 DSD")
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 

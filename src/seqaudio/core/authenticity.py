@@ -91,6 +91,25 @@ PCM_CLIFF_SILENCE_DB = -75.0
 #: PCM 转制只有 -59 ~ -61dB。仅作辅助理由，不单独判决
 DSD_ULTRA_BODY_DB = -52.0
 
+#: 信号边界判据（V1.2.6）：分频段统计**帧间电平波动**。
+#:
+#: 为什么需要它：上面两条判据看的都是「电平台阶」，而台阶会被噪声盖住 ——
+#: 调制器带内噪声高的转制文件（实测 Adele 有一半、Taylor Swift 全部），
+#: 22kHz 之上的噪声电平与音乐高频相当，频谱上看不到任何台阶，于是被判成真 DSD。
+#:
+#: 但噪声和音乐有一个本质区别：**音乐随乐句起伏，噪声不随**。实测真/假 DSD
+#: 在纯噪声区的帧间标准差只有 0.6~1.5dB，而音乐内容的频段高达 5~12dB。
+#: 所以「波动从高跌到噪声水平」的频率就是源码的带宽边界，与绝对电平无关。
+DSD_EDGE_VARIATION_DB = 2.0
+#: 波动边界允许匹配的 PCM Nyquist 网格。只保留最常见四档：
+#: 44.1k / 48k / 96k / 192k 源码。88.2k(44.1k 边界) 与 64k(32k 边界)
+#: 极少见，放进来容易把真 DSD 在 40~45kHz 的自然滚降误判成 88.2k 转制。
+DSD_EDGE_GRID = (22_050.0, 24_000.0, 48_000.0, 96_000.0)
+#: 带宽连 CD 都不到（< 21.5kHz）：只可能来自有损编码或低采样率 PCM。
+#: 实测库里 34 个文件边界落在 16/18/20kHz —— 正好是 MP3 128k/192k/320k
+#: 的低通位置，属于「有损转 DSD」，比 CD 转 DSD 更离谱。
+DSD_SUB_CD_EDGE_HZ = 21_500.0
+
 # ---------------------------------------------------------------- PCM 判据
 # 参考 2026 年开源实现的共识（lossless-checker / Lossless Audio Checker /
 # FlacCompagnon / audiojs measure-lossy）：
@@ -171,6 +190,8 @@ class AuthenticityResult:
     ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
     baseband_cutoff: int = 0           # 基带（≤24kHz）截止频率
     baseband_silence: float = 0.0      # 基带截止之上（22.5~24kHz）的相对能量
+    signal_edge_hz: int = 0            # 音频内容的上边界（帧间波动跌回噪声水平处）
+    signal_edge_std: float = 0.0       # 边界下方的帧间波动（dB），用来解释判据
     analyzed_seconds: float = 0.0
     reasons: list[str] = field(default_factory=list)
     error: str = ""
@@ -201,6 +222,20 @@ class AuthenticityResult:
     def detail_text(self) -> str:
         if self.verdict == VERDICT_UNKNOWN:
             return self.error or "未能分析"
+        # DSD 的「截止」永远是 DSD 自身的 Nyquist（352.5/705.2kHz），报带宽 100%
+        # 毫无意义；DSD 要看的是「内容边界」和「噪声整形」两项
+        if self.noise_shaping_slope or self.signal_edge_hz:
+            parts = []
+            if self.signal_edge_hz:
+                parts.append(f"信号边界 {self.signal_edge_hz / 1000:.1f}kHz")
+            if self.noise_shaping_slope:
+                parts.append(f"噪声整形 {self.noise_shaping_slope:+.1f}dB/oct")
+            if self.ultrasonic_ratio:
+                parts.append(f"50kHz 以上 {self.ultrasonic_ratio:.0f}dB")
+            # 基带扫描上限就是 24kHz，报到 24k 等于「基带内没有截止」，没有信息量
+            if 0 < self.baseband_cutoff < 23_500:
+                parts.append(f"基带截止 {self.baseband_cutoff / 1000:.1f}kHz")
+            return " · ".join(parts) or self.verdict
         parts = [f"截止 {self.cutoff_hz / 1000:.1f}kHz / 上限 {self.nyquist_hz / 1000:.1f}kHz"]
         if self.bandwidth_ratio:
             parts.append(f"带宽 {self.bandwidth_ratio:.0%}")
@@ -210,10 +245,6 @@ class AuthenticityResult:
             parts.append(f"扩展带 {self.edge_energy_db:.0f}dB")
         if self.spectral_holes:
             parts.append(f"空洞 {self.spectral_holes:.1f}/帧")
-        if self.noise_shaping_slope:
-            parts.append(f"噪声整形 {self.noise_shaping_slope:+.1f}dB/oct")
-        if self.ultrasonic_ratio:
-            parts.append(f"50kHz 以上 {self.ultrasonic_ratio:.0f}dB")
         # DSD 声明位深是 1bit，解码后是浮点/32bit，对比没有意义，不显示
         if (
             self.bit_depth_effective
@@ -586,6 +617,105 @@ def _bit_depth_evidence(samples: np.ndarray) -> tuple[bool, float]:
     return above_16, float(peak_dbfs)
 
 
+def _frame_spectra(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
+    """分帧 FFT，返回 ``(每帧 dB 矩阵, 频率轴)``。
+
+    与 :func:`_average_spectrum` 的区别是**不做平均**：保留每一帧，才能统计
+    「电平随时间起伏多少」。这是区分「音乐内容」与「调制器噪声」的关键。
+    """
+    x = np.asarray(samples, dtype=np.float64)
+    if x.size < FFT_SIZE:
+        return np.empty((0, 0)), np.empty(0)
+    window = np.hanning(FFT_SIZE)
+    hop = FFT_SIZE // 2
+    rows = []
+    for start in range(0, x.size - FFT_SIZE + 1, hop):
+        chunk = x[start : start + FFT_SIZE]
+        if not np.any(chunk):
+            continue
+        rows.append(20.0 * np.log10(np.abs(np.fft.rfft(chunk * window)) + 1e-10))
+    if not rows:
+        return np.empty((0, 0)), np.empty(0)
+    return np.array(rows), np.fft.rfftfreq(FFT_SIZE, d=1.0 / sample_rate)
+
+
+def _variation_edge(
+    rows: np.ndarray, freqs: np.ndarray, nyquist: float
+) -> tuple[float, float, float]:
+    """用「帧间电平波动」定位音频内容的上边界。
+
+    PCM 源码在 Nyquist 之上只剩调制器噪声，电平不随音乐走（实测标准差
+    0.6~1.5dB）；音乐内容所在的频段会随乐句大幅起伏（5~12dB）。所以波动
+    曲线从「高」跌回噪声水平的那个频率，就是源码的带宽边界。
+
+    这条判据的最大好处是**不看绝对电平** —— 调制器噪声抬得再高，也抬不出
+    「跟着音乐一起动」这个特征，因此能抓住台阶被噪声盖住的转制文件。
+
+    返回 ``(边界频率Hz, 边界下方波动dB, 噪声基准波动dB)``；无法判定返回全 0。
+    """
+    if rows.size == 0 or freqs.size == 0:
+        return 0.0, 0.0, 0.0
+    frames = rows.shape[0]
+    if frames < 8:
+        return 0.0, 0.0, 0.0
+
+    ref_mask = (freqs >= 300) & (freqs <= 3000)
+    if not np.any(ref_mask):
+        return 0.0, 0.0, 0.0
+    reference = float(np.median(np.median(rows[:, ref_mask], axis=1)))
+
+    # 2kHz 一档从 14kHz 扫到 min(0.45·Nyquist, 150kHz)。
+    # 起点取 14k（而不是 15k）是为了让档位边界落在 22/24/48/96kHz 这些
+    # PCM Nyquist 上 —— 否则 21~23kHz 这种跨界档会把台阶抹平，边界估偏 1kHz。
+    step = 2_000.0
+    top = min(nyquist * 0.45, 150_000.0)
+    bands: list[tuple[float, float]] = []
+    freq = 14_000.0
+    while freq + step <= top:
+        mask = (freqs >= freq) & (freqs < freq + step)
+        if np.count_nonzero(mask) >= 8:
+            per_frame = np.median(rows[:, mask], axis=1) - reference
+            bands.append((freq, float(np.std(per_frame))))
+        freq += step
+    if len(bands) < 4:
+        return 0.0, 0.0, 0.0
+
+    # 噪声基准取 40kHz 以上各段波动的最小值：真 DSD 的整形噪声与 PCM 之上的
+    # 调制器噪声都不随音乐起伏，标准差都趋近 1dB，最小值最能代表「纯噪声」。
+    # 但要**封顶**：若整条频谱都在起伏（内容一路延伸上去），最小值也会很高，
+    # 阈值跟着抬高就会把「处处是内容」误判成「处处是边界」。
+    above = [std for freq, std in bands if freq >= 40_000.0]
+    floor = min(above) if above else min(std for _, std in bands)
+    floor = min(floor, DSD_EDGE_VARIATION_DB)
+    threshold = max(DSD_EDGE_VARIATION_DB, floor * 1.8)
+
+    # 从低往高扫：第一个「它自己以及它之上全部不超过阈值」的频段就是边界。
+    # 必须要求「之上全部」都低，否则会把某段安静的乐句误当成边界。
+    for index, (freq, std) in enumerate(bands):
+        if std <= threshold and all(s <= threshold for _, s in bands[index:]):
+            return freq, std, floor
+    return 0.0, 0.0, floor
+
+
+def _match_edge_grid(edge_hz: float) -> float:
+    """把信号边界匹配到 PCM 采样率网格，命中则返回源码采样率（Hz）。
+
+    容差取 ``max(2kHz, 10%×边界)`` 并允许边界略低于网格点，原因有两个：
+    转换链上的重采样滤波器会把边界向上抹宽（实测 44.1k 素材在 48k 链路上
+    可拖到 25kHz、96k 素材可拖到 52kHz），而分段统计本身有 ±2kHz 的量化误差。
+    22.05k 与 24k 相距太近会互相吞掉，但两者都意味着「PCM 转制」，
+    命中哪一个都不影响结论。
+    """
+    best = 0.0
+    best_delta = 9e9
+    for boundary in DSD_EDGE_GRID:
+        tol = max(2_000.0, boundary * 0.10)
+        delta = abs(edge_hz - boundary)
+        if delta <= tol and delta < best_delta:
+            best, best_delta = boundary * 2.0, delta
+    return best
+
+
 def _pcm_source_cliff(
     freqs: np.ndarray, db: np.ndarray, nyquist: float
 ) -> tuple[float, float, float]:
@@ -654,18 +784,22 @@ def _judge_dsd(
     pcm_step: float = 0.0,
     pcm_above: float = 0.0,
     ultra_body: float = 0.0,
+    edge_hz: float = 0.0,
+    edge_std: float = 0.0,
+    edge_floor: float = 0.0,
 ) -> tuple[str, float, list[str]]:
-    """DSD 判定：先看噪声整形确认「是不是真 DSD 比特流」，再看基带找源码。
+    """DSD 判定：先确认「是不是真 DSD 比特流」，再找源码带宽的破绽。
 
     * **噪声整形斜率**（50→100kHz，dB/oct）确认比特流本身是真的 —— PCM 直接
       改后缀的假 DSD 在超声区是平坦的；
-    * **PCM 断崖**（主判据）—— 源码的带宽边界会留在基带上：44.1k 源在
-      22.05kHz、48k 源在 24kHz、96k 源在 48kHz。断崖之上若是数字静音，
-      说明那片高频从来就不存在，只是被调制器抬起来了。这条对 48k/96k/192k
-      源码同样有效，比只查 22.05kHz 通用；
-    * **CD 边界**（旧判据，保留作兜底）—— 基带截止落在 22.05kHz 附近且之上
-      为数字静音。CD 转 DSD 经过调制器后**同样有噪声整形**，所以斜率分不开，
-      真正的破绽在基带；
+    * **PCM 断崖** —— 源码的带宽边界会留在基带上：44.1k 源在 22.05kHz、
+      48k 源在 24kHz、96k 源在 48kHz。断崖之上若是数字静音，说明那片高频
+      从来就不存在，只是被调制器抬起来了；
+    * **信号边界**（V1.2.6，与断崖正交）—— 用帧间电平波动定位「还跟着音乐
+      起伏」的最高频率。断崖判据依赖绝对电平，调制器带内噪声高的转制文件
+      （Taylor Swift 那类 DSD128）台阶会被噪声完全盖住；波动判据不看电平，
+      只看「那里还有没有内容」，因此能补上这个盲区；
+    * **CD 边界**（兜底）—— 基带截止落在 22.05kHz 附近且之上为数字静音；
     * **超声基底**（辅助）—— 真 DSD 在 30~40kHz 已有 -29 ~ -46dB 的噪声整形
       能量，PCM 转制只有 -59 ~ -61dB。
     """
@@ -692,7 +826,34 @@ def _judge_dsd(
         )
         return VERDICT_FAKE_DSD, 0.3, reasons
 
-    # ---- 3. CD 边界（旧判据兜底）：截止落在 22.05kHz 且之上数字静音 ----
+    # ---- 3. 信号边界落在 PCM 网格：内容只在 PCM 带宽内存在 ----
+    # 与上一条的区别：上一条要求「断崖之上是数字静音」，这一条只要求
+    # 「之上没有内容了」—— 噪声抬得再高也逃不掉。
+    if edge_hz >= 12_000.0:
+        if edge_hz < DSD_SUB_CD_EDGE_HZ:
+            reasons.append(
+                f"音频内容在 {edge_hz / 1000:.1f}kHz 处就不再随音乐起伏"
+                f"（40kHz 以上噪声基准 {edge_floor:.1f}dB），带宽连 CD 的 22.05kHz 都不到"
+            )
+            reasons.append(
+                "这个位置正是有损编码器的低通截止（128k / 192k / 320k MP3 分别切在 "
+                "16 / 19 / 20kHz），说明源码是有损文件，不可能是 DSD 录音"
+            )
+            return VERDICT_FAKE_DSD, 0.3, reasons
+        matched = _match_edge_grid(edge_hz)
+        if matched:
+            reasons.append(
+                f"音频内容在 {edge_hz / 1000:.1f}kHz 处不再随音乐起伏"
+                f"（该段帧间波动 {edge_std:.1f}dB，40kHz 以上噪声基准 {edge_floor:.1f}dB），"
+                f"边界正好落在 {matched / 1000:.1f}kHz PCM 的 Nyquist 上"
+            )
+            reasons.append(
+                "DSD 的超声带宽是它的立身之本：内容在某个 PCM 采样率边界上整齐"
+                "失去，只可能是 PCM 源码被调制器「抬」成了 DSD，判定为 PCM 转制"
+            )
+            return VERDICT_FAKE_DSD, 0.35, reasons
+
+    # ---- 4. CD 边界（旧判据兜底）：截止落在 22.05kHz 且之上数字静音 ----
     cd_boundary = 0.0 < base_cutoff < DSD_CD_BOUNDARY_HZ
     digital_silence = base_silence < DSD_DIGITAL_SILENCE_DB
     hard_cliff = base_steep > DSD_BASEBAND_CLIFF_STEEP
@@ -711,7 +872,7 @@ def _judge_dsd(
         )
         return VERDICT_FAKE_DSD, 0.3, reasons
 
-    # ---- 4. 噪声整形弱、但基带不是 CD 边界：可能是高规格 PCM 转制 ----
+    # ---- 5. 噪声整形弱、但基带不是 CD 边界：可能是高规格 PCM 转制 ----
     if slope < DSD_SLOPE_GENUINE:
         reasons.append(
             f"噪声整形偏弱（斜率 {slope:+.1f}dB/oct、50kHz 以上 {ultra:.0f}dB），"
@@ -755,6 +916,9 @@ def _judge(
     pcm_step: float = 0.0,
     pcm_above: float = 0.0,
     ultra_body: float = 0.0,
+    edge_hz: float = 0.0,
+    edge_std: float = 0.0,
+    edge_floor: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -776,6 +940,7 @@ def _judge(
             slope, ultra, base_cutoff, base_steep, base_silence,
             pcm_source=pcm_source, pcm_step=pcm_step,
             pcm_above=pcm_above, ultra_body=ultra_body,
+            edge_hz=edge_hz, edge_std=edge_std, edge_floor=edge_floor,
         )
 
     # ---- 1. 升采样：声明高采样率，但扩展带是空的 ----
@@ -966,6 +1131,12 @@ def analyze(
     analyzed = 0.0
     above_16 = False
     peak_dbfs = -200.0
+    is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
+    # DSD 的「信号边界」判据要保留整段样本做分帧统计，取能量最大的一段
+    # （前奏/淡出段内容少，波动曲线会失真）
+    edge_samples: Optional[np.ndarray] = None
+    edge_rate = 0
+    edge_peak = 0.0
     for position in positions:
         start = max(1.0, duration * position - segment_seconds / 2)
         if start + segment_seconds > duration:
@@ -986,6 +1157,10 @@ def analyze(
         seg_above16, seg_dbfs = _bit_depth_evidence(samples)
         above_16 = above_16 or seg_above16
         peak_dbfs = max(peak_dbfs, seg_dbfs)
+        if is_dsd:
+            seg_peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+            if seg_peak > edge_peak:
+                edge_samples, edge_rate, edge_peak = samples, sample_rate, seg_peak
 
     if not spectra:
         result.error = "解码失败：ffmpeg 无法解析该文件"
@@ -1025,7 +1200,6 @@ def analyze(
     if cutoff_max - cutoff_min > 3000:
         spread_note = f"（各段截止 {cutoff_min / 1000:.1f}~{cutoff_max / 1000:.1f}kHz，含静音/前奏段）"
 
-    is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
     slope = 0.0
     ultra = 0.0
     base_cutoff = 0.0
@@ -1035,6 +1209,9 @@ def analyze(
     pcm_step = 0.0
     pcm_above = 0.0
     ultra_body = 0.0
+    edge_hz = 0.0
+    edge_std = 0.0
+    edge_floor = 0.0
     if is_dsd:
         nyq = float(result.nyquist_hz or 352800)
         # 噪声整形斜率（确认是不是真的 DSD 比特流）
@@ -1053,10 +1230,18 @@ def analyze(
         # PCM 转制的带宽断崖（44.1/48/96/192k 源码通用）+ 噪声整形基底
         pcm_source, pcm_step, pcm_above = _pcm_source_cliff(freqs, db, nyq)
         ultra_body = _band_energy(freqs, db, 30000, min(40000, nyq))
+        # 信号边界：内容消失在哪个频率（不看电平，只看波动）
+        if edge_samples is not None and edge_rate:
+            rows, row_freqs = _frame_spectra(edge_samples, edge_rate)
+            edge_hz, edge_std, edge_floor = _variation_edge(
+                rows, row_freqs, float(edge_rate) / 2.0
+            )
         result.noise_shaping_slope = slope
         result.ultrasonic_ratio = ultra
         result.baseband_cutoff = int(base_cutoff)
         result.baseband_silence = base_silence
+        result.signal_edge_hz = int(edge_hz)
+        result.signal_edge_std = edge_std
     else:
         high_band = _band_energy(freqs, db, 20000, min(result.nyquist_hz or 22050, 40000))
     result.cutoff_hz = int(cutoff)
@@ -1111,6 +1296,9 @@ def analyze(
         pcm_step=pcm_step,
         pcm_above=pcm_above,
         ultra_body=ultra_body,
+        edge_hz=edge_hz,
+        edge_std=edge_std,
+        edge_floor=edge_floor,
     )
     result.verdict = verdict
     result.score = score
