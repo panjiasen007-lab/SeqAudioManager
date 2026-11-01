@@ -1923,71 +1923,92 @@ class TestDsdSignalEdge(unittest.TestCase):
 
 
 class TestBatchConsensus(unittest.TestCase):
-    """同批一致性推定（V1.2.7）。
+    """同批一致性推定（V1.2.7 引入，V1.2.10 改为「边界集中度」双向判定）。
 
     同一批资源的出处只有一次：真 SACD 与 PCM 转制不会混在同一批里。
-    转换器的噪声整形斜率是稳定指纹（实测批内标准差 ≤0.2），据此把
-    「边界被噪声盖住」的漏网文件补判回来。
+    判据是调制器指纹（斜率）+ 信号边界集中度：真 PCM 转制的源码采样率
+    统一，边界高度集中；真 SACD 老录音每首歌高频不同，边界自然分散。
     """
 
-    def _result(self, verdict: str, slope: float):
+    def _result(self, verdict: str, slope: float, edge_hz: int = 0, cliff: int = 0):
         from seqaudio.core.authenticity import AuthenticityResult
 
         result = AuthenticityResult()
         result.verdict = verdict
         result.noise_shaping_slope = slope
+        result.signal_edge_hz = edge_hz
+        result.pcm_cliff_source = cliff
         result.reasons = ["原始理由"]
         return result
 
-    def test_matching_fingerprint_gets_flagged(self) -> None:
+    def test_edge_concentrated_marks_fake(self) -> None:
+        """斜率一致 + 边界集中在 22k → PCM 转制，把真 DSD 改判假。"""
         from seqaudio.core.authenticity import apply_batch_consensus
 
-        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3)) for i in range(6)]
-        pairs += [(Path(f"/a/u{i}.dsf"), self._result("真 DSD", 21.4)) for i in range(3)]
+        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=22_000)) for i in range(5)]
+        pairs += [(Path(f"/a/u{i}.dsf"), self._result("真 DSD", 21.4, edge_hz=22_000)) for i in range(3)]
         changed = apply_batch_consensus(pairs)
         self.assertEqual(len(changed), 3)
         for _, result in changed:
             self.assertEqual(result.verdict, "疑似假 DSD")
-            self.assertIn("同目录", result.reasons[0])
+
+    def test_edge_spread_reverses_fake(self) -> None:
+        """斜率一致 + 边界分散 → 真 SACD 老录音，把弱证据假改判真。"""
+        from seqaudio.core.authenticity import apply_batch_consensus
+
+        # 边界分散在 16k/22k/28k/32k，众数占比低
+        edges = [16_000, 22_000, 28_000, 30_000, 32_000, 34_000, 36_000]
+        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=edges[i])) for i in range(7)]
+        changed = apply_batch_consensus(pairs)
+        self.assertEqual(len(changed), 7)
+        for _, result in changed:
+            self.assertEqual(result.verdict, "真 DSD")
+
+    def test_strong_cliff_not_reversed(self) -> None:
+        """有 PCM 断崖强证据的假，即使边界分散也不改判真。"""
+        from seqaudio.core.authenticity import apply_batch_consensus
+
+        edges = [16_000, 22_000, 28_000, 30_000, 32_000, 34_000, 36_000]
+        pairs = [
+            (Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=edges[i], cliff=44_100))
+            for i in range(7)
+        ]
+        changed = apply_batch_consensus(pairs)
+        self.assertEqual(changed, [])
 
     def test_different_fingerprint_is_kept(self) -> None:
         """指纹对不上就不能推定 —— 那可能是另一台调制器录的真 DSD。"""
         from seqaudio.core.authenticity import apply_batch_consensus
 
-        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3)) for i in range(6)]
-        pairs.append((Path("/a/genuine.dsf"), self._result("真 DSD", 6.2)))
-        self.assertEqual(apply_batch_consensus(pairs), [])
-
-    def test_minority_fake_does_not_trigger(self) -> None:
-        """只有一两首是假时不足以推定整批，避免把真 DSD 连坐。"""
-        from seqaudio.core.authenticity import apply_batch_consensus
-
-        pairs = [(Path(f"/a/t{i}.dsf"), self._result("真 DSD", 6.2)) for i in range(6)]
-        pairs.append((Path("/a/x.dsf"), self._result("疑似假 DSD", 21.3)))
+        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=22_000)) for i in range(6)]
+        pairs.append((Path("/a/genuine.dsf"), self._result("真 DSD", 6.2, edge_hz=22_000)))
         self.assertEqual(apply_batch_consensus(pairs), [])
 
     def test_small_group_ignored(self) -> None:
+        """少于 3 首不足以推定。"""
         from seqaudio.core.authenticity import apply_batch_consensus
 
         pairs = [
-            (Path("/a/x.dsf"), self._result("疑似假 DSD", 21.3)),
-            (Path("/a/y.dsf"), self._result("真 DSD", 21.3)),
+            (Path("/a/x.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=22_000)),
+            (Path("/a/y.dsf"), self._result("真 DSD", 21.3, edge_hz=22_000)),
         ]
         self.assertEqual(apply_batch_consensus(pairs), [])
 
     def test_folders_are_independent(self) -> None:
         from seqaudio.core.authenticity import apply_batch_consensus
 
-        pairs = [(Path("/a/only.dsf"), self._result("疑似假 DSD", 21.3))]
-        pairs += [(Path(f"/b/t{i}.dsf"), self._result("真 DSD", 6.2)) for i in range(3)]
+        pairs = [(Path("/a/only.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=22_000))]
+        # b 目录 3 首真 DSD，边界分散（不触发集中改假），且斜率一致无假可改
+        pairs += [(Path(f"/b/t{i}.dsf"), self._result("真 DSD", 6.2, edge_hz=e))
+                  for i, e in enumerate((28_000, 30_000, 32_000))]
         self.assertEqual(apply_batch_consensus(pairs), [])
 
     def test_result_keeps_original_reason(self) -> None:
         """推定要保留原始证据，便于用户复核。"""
         from seqaudio.core.authenticity import apply_batch_consensus
 
-        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3)) for i in range(4)]
-        pairs.append((Path("/a/u.dsf"), self._result("真 DSD", 21.3)))
+        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=22_000)) for i in range(4)]
+        pairs.append((Path("/a/u.dsf"), self._result("真 DSD", 21.3, edge_hz=22_000)))
         changed = apply_batch_consensus(pairs)
         self.assertEqual(len(changed), 1)
         self.assertIn("原始理由", changed[0][1].reasons)

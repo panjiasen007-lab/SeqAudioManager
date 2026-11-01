@@ -214,6 +214,7 @@ class AuthenticityResult:
     baseband_silence: float = 0.0      # 基带截止之上（22.5~24kHz）的相对能量
     signal_edge_hz: int = 0            # 音频内容的上边界（帧间波动跌回噪声水平处）
     signal_edge_std: float = 0.0       # 边界下方的帧间波动（dB），用来解释判据
+    pcm_cliff_source: int = 0          # PCM 带宽断崖命中的源采样率（Hz）；0 = 无断崖（弱证据）
     analyzed_seconds: float = 0.0
     reasons: list[str] = field(default_factory=list)
     error: str = ""
@@ -1464,6 +1465,7 @@ def analyze(
         result.baseband_silence = base_silence
         result.signal_edge_hz = int(edge_hz)
         result.signal_edge_std = edge_std
+        result.pcm_cliff_source = int(pcm_source)
     else:
         high_band = _band_energy(freqs, db, 20000, min(result.nyquist_hz or 22050, 40000))
     result.cutoff_hz = int(cutoff)
@@ -1696,12 +1698,17 @@ def analyze_many(
 
 # ---------------------------------------------------------------- 同批一致性
 
-#: 同批推定：同目录里已确认 PCM 转制的比例达到该值，就对剩余曲目做指纹比对
-BATCH_FAKE_RATIO = 0.5
 #: 同批推定：调制器指纹（噪声整形斜率 dB/oct）允许的偏差。
 #: 实测同一批转换内部标准差 ≤0.2（赵雷 18 首全在 26.79±0.09），
 #: 不同转换器之间相差 3~20（全库 6.5~43.5），0.8 是非常宽松的界限。
 BATCH_SLOPE_TOLERANCE = 0.8
+#: 同批推定：信号边界（edge）的"众数集中度"阈值。
+#: 真 PCM 转制的源码采样率一致，edge 高度集中在 22k/24k（实测王菲 15/16、
+#: 林子祥 15/20 首 edge 都在 22k）；真 SACD 老录音每首歌高频内容不同，
+#: edge 自然分散（实测梅艳芳 16~32k、李宗盛 20~36k 各档都有）。
+#: 众数占比 ≥ 0.65 → PCM 转制；≤ 0.45 → 真 SACD；中间保持原判。
+BATCH_EDGE_MAJORITY = 0.65
+BATCH_EDGE_SPREAD = 0.45
 
 
 def apply_batch_consensus(
@@ -1710,20 +1717,26 @@ def apply_batch_consensus(
     """同目录一致性推定：一批文件出处相同，不会真假混杂。
 
     现实中「同一文件夹里一首假、其余真」几乎不会发生 —— 同一批资源的来源
-    只有一次。而边界判据会漏掉一类情况：**源码音乐本身在 PCM Nyquist 之前
-    就自然滚降完了**（人声/民谣的 20kHz 以上只剩气声，30kHz 前已低于 DSD
-    噪声），此时 PCM 的硬边界被调制器噪声盖住，看不到，文件就被放行。
+    只有一次。但信号边界判据对「老模拟录音转 SACD」会系统性误判：老录音的
+    高频本就稀疏，每首歌的边界随内容自然滚降（16~36kHz 分散）；而 PCM 转制
+    的源码采样率统一，边界**高度集中**在 22k/24k（实测王菲 15/16、林子祥
+    15/20 首都在 22k）。
 
-    但转换器的噪声整形曲线是一枚稳定的指纹 —— 实测赵雷 18 首跨四张专辑，
-    斜率全在 26.79±0.09；而全库不同转换器之间从 6.5 到 43.5 不等。
-    所以：同目录里已确认转制的曲目过半时，剩余曲目只要指纹与之一致，
-    就是同一次转换的产物。
+    所以判据不是看「当前判定里假占多少」（那会继承误判），而是看**调制器
+    指纹 + 边界集中度**这两个物理信号：
 
-    只在 DSD 上生效：PCM 侧的「同目录」可能真的是不同来源拼的合辑，
-    而 DSD 的批量转制几乎总是一次性作业。
+    * **斜率一致 + 边界集中（众数 ≥65%）** → 源码采样率统一，是 PCM 转制，
+      把漏判的「真 DSD」改判假；
+    * **斜率一致 + 边界分散（众数 ≤45%）** → 每首歌高频不同，是真 SACD 老
+      录音的自然滚降，把「边界偏低被误判」的假改判真（只改无 PCM 断崖强
+      证据的弱证据假）。
+
+    只在 DSD 上生效：PCM 侧的「同目录」可能真的是不同来源拼的合辑。
 
     返回被改判的条目，供界面刷新。
     """
+    from collections import Counter
+
     groups: dict[Path, list[tuple[Path, AuthenticityResult]]] = {}
     for path, result in items:
         groups.setdefault(Path(path).parent, []).append((Path(path), result))
@@ -1737,24 +1750,61 @@ def apply_batch_consensus(
         ]
         if len(dsd) < 3:
             continue
-        confirmed = [(p, r) for p, r in dsd if r.verdict == VERDICT_FAKE_DSD]
-        if len(confirmed) < 2 or len(confirmed) / len(dsd) < BATCH_FAKE_RATIO:
+
+        # 调制器指纹聚类：同一批转制的斜率一致，取中位数做参考。
+        # 容差自适应：新录音斜率测量极稳（赵雷 ±0.09），老录音超声区能量
+        # 低、斜率测量波动大（实测梅艳芳 ±1.5dB），固定 0.8 会把整批拆散。
+        slopes = [r.noise_shaping_slope for _, r in dsd if r.noise_shaping_slope > 0]
+        if not slopes:
             continue
-        reference = float(np.median([r.noise_shaping_slope for _, r in confirmed]))
-        for path, result in dsd:
-            if result.verdict != VERDICT_DSD or not result.noise_shaping_slope:
-                continue
-            if abs(result.noise_shaping_slope - reference) > BATCH_SLOPE_TOLERANCE:
-                continue
-            result.verdict = VERDICT_FAKE_DSD
-            result.score = 0.3
-            result.reasons = [
-                f"同目录 {len(confirmed)}/{len(dsd)} 首已确认是 PCM 转制；本首虽未找到 "
-                f"PCM 边界，但噪声整形斜率 {result.noise_shaping_slope:.1f}dB/oct 与之一致"
-                f"（{reference:.1f}±{BATCH_SLOPE_TOLERANCE}），出自同一次转换",
-                "同一批资源的出处只有一次：真 SACD 与转制文件不会混在同一批里",
-            ] + result.reasons[:1]
-            changed.append((path, result))
+        reference = float(np.median(slopes))
+        mad = float(np.median([abs(s - reference) for s in slopes]))
+        tolerance = max(BATCH_SLOPE_TOLERANCE, 2.5 * mad)
+        core = [
+            (p, r) for p, r in dsd
+            if abs(r.noise_shaping_slope - reference) <= tolerance
+        ]
+        if len(core) < 3:
+            continue
+
+        # 边界众数集中度
+        edge_counts: dict[int, int] = {}
+        for _, r in core:
+            if r.signal_edge_hz > 0:
+                edge_counts[int(r.signal_edge_hz)] = edge_counts.get(int(r.signal_edge_hz), 0) + 1
+        if not edge_counts:
+            continue
+        majority_ratio = max(edge_counts.values()) / len(core)
+        majority_edge = max(edge_counts, key=edge_counts.get)
+
+        if majority_ratio >= BATCH_EDGE_MAJORITY:
+            # 边界高度集中 → 源码采样率统一 → PCM 转制，整批判假
+            for path, result in core:
+                if result.verdict != VERDICT_DSD:
+                    continue
+                result.verdict = VERDICT_FAKE_DSD
+                result.score = 0.3
+                result.reasons = [
+                    f"同目录 {len(core)} 首调制器指纹一致（斜率 {reference:.1f}±{BATCH_SLOPE_TOLERANCE}），"
+                    f"且信号边界集中在 {majority_edge / 1000:.0f}kHz（{majority_ratio:.0%}），"
+                    "符合 PCM 源码统一带宽的特征",
+                    "同一批资源出处只有一次：真 SACD 每首歌高频不同，边界不会如此整齐",
+                ] + result.reasons[:1]
+                changed.append((path, result))
+        elif majority_ratio <= BATCH_EDGE_SPREAD:
+            # 边界分散 → 每首歌高频不同 → 真 SACD 老录音，弱证据的假改真
+            for path, result in core:
+                if result.verdict != VERDICT_FAKE_DSD or result.pcm_cliff_source > 0:
+                    continue
+                result.verdict = VERDICT_DSD
+                result.score = 0.8
+                result.reasons = [
+                    f"同目录 {len(core)} 首调制器指纹一致（斜率 {reference:.1f}），且信号边界随曲目分散"
+                    f"（本首 {result.signal_edge_hz / 1000:.1f}kHz），是内容高频自然滚降而非统一转制",
+                    "老模拟录音做成 SACD 时高频本就稀疏，信号边界偏低不是 PCM 转制的证据",
+                ] + result.reasons[:1]
+                changed.append((path, result))
+        # 中间（45%~65%）保持原判，避免两头误伤
     return changed
 
 
