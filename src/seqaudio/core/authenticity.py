@@ -360,17 +360,45 @@ def _judge(
         return VERDICT_FAKE_DSD, 0.25, reasons
 
     if nyquist <= 24000:
-        # CD 标准音源（44.1k / 48k），实测：真无损 22.0k、128k 16.0k、320k 20.0k
+        # CD 标准音源（44.1k / 48k）。
+        #
+        # 关键：cutoff 偏低不等于假无损。1980~90 年代的老录音、模拟母带转录，
+        # 高频本来就不丰富，频谱会**平滑滚降**到 16~18kHz —— 这是真 CD 的
+        # 正常特征，不能按「转码砍频」判假。
+        # 区分依据是陡度：有损转码是断崖式下跌（>25dB/kHz），老录音是平缓滚降
+        # （通常 <15dB/kHz）。陡度为 0 表示无法计算，保守按转码处理。
+        smooth_rolloff = 0.5 < steepness < 25.0
+
         if cutoff < 17000:
-            reasons.append(f"频谱在 {cutoff / 1000:.1f}kHz 截止，符合 128kbps 有损转码特征")
+            if smooth_rolloff:
+                # 截止过低（<17k）即使平滑也偏保守：可能是低码率转码后被平滑处理，
+                # 也可能是音质极差的老录音。判「疑似」，交给用户复核，不直接判假。
+                reasons.append(
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steepness:.0f}dB/kHz），"
+                    "截止偏低，可能是音质受限的老录音，建议人工复核"
+                )
+                return VERDICT_SUSPECT, 0.5, reasons
+            reasons.append(f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止，符合 128kbps 有损转码特征")
             return VERDICT_FAKE, 0.9, reasons
         if cutoff < 19500:
+            if smooth_rolloff:
+                reasons.append(
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steepness:.0f}dB/kHz），"
+                    "符合老录音/模拟母带的高频自然衰减，非有损转码"
+                )
+                return VERDICT_TRUE, 0.7, reasons
             reasons.append(
                 f"频谱在 {cutoff / 1000:.1f}kHz 截止（陡度 {steepness:.0f}dB/kHz），"
                 "符合 192kbps 有损转码特征"
             )
             return VERDICT_FAKE, 0.75, reasons
         if cutoff < 20500:
+            if smooth_rolloff:
+                reasons.append(
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steepness:.0f}dB/kHz），"
+                    "符合老录音高频自然衰减，非高码率转码"
+                )
+                return VERDICT_TRUE, 0.72, reasons
             reasons.append(
                 f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steepness:.0f}dB/kHz），"
                 "符合高码率有损转码特征（256~320kbps）"

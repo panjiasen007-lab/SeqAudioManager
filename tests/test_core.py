@@ -1121,5 +1121,99 @@ class TestLocalLyricsSkipNetwork(unittest.TestCase):
         self.assertIs(fake.need_lyrics_called, True)
 
 
+class TestQQMusicSource(unittest.TestCase):
+    """QQ 音乐源解析（V1.1）：不联网，只验证返回体解析正确。"""
+
+    def test_search_parses_candidates(self) -> None:
+        from seqaudio.net import qqmusic
+
+        class FakeClient:
+            def get_json(self, url, **kw):
+                return {
+                    "code": 0,
+                    "data": {"song": {"list": [{
+                        "mid": "0039MnYb0qxYhV",
+                        "title": "七里香",
+                        "singer": [{"name": "周杰伦"}],
+                        "album": {"mid": "002fRO0N4FftzY", "name": "七里香"},
+                        "interval": 299,
+                    }]}},
+                }
+
+        candidates = qqmusic.search(FakeClient(), "七里香", "周杰伦")
+        self.assertEqual(len(candidates), 1)
+        cand = candidates[0]
+        self.assertEqual(cand.source, "QQ音乐")
+        self.assertEqual(cand.title, "七里香")
+        self.assertEqual(cand.artist, "周杰伦")
+        self.assertEqual(cand.album, "七里香")
+        self.assertAlmostEqual(cand.duration, 299.0)
+        self.assertIn("002fRO0N4FftzY", cand.cover_url)
+        self.assertEqual(cand.recording_id, "0039MnYb0qxYhV")
+
+    def test_lyrics_returns_synced(self) -> None:
+        from seqaudio.net import qqmusic
+
+        class FakeClient:
+            def get_json(self, url, **kw):
+                return {"retcode": 0, "lyric": "[00:01.00]窗外的麻雀"}
+
+        result = qqmusic.lyrics(FakeClient(), "七里香", "周杰伦", song_mid="0039")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.source, "QQ音乐")
+        self.assertTrue(result.is_synced)
+        self.assertIn("窗外的麻雀", result.synced)
+
+    def test_empty_response_is_safe(self) -> None:
+        from seqaudio.net import qqmusic
+
+        class FakeClient:
+            def get_json(self, url, **kw):
+                return {}
+
+        self.assertEqual(qqmusic.search(FakeClient(), "不存在", ""), [])
+        self.assertIsNone(qqmusic.lyrics(FakeClient(), "不存在", "", song_mid="x"))
+
+
+class TestAuthenticityOldCD(unittest.TestCase):
+    """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
+
+    def setUp(self) -> None:
+        from seqaudio.core.authenticity import ffmpeg_available
+
+        if not ffmpeg_available():
+            self.skipTest("未安装 ffmpeg，跳过鉴定测试")
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_auth_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _analyze(self, name: str, **kw):
+        from seqaudio.core.authenticity import analyze
+        from seqaudio.core.model import AudioInfo
+
+        path = make_samples.make_rolloff_wav(self.tmp / f"{name}.wav", **kw)
+        info = AudioInfo(
+            fmt="WAV", lossless=True, sample_rate=44100,
+            bit_depth=16, channels=1, duration=4.0,
+        )
+        return analyze(path, info)
+
+    def test_hard_cutoff_is_fake(self) -> None:
+        """断崖式截止（有损转码特征）仍要判假。"""
+        result = self._analyze("hard", knee_hz=15000, slope_db_per_khz=300)
+        self.assertEqual(result.verdict, "假无损")
+
+    def test_smooth_rolloff_old_cd_is_true(self) -> None:
+        """平滑滚降到 19kHz 的老录音，不能判假。"""
+        result = self._analyze("smooth", knee_hz=15000, slope_db_per_khz=15)
+        self.assertEqual(result.verdict, "真无损")
+        self.assertTrue(any("老录音" in reason for reason in result.reasons))
+
+    def test_full_band_is_true(self) -> None:
+        result = self._analyze("full", knee_hz=22000, slope_db_per_khz=300)
+        self.assertEqual(result.verdict, "真无损")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

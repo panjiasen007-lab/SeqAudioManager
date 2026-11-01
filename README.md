@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.0.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.1.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -93,9 +93,12 @@ src/seqaudio/
 │   ├── config.py           设置与预设方案持久化
 │   ├── paths.py            绿色优先的目录解析（EXE 同级 → AppData 回落）
 │   └── logging_setup.py    文件日志 + UI 实时日志双通道
-├── net/                    联网数据源（全部开源平台）
+├── net/                    联网数据源
 │   ├── http.py             零依赖 HTTP：重试退避、按主机限流、熔断、磁盘缓存
 │   ├── musicbrainz.py      元数据主源（Lucene 查询 + 发行版优选）
+│   ├── itunes.py           元数据/封面次源（Apple 公开接口）
+│   ├── netmusic.py         网易云（元数据/歌词/封面，社区接口）
+│   ├── qqmusic.py          QQ 音乐（元数据/歌词/封面，社区接口）
 │   ├── coverart.py         封面源（体积与次数双重限制）
 │   └── lrclib.py           歌词主源（精确匹配 → 模糊检索）
 ├── pipeline/
@@ -176,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.0.0-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.0.0-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.1.0-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.1.0-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -272,7 +275,7 @@ Visual Studio Build Tools。
 
 **P0（已实现）**
 - 全格式导入解析、流式读取、无损/采样率/位深展示与筛选
-- MusicBrainz 元数据 + Cover Art Archive 封面 + LRCLIB 歌词
+- MusicBrainz / iTunes / 网易云 / QQ音乐 元数据 + Cover Art Archive 封面 + LRCLIB 歌词
 - 标签水印清理、模板重命名、CSV 报表
 - 安全写入（不重编码 + 备份 + 回滚 + 写后校验）
 - CUE 解析与整轨标签补全（模式 1）、GBK/UTF-16 乱码修复
@@ -282,8 +285,9 @@ Visual Studio Build Tools。
 - 真假无损鉴定 ✅（频谱截止 + 陡度 + 有效位深 + DSD 噪声整形判据，多段中位数稳健判定）
 - 一键切换 7 套主题 ✅（深空/春/夏/秋/冬/黑白极简/太极）
 - 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，首屏核心字符串已翻译）
-- 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云；歌词 LRCLIB→网易云；封面 CAA→远程）
+- 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云→QQ音乐；歌词 LRCLIB→网易云→QQ音乐；封面 CAA→远程）
 - 标题去序号清洗 ✅ / 封面批量导出 ✅
+- 批量标签编辑 ✅（字段打勾才修改，支持选中/全选曲目，可批量清空字段）
 - 每文件夹封面 ✅（专辑封面 → 歌手照片 Deezer/网易云 三级兜底）
 - 艺术家名字简繁统一 ✅（同目录按多数投票统一为简体，纯繁体库保持原样）
 - 一键清理假无损 ✅（回收站 / 隔离区 / 彻底删除三级，隔离区可还原）
@@ -340,7 +344,7 @@ Advanced capabilities:
 
 - **Fake-lossless detection** — spectrum analysis tells whether a "lossless" file is genuine or a disguised MP3 transcode (with dedicated DSD criteria);
 - **One-click cleanup** — suspicious files go to the Recycle Bin or the app's quarantine (recoverable), with a spectrum chart you can verify yourself;
-- **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music, automatic failover);
+- **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 - **Starfield dynamic background** — the UI drifts through space, switching star regions every 24 s (can be disabled to save power).
 
 > License: **GNU General Public License v3.0**. The bundled fonts Noto Sans SC / JetBrains Mono are SIL OFL 1.1.
@@ -414,8 +418,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.0.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.0.0-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.1.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.1.0-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.

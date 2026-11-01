@@ -35,6 +35,7 @@ class Settings:
     use_lrclib: bool = True
     use_itunes: bool = True          # iTunes Search：元数据 + 封面（Apple 公开接口）
     use_netmusic: bool = True        # 网易云：元数据 + 歌词 + 封面（社区接口，兜底）
+    use_qqmusic: bool = True         # QQ 音乐：元数据 + 歌词 + 封面（社区接口，兜底）
     use_local_lyrics: bool = True
     acoustid_key: str = ""                 # 音频指纹（P1，可留空）
     http_proxy: str = ""

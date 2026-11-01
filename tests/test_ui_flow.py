@@ -138,6 +138,36 @@ def main() -> int:
         print("✗ 还原后应清除脏标记并恢复原值")
         ok = False
 
+    # 批量标签编辑：只有勾选的字段才修改，未勾选保持原值（V1.1）
+    from seqaudio.ui.dialogs import BatchTagEditDialog
+
+    target = tracks[0]
+    target.working.artist = "原歌手"
+    target.working.album = "原专辑"
+    target.working.genre = "原流派"
+
+    dialog = BatchTagEditDialog([target], window)
+    dialog.checks["artist"].setChecked(True)
+    dialog.edits["artist"].setText("批量歌手")
+    values = dialog.result_values()
+    if set(values) != {"artist"}:
+        print("✗ 批量编辑只应返回勾选字段：", values)
+        ok = False
+    if target.working.album != "原专辑":
+        print("✗ 勾选阶段不应改动标签")
+        ok = False
+
+    window._apply_batch_values([target], values)
+    if target.working.artist != "批量歌手":
+        print("✗ 批量编辑未生效")
+        ok = False
+    if target.working.album != "原专辑" or target.working.genre != "原流派":
+        print("✗ 未勾选字段被误改")
+        ok = False
+    if "artist" not in target.changed_fields:
+        print("✗ 批量编辑未记录变更字段")
+        ok = False
+
     window.close()
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n界面流程测试：" + ("通过" if ok else "失败"))

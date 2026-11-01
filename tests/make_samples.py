@@ -95,6 +95,61 @@ def make_cue(path: Path, encoding: str = "gbk") -> Path:
     return path
 
 
+def make_rolloff_wav(
+    path: Path,
+    *,
+    knee_hz: float = 15000.0,
+    slope_db_per_khz: float = 18.0,
+    floor_db: float = -95.0,
+    seconds: float = 4.0,
+    sample_rate: int = 44100,
+    seed: int = 42,
+) -> Path:
+    """生成「高频按指定斜率滚降」的白噪声 WAV，用于真假无损判定测试。
+
+    * ``slope_db_per_khz`` 小（12~20）→ 平滑滚降，模拟老录音/模拟母带；
+    * ``slope_db_per_khz`` 很大（>=200）→ 断崖，模拟有损转码砍高频。
+
+    纯 numpy 构造：先造白噪声，在频域施加增益曲线，再逆变换回时域。
+    """
+    import numpy as np
+
+    frames = int(seconds * sample_rate)
+    rng = np.random.default_rng(seed)
+    spectrum = np.fft.rfft(rng.standard_normal(frames))
+    freqs = np.fft.rfftfreq(frames, 1.0 / sample_rate)
+
+    gain_db = np.zeros_like(freqs)
+    above = freqs > knee_hz
+    gain_db[above] = -slope_db_per_khz * (freqs[above] - knee_hz) / 1000.0
+    gain_db = np.maximum(gain_db, floor_db)
+    spectrum *= 10.0 ** (gain_db / 20.0)
+
+    signal = np.fft.irfft(spectrum, n=frames)
+    peak = float(np.max(np.abs(signal))) or 1.0
+    signal = signal / peak * 0.8
+    pcm = np.clip(signal * 32767.0, -32768.0, 32767.0).astype("<i2")
+
+    channels = 1
+    data = pcm.tobytes()
+    fmt = struct.pack(
+        "<4sIHHIIHH",
+        b"fmt ",
+        16,
+        1,                      # PCM
+        channels,
+        sample_rate,
+        sample_rate * channels * 2,
+        channels * 2,
+        16,
+    )
+    data_chunk = struct.pack("<4sI", b"data", len(data)) + data
+    body = b"WAVE" + fmt + data_chunk
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<4sI", b"RIFF", len(body)) + body)
+    return path
+
+
 def build_all(base: Path = BASE) -> dict[str, Path]:
     base.mkdir(parents=True, exist_ok=True)
     return {

@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 from ..core.model import MatchCandidate
 from . import artist as artist_mod
-from . import coverart, itunes, lrclib, musicbrainz, netmusic
+from . import coverart, itunes, lrclib, musicbrainz, netmusic, qqmusic
 from .http import HttpClient, sniff_image_mime
 
 log = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ def search_metadata(
     use_mb: bool = True,
     use_itunes: bool = True,
     use_netmusic: bool = True,
+    use_qqmusic: bool = True,
 ) -> list[MatchCandidate]:
     providers: list[tuple[str, Callable[[], list[MatchCandidate]]]] = []
     if use_mb:
@@ -55,6 +56,8 @@ def search_metadata(
         providers.append(("iTunes", lambda: itunes.search(client, title, artist)))
     if use_netmusic:
         providers.append(("网易云", lambda: netmusic.search(client, title, artist)))
+    if use_qqmusic:
+        providers.append(("QQ音乐", lambda: qqmusic.search(client, title, artist)))
 
     candidates = _first_nonempty(providers)
     if candidates:
@@ -66,6 +69,8 @@ def search_metadata(
         candidates = itunes.search(client, title, "")
     if not candidates and use_netmusic:
         candidates = netmusic.search(client, title, "")
+    if not candidates and use_qqmusic:
+        candidates = qqmusic.search(client, title, "")
     return candidates
 
 
@@ -78,6 +83,7 @@ def fetch_lyrics(
     *,
     use_lrclib: bool = True,
     use_netmusic: bool = True,
+    use_qqmusic: bool = True,
 ) -> Optional[lrclib.LyricsResult]:
     if use_lrclib:
         result = lrclib.fetch_lyrics(client, title, artist, album, duration)
@@ -85,6 +91,10 @@ def fetch_lyrics(
             return result
     if use_netmusic:
         result = netmusic.lyrics(client, title, artist)
+        if result:
+            return result
+    if use_qqmusic:
+        result = qqmusic.lyrics(client, title, artist)
         if result:
             return result
     return None
@@ -129,6 +139,7 @@ def fetch_album_cover(
     *,
     use_itunes: bool = True,
     use_netmusic: bool = True,
+    use_qqmusic: bool = True,
 ) -> tuple[Optional[bytes], str, str]:
     """按「专辑 + 歌手」搜一张封面，返回 (字节, mime, 来源)。
 
@@ -163,6 +174,18 @@ def fetch_album_cover(
                 img, mime = _download_remote(client, cand.cover_url)
                 if img:
                     return img, mime, "网易云"
+
+    if use_qqmusic:
+        candidates = qqmusic.search(client, query_title, artist)
+        for cand in candidates:
+            img, mime = _download_remote(client, cand.cover_url)
+            if img:
+                return img, mime, "QQ音乐"
+        if album and album != title:
+            for cand in qqmusic.search(client, title, artist):
+                img, mime = _download_remote(client, cand.cover_url)
+                if img:
+                    return img, mime, "QQ音乐"
 
     return None, "", ""
 

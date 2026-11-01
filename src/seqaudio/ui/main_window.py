@@ -41,7 +41,7 @@ from ..core.model import Tags, Track, TrackStatus
 from ..pipeline.processor import BatchOptions
 from . import i18n, theme
 from .delegate import TrackDelegate
-from .dialogs import CandidateDialog, RenamePreviewDialog, TagEditDialog
+from .dialogs import BatchTagEditDialog, CandidateDialog, RenamePreviewDialog, TagEditDialog
 from .settings_panel import SettingsPanel
 from .track_model import (
     COLUMNS,
@@ -719,6 +719,10 @@ class MainWindow(QMainWindow):
         tracks = self._selected_tracks()
         if not tracks:
             return
+        # 多选走批量编辑：每个字段打勾才修改，未勾选保持原值
+        if len(tracks) > 1:
+            self.batch_edit_selected()
+            return
         track = tracks[0]
         dialog = TagEditDialog(track, self)
         if dialog.exec() == TagEditDialog.Accepted:
@@ -736,6 +740,49 @@ class MainWindow(QMainWindow):
                 track.changed_fields.append("cover")
             track.note("已手动编辑，等待写入")
             self.model.refresh_row(track)
+
+    def batch_edit_selected(self) -> None:
+        """批量编辑选中曲目的标签：只有勾选的字段才会被修改（V1.1）。"""
+        tracks = self._selected_tracks()
+        if not tracks:
+            return
+        dialog = BatchTagEditDialog(tracks, self)
+        if dialog.exec() != BatchTagEditDialog.Accepted:
+            return
+
+        values = dialog.result_values()
+        if not values:
+            QMessageBox.information(self, "未选择字段", "请至少勾选一个要修改的字段。")
+            return
+
+        changed_count = self._apply_batch_values(tracks, values)
+        self._refresh_stats()
+        self._append_log(
+            "INFO",
+            f"批量编辑 {len(tracks)} 首，实际变更 {changed_count} 首"
+            f"（字段：{'、'.join(values)}）",
+        )
+
+    def _apply_batch_values(self, tracks: list[Track], values: dict[str, str]) -> int:
+        """把批量编辑结果写入曲目的 working 标签，返回实际变更的曲目数。
+
+        只处理 ``values`` 里出现的字段（即用户勾选的），其余字段保持原值。
+        """
+        changed_count = 0
+        for track in tracks:
+            touched = False
+            for key, value in values.items():
+                if track.working.get(key) != value:
+                    track.working.set(key, value)
+                    touched = True
+                if key not in track.changed_fields:
+                    track.changed_fields.append(key)
+            if touched:
+                track.status = TrackStatus.PENDING
+                track.note(f"批量编辑：{'、'.join(values)}")
+                changed_count += 1
+            self.model.refresh_row(track)
+        return changed_count
 
     def show_candidates(self) -> None:
         tracks = self._selected_tracks()
@@ -865,6 +912,7 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         menu.addAction("编辑标签\tCtrl+E", self.edit_selected)
+        menu.addAction("批量编辑标签…", self.batch_edit_selected)
         menu.addAction("查看候选匹配", self.show_candidates)
         menu.addAction("确认匹配（采纳最佳候选）", self.confirm_selected)
         menu.addAction("撤销本地修改", self.revert_selected)

@@ -115,6 +115,7 @@ class Matcher:
         use_lrclib: bool = True,
         use_itunes: bool = True,
         use_netmusic: bool = True,
+        use_qqmusic: bool = True,
         weights: Optional[ScoreWeights] = None,
     ):
         self.client = client
@@ -124,6 +125,7 @@ class Matcher:
         self.use_lrclib = use_lrclib
         self.use_itunes = use_itunes
         self.use_netmusic = use_netmusic
+        self.use_qqmusic = use_qqmusic
         self.weights = weights or ScoreWeights()
 
     # ------------------------------------------------------------ 检索
@@ -139,6 +141,7 @@ class Matcher:
             use_mb=self.use_mb,
             use_itunes=self.use_itunes,
             use_netmusic=self.use_netmusic,
+            use_qqmusic=self.use_qqmusic,
         )
 
     def score(self, track: Track, candidate: MatchCandidate, album_hint: str = "") -> float:
@@ -228,6 +231,7 @@ class Matcher:
                         album_for_query,
                         use_itunes=self.use_itunes,
                         use_netmusic=self.use_netmusic,
+                        use_qqmusic=self.use_qqmusic,
                     )
                     if data:
                         cand.cover, cand.cover_mime = data, mime
@@ -245,6 +249,7 @@ class Matcher:
                 track.info.duration,
                 use_lrclib=self.use_lrclib,
                 use_netmusic=self.use_netmusic,
+                use_qqmusic=self.use_qqmusic,
             )
             if result.lyrics is None and artist:
                 result.lyrics = lrclib.search_lyrics(self.client, title, "", track.info.duration)

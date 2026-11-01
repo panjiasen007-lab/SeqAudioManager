@@ -103,6 +103,7 @@ class Processor:
             use_lrclib=s.use_lrclib,
             use_itunes=s.use_itunes,
             use_netmusic=s.use_netmusic,
+            use_qqmusic=s.use_qqmusic,
         )
 
     def emit(self, kind: str, payload: object) -> None:
@@ -616,6 +617,7 @@ class Processor:
             self.client,
             use_itunes=s.use_itunes,
             use_netmusic=s.use_netmusic,
+            use_qqmusic=s.use_qqmusic,
             use_deezer=True,
             on_progress=on_progress,
             cancel=self.cancel_event,

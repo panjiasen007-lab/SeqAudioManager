@@ -109,9 +109,11 @@ class SettingsPanel(QWidget):
         self.lrclib_check = QCheckBox("LRCLIB · 歌词主源")
         self.itunes_check = QCheckBox("iTunes Search · 元数据/封面（Apple 公开接口）")
         self.netmusic_check = QCheckBox("网易云 · 元数据/歌词/封面（兜底）")
+        self.qqmusic_check = QCheckBox("QQ音乐 · 元数据/歌词/封面（兜底）")
         self.local_lyrics_check = QCheckBox("优先使用本地已有歌词")
         for widget in (self.mb_check, self.caa_check, self.lrclib_check,
-                       self.itunes_check, self.netmusic_check, self.local_lyrics_check):
+                       self.itunes_check, self.netmusic_check, self.qqmusic_check,
+                       self.local_lyrics_check):
             widget.toggled.connect(self._notify)
             card.add_widget(self._indent(widget))
 
@@ -407,6 +409,7 @@ class SettingsPanel(QWidget):
             self.lrclib_check.setChecked(settings.use_lrclib)
             self.itunes_check.setChecked(settings.use_itunes)
             self.netmusic_check.setChecked(settings.use_netmusic)
+            self.qqmusic_check.setChecked(settings.use_qqmusic)
             self.local_lyrics_check.setChecked(settings.use_local_lyrics)
             self.concurrency_spin.setValue(max(1, settings.concurrency))
             self.timeout_spin.setValue(settings.request_timeout)
@@ -451,6 +454,7 @@ class SettingsPanel(QWidget):
         settings.use_lrclib = self.lrclib_check.isChecked()
         settings.use_itunes = self.itunes_check.isChecked()
         settings.use_netmusic = self.netmusic_check.isChecked()
+        settings.use_qqmusic = self.qqmusic_check.isChecked()
         settings.use_local_lyrics = self.local_lyrics_check.isChecked()
         settings.concurrency = self.concurrency_spin.value()
         settings.request_timeout = float(self.timeout_spin.value())

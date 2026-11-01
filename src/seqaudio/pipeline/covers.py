@@ -70,6 +70,7 @@ def ensure_folder_covers(
     *,
     use_itunes: bool = True,
     use_netmusic: bool = True,
+    use_qqmusic: bool = True,
     use_deezer: bool = True,
     on_progress: Optional[Callable[[int, int, Path], None]] = None,
     cancel=None,
@@ -90,7 +91,7 @@ def ensure_folder_covers(
         else:
             made = _make_one(folder, group, client, summary,
                              use_itunes=use_itunes, use_netmusic=use_netmusic,
-                             use_deezer=use_deezer)
+                             use_qqmusic=use_qqmusic, use_deezer=use_deezer)
             if made:
                 for track in group:
                     track.note("已生成文件夹封面")
@@ -112,6 +113,7 @@ def _make_one(
     *,
     use_itunes: bool,
     use_netmusic: bool,
+    use_qqmusic: bool,
     use_deezer: bool,
 ) -> bool:
     # 1) 内存里已匹配/内嵌的封面
@@ -136,7 +138,8 @@ def _make_one(
     mime = ""
     if album:
         img, mime, _source = aggregator.fetch_album_cover(
-            client, title, artist, album, use_itunes=use_itunes, use_netmusic=use_netmusic
+            client, title, artist, album,
+            use_itunes=use_itunes, use_netmusic=use_netmusic, use_qqmusic=use_qqmusic,
         )
         if img:
             summary.album_cover += 1

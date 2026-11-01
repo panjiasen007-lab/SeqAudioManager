@@ -271,6 +271,7 @@ class HttpClient:
         use_cache: bool = True,
         attempts: Optional[int] = None,
         timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
     ) -> Any:
         full = url
         if params:
@@ -281,11 +282,16 @@ class HttpClient:
             if cached is not None:
                 return cached
         self.limiter.wait(urllib.parse.urlparse(full).netloc, min_interval)
-        raw, _ = self._request(url, params=params, attempts=attempts, timeout=timeout)
+        raw, _ = self._request(
+            url, params=params, attempts=attempts, timeout=timeout, headers=headers
+        )
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise NetworkError(f"响应不是合法 JSON：{exc}") from exc
+            # 兼容 JSONP：MusicJsonCallback({...}) —— QQ 音乐等接口可能包一层
+            payload = _strip_jsonp(raw)
+            if payload is None:
+                raise NetworkError(f"响应不是合法 JSON：{exc}") from exc
         if use_cache:
             self.cache.set(full, payload)
         return payload
@@ -327,3 +333,22 @@ def sniff_image_mime(data: bytes) -> str:
     if data[:3] == b"\xff\xd8\xff":
         return "image/jpeg"
     return "image/jpeg"
+
+
+def _strip_jsonp(raw: bytes) -> Optional[Any]:
+    """剥离 JSONP 包装（``MusicJsonCallback({...})``），返回解析后的对象。
+
+    解析失败返回 ``None``，由调用方决定是否抛错。
+    """
+    try:
+        text = raw.decode("utf-8", "replace").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    start = text.find("(")
+    end = text.rfind(")")
+    if start == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start + 1 : end])
+    except json.JSONDecodeError:
+        return None

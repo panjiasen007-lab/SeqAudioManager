@@ -7,6 +7,7 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -200,6 +201,124 @@ class TagEditDialog(QDialog):
         tags.cover = self._pending_cover
         tags.cover_mime = self._pending_mime
         return tags
+
+
+class BatchTagEditDialog(QDialog):
+    """批量编辑多首曲目的标签（V1.1）。
+
+    每个字段前有复选框：**只有勾选的字段才会被批量修改**，未勾选的字段保持
+    各曲目原值不变。勾选但留空表示清空该字段 —— 这样可以批量清空注释、流派等。
+    """
+
+    FIELDS = [
+        ("歌名", "title"),
+        ("歌手", "artist"),
+        ("专辑", "album"),
+        ("专辑艺术家", "albumartist"),
+        ("年份", "date"),
+        ("流派", "genre"),
+        ("曲目号", "track"),
+        ("碟号", "disc"),
+        ("注释", "comment"),
+    ]
+
+    def __init__(self, tracks: list[Track], parent=None):
+        super().__init__(parent)
+        self.tracks = tracks
+        self.setWindowTitle(f"批量编辑标签 — {len(tracks)} 首曲目")
+        self.resize(660, 620)
+        self.setMinimumSize(600, 540)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        head = QLabel(f"将对选中的 {len(tracks)} 首曲目批量修改标签。")
+        head.setObjectName("hint")
+        layout.addWidget(head)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+        all_btn = QPushButton("全选字段")
+        all_btn.setObjectName("ghost")
+        all_btn.setCursor(Qt.PointingHandCursor)
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        none_btn = QPushButton("全不选")
+        none_btn.setObjectName("ghost")
+        none_btn.setCursor(Qt.PointingHandCursor)
+        none_btn.clicked.connect(lambda: self._set_all(False))
+        toggle_row.addWidget(all_btn)
+        toggle_row.addWidget(none_btn)
+        toggle_row.addStretch(1)
+        layout.addLayout(toggle_row)
+
+        card = Card("字段", "打勾才修改", theme.CYAN)
+        self.checks: dict[str, QCheckBox] = {}
+        self.edits: dict[str, QLineEdit] = {}
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setVerticalSpacing(7)
+        form.setHorizontalSpacing(10)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        for label, key in self.FIELDS:
+            check = QCheckBox(label)
+            check.setFixedWidth(96)
+            edit = QLineEdit()
+            edit.setPlaceholderText(self._placeholder(key))
+            edit.setEnabled(False)
+            check.toggled.connect(lambda checked, e=edit: e.setEnabled(checked))
+            self.checks[key] = check
+            self.edits[key] = edit
+            form.addRow(check, edit)
+        card.add_layout(form)
+        layout.addWidget(card)
+
+        note = QLabel(
+            "勾选字段并填写新值；勾选但留空 = 清空该字段。\n"
+            "未勾选的字段保持各曲目原值不变。"
+        )
+        note.setObjectName("hint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        ok_btn.setText("应用到列表")
+        ok_btn.setObjectName("primary")
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn = buttons.button(QDialogButtonBox.Cancel)
+        cancel_btn.setText("取消")
+        cancel_btn.setObjectName("ghost")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, checked: bool) -> None:
+        for check in self.checks.values():
+            check.setChecked(checked)
+
+    def _placeholder(self, key: str) -> str:
+        """占位提示：所有曲目该字段一致时显示原值，不一致显示 <多个值>。"""
+        values = {(t.working.get(key) or "").strip() for t in self.tracks}
+        values.discard("")
+        if not values:
+            return "（当前为空）"
+        if len(values) == 1:
+            return next(iter(values))[:48]
+        return "<多个值>"
+
+    def result_values(self) -> dict[str, str]:
+        """返回勾选字段的目标值；未勾选的字段不出现在结果里。"""
+        values: dict[str, str] = {}
+        for key, check in self.checks.items():
+            if check.isChecked():
+                values[key] = self.edits[key].text().strip()
+        return values
 
 
 class CandidateDialog(QDialog):
