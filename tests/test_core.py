@@ -1549,6 +1549,59 @@ class TestAuthenticityV13(unittest.TestCase):
         self.assertLess(_spectral_roughness(freqs, smooth), 0.5)
         self.assertGreater(_spectral_roughness(freqs, jagged), 2.0)
 
+    def test_spectral_flatness_noise_vs_tonal(self) -> None:
+        """频谱平坦度（谐波相干性）：平坦噪声高、离散谐波低。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _spectral_flatness
+
+        freqs = np.arange(0, 48000, 5.4)
+        # 平坦噪声：所有频点能量接近（±3dB 波动）
+        rng = np.random.default_rng(0)
+        noise_db = -60.0 + 3.0 * rng.standard_normal(freqs.size)
+        flat_noise = _spectral_flatness(freqs, noise_db, 22000, 44000)
+        # 离散谐波：只有基频整数倍处有能量，其余是地板
+        tonal_db = np.full(freqs.size, -100.0)
+        for k in range(440, 44000, 440):
+            tonal_db[np.abs(freqs - k) < 5.4] = -40.0
+        flat_tonal = _spectral_flatness(freqs, tonal_db, 22000, 44000)
+        self.assertGreater(flat_noise, 0.7)
+        self.assertLess(flat_tonal, 0.3)
+        self.assertGreater(flat_noise, flat_tonal)
+
+    def test_noise_filled_upsampling_by_flatness(self) -> None:
+        """扩展带是平坦噪声（非静音）→ 噪声填充型升频，走谐波相干性兜底。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 22000.0, 20.0, -70.0, 24,
+            edge_db=-60.0, ratio=0.92, above16=True, peak_dbfs=-1.0,
+            extended_flat=0.95,
+        )
+        self.assertEqual(verdict, "疑似升频", reasons)
+
+    def test_tonal_extended_band_not_flagged(self) -> None:
+        """扩展带有谐波结构（平坦度低）→ 不按噪声填充误判。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 22000.0, 20.0, -70.0, 24,
+            edge_db=-60.0, ratio=0.92, above16=True, peak_dbfs=-1.0,
+            extended_flat=0.3,
+        )
+        self.assertNotEqual(verdict, "疑似升频", reasons)
+
+    def test_flatness_ignores_off_boundary_lowpass(self) -> None:
+        """cutoff 不在采样率边界（音乐本身低频）→ 平坦度再高也不判升频。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 15000.0, 20.0, -70.0, 24,
+            edge_db=-60.0, ratio=0.625, above16=True, peak_dbfs=-1.0,
+            extended_flat=0.95,
+        )
+        self.assertNotEqual(verdict, "疑似升频", reasons)
+
     @unittest.skipUnless(
         __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
         "需要 ffmpeg",

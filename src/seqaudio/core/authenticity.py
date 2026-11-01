@@ -97,6 +97,14 @@ DSD_ULTRA_BODY_DB = -52.0
 #: 暴露断层 —— 自然滚降不会在某个采样率边界上突然跌 18dB。
 PCM_UPSAMPLE_STEP_DB = 18.0
 
+#: 扩展带「频谱平坦度」阈值（0~1）。这是「谐波相干性」判据：真实乐器的
+#: 超声内容是离散谐波峰（平坦度→0），dither 填充是平坦白噪声（→1）。
+#: 有些升频工具把 dither 加到与音乐同水平、把台阶完全填平，台阶判据失效；
+#: 但填充物的"噪声本质"藏不住。实测纯白噪声 ≈0.99、纯谐波 ≈0.00。
+#: 阈值取 0.7 偏保守，只抓"明显是噪声"的扩展带，避免误伤超声区含噪声底
+#: 的真实 hi-res（人声/民谣的超声区可能以本底噪声为主）。
+EXTENDED_FLATNESS_NOISE = 0.7
+
 #: 信号边界判据（V1.2.6）：分频段统计**帧间电平波动**。
 #:
 #: 为什么需要它：上面两条判据看的都是「电平台阶」，而台阶会被噪声盖住 ——
@@ -192,6 +200,7 @@ class AuthenticityResult:
     bit_depth_declared: int = 0
     bit_depth_effective: int = 0
     spectral_roughness: float = 0.0    # 4~16kHz 相邻频点幅度差 RMS（有损编码"锯齿"度）
+    extended_flatness: float = 0.0     # 扩展带频谱平坦度（噪声填充型升频的兜底证据）
     high_band_energy_db: float = 0.0   # 20kHz 以上相对能量
     noise_shaping_slope: float = 0.0   # DSD 噪声整形斜率（dB/oct，真 DSD 为正）
     ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
@@ -622,6 +631,31 @@ def _spectral_roughness(freqs: np.ndarray, db: np.ndarray) -> float:
     return float(np.sqrt(np.mean(diff * diff)))
 
 
+def _spectral_flatness(freqs: np.ndarray, db: np.ndarray, low: float, high: float) -> float:
+    """某频段的频谱平坦度（几何均值 / 算术均值），0~1。
+
+    这是「谐波相干性」的核心度量：真实乐器内容在频域是**离散的谐波峰**
+    （能量集中在少数频点，平坦度→0）；而升频时填充的 dither 噪声是**平坦
+    白噪声**（所有频点能量接近，平坦度→1）。
+
+    用途：当扩展带（cutoff 之上）既不是数字静音（edge_db 不够低）、又被
+    怀疑是升频时，用平坦度区分「真实超声内容」与「噪声填充」—— 这是
+    :func:`_pcm_upsample_cliff`（看台阶）之外的第二道防线：有些工具把
+    dither 加到与音乐同水平，台阶被填平，但填充物的"噪声本质"藏不住。
+    """
+    mask = (freqs >= low) & (freqs <= high)
+    if np.count_nonzero(mask) < 32:
+        return 0.0
+    linear = 10.0 ** (db[mask] / 10.0)
+    if linear.size == 0 or np.any(linear <= 0):
+        return 0.0
+    geo = np.exp(np.mean(np.log(linear + 1e-12)))
+    arith = float(np.mean(linear))
+    if arith <= 0:
+        return 0.0
+    return float(np.clip(geo / arith, 0.0, 1.0))
+
+
 def _bit_depth_evidence(samples: np.ndarray) -> tuple[bool, float]:
     """返回 ``(是否存在超过 16bit 上限的样本, 峰值电平 dBFS)``。
 
@@ -972,6 +1006,7 @@ def _judge(
     edge_floor: float = 0.0,
     upsample_src: float = 0.0,
     upsample_step: float = 0.0,
+    extended_flat: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -1034,6 +1069,38 @@ def _judge(
             "伪装成 48kHz 的典型手法"
         )
         return VERDICT_UPSAMPLED, 0.3, reasons
+
+    # ---- 1c. 噪声填充型升频（谐波相干性兜底）：扩展带有能量，但那是噪声不是内容 ----
+    #
+    # 台阶判据看「台阶」，这一条看「台阶之上是什么」：真实乐器的超声内容是
+    # 离散谐波峰（频谱平坦度→0），dither 填充是平坦白噪声（→1）。有些工具
+    # 把 dither 加到与音乐同水平、把台阶完全填平，台阶判据就失效了；但
+    # 填充物的"噪声本质"藏不住 —— 平坦度接近 1 说明那里没有谐波结构。
+    # 前提是「cutoff 落在 PCM 采样率边界」：内容刚好停在 22.05k/24k 这类
+    # 边界，才是升频的指纹。若 cutoff 是 8k/15k 这种"音乐本身低频"，扩展带
+    # 平坦只是自然噪声底，不该判升频。
+    near_boundary = any(
+        abs(cutoff - b) <= max(400.0, b * 0.02)
+        for b in PCM_NYQUISTS
+        if b < nyquist * 0.97
+    )
+    if (
+        nyquist >= 23000
+        and near_boundary
+        and extended_flat >= EXTENDED_FLATNESS_NOISE
+        and edge_db > -95.0
+    ):
+        reasons.append(
+            f"声明 {sample_rate / 1000:.1f}kHz（上限 {nyquist / 1000:.1f}kHz），"
+            f"但内容在 {cutoff / 1000:.1f}kHz 结束，之上不是数字静音"
+            f"（{edge_db:.0f}dB）而是接近白噪声的平坦频谱（平坦度 {extended_flat:.2f}）"
+        )
+        reasons.append(
+            "内容停在 PCM 采样率边界、且之上是平坦噪声：真实乐器的超声内容是"
+            "离散谐波峰（平坦度→0），接近 1 的平坦度说明扩展带是被填充的噪声，"
+            "判定为噪声填充型升频"
+        )
+        return VERDICT_UPSAMPLED, 0.4, reasons
 
     # ---- 2. 升位深：声明 24bit，但样本从未碰到 16bit 天花板 ----
     #
@@ -1341,6 +1408,12 @@ def analyze(
     holes = float(np.median(hole_counts)) if hole_counts else 0.0
     notch = float(np.median(notch_depths)) if notch_depths else 0.0
     roughness = _spectral_roughness(freqs, db)
+    # 扩展带平坦度：区分「真实超声内容」与「噪声填充型升频」。
+    # 真实乐器内容在频域是离散谐波峰（平坦度→0），dither 填充是平坦噪声（→1）。
+    # 只对声明 hi-res、且扩展带确实有能量（cutoff 明显低于 Nyquist）时才有意义。
+    extended_flat = 0.0
+    if not is_dsd and nyq >= 23000 and 0 < cutoff < nyq * 0.95:
+        extended_flat = _spectral_flatness(freqs, db, cutoff, nyq)
     # 位深注水：声明 24bit 却从没用到 16bit 以上（且电平正常，排除近乎无声的文件）
     depth_padding = bool(
         info.bit_depth
@@ -1356,6 +1429,7 @@ def analyze(
     result.bit_above_16 = above_16
     result.bit_depth_padding = depth_padding
     result.spectral_roughness = roughness
+    result.extended_flatness = extended_flat
 
     verdict, score, reasons = _judge(
         info,
@@ -1385,6 +1459,7 @@ def analyze(
         edge_floor=edge_floor,
         upsample_src=upsample_src,
         upsample_step=upsample_step,
+        extended_flat=extended_flat,
     )
     result.verdict = verdict
     result.score = score

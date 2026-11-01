@@ -223,6 +223,7 @@ Visual Studio Build Tools。
 |---|---|---|
 | 带宽 + 扩展带能量 | 升采样后原 Nyquist 之上只剩插值残余（-100dB 以下），真母带仍有 -60~-80dB 内容 | 升采样 |
 | **源码带宽台阶** | 44.1k→48k 升采样后 22.05kHz 处有 ≥18dB 台阶；有些工具加 dither 把台阶填成噪声伪装成内容，但台阶本身仍在 | 升采样（噪声填充型） |
+| **谐波相干性（扩展带平坦度）** | 真实乐器的超声内容是离散谐波峰（平坦度→0），dither 填充是平坦白噪声（→1）；dither 加到把台阶填平（<18dB）时台阶判据失效，但"噪声本质"藏不住 | 升采样（噪声填充型兜底） |
 | 样本是否越过 16bit 上限 | 16bit 内容零填充成 24bit 后，样本绝对值永远 ≤ 32767 | 升位深 |
 | 截止之上是否数字静音 | 编码器砍完高频留下数字空白（-100dB）；磁带/母带总有模拟底噪（-70~-85dB） | 转码 |
 | 截止位置 + 陡度 | 128k≈16kHz、192k≈18.5kHz、320k≈20kHz、CD≈22.05kHz | 转码分档 |
@@ -557,6 +558,7 @@ be forged*.
 |---|---|---|
 | Bandwidth + edge energy | After upsampling, above the original Nyquist there is only interpolation residue (below −100 dB); a real master still carries −60 to −80 dB | Upsampling |
 | **Source-bandwidth step** | A 44.1k→48k upsample leaves a ≥18 dB step at 22.05 kHz; some tools add dither to fill the step with noise and fake content, but the step itself remains | Noise-filled upsampling |
+| **Harmonic coherence (extended-band flatness)** | A real instrument's ultrasonic content is discrete harmonic peaks (flatness→0), dither fill is flat white noise (→1); when dither fills the step below 18 dB the step check fails, but the "noise nature" of the fill is exposed | Noise-filled upsampling fallback |
 | Samples crossing the 16-bit ceiling | 16-bit content zero-padded to 24-bit can never exceed ±32767 | Bit-depth padding |
 | Digital silence above cutoff | An encoder leaves digital blankness (below −100 dB); tape and masters always keep analogue noise floor (−70 to −85 dB) | Transcoding |
 | Cutoff position + steepness | 128k≈16 kHz, 192k≈18.5 kHz, 320k≈20 kHz, CD≈22.05 kHz | Transcode grading |
