@@ -1126,6 +1126,8 @@ class MainWindow(QMainWindow):
     def _on_auth_track(self, track: Track, result) -> None:
         track.authenticity = result
         self.model.refresh_row(track)
+        # 每判完一首就刷新统计卡，让「假无损」数字随扫描实时上涨
+        self._refresh_stats()
         if result.reasons:
             self._append_log(
                 "WARNING" if result.is_suspicious else "INFO",
@@ -1141,6 +1143,8 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self.brand_bar.set_status("就绪", theme.FG_DIM)
         self.model.refresh_all()
+        # 扫描结束后统一刷新统计卡，把同批推定改判的结果也一并计入
+        self._refresh_stats()
         msg = f"鉴定完成：真无损 {true_count}，可疑 {suspect}，无法判定 {unknown}"
         self._append_log("WARNING" if suspect else "INFO", msg)
         self.status_hint.setText(msg)

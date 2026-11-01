@@ -219,6 +219,20 @@ def main() -> int:
         print("✗ 按钮应为「重试 / 取消」：", first.get("buttons"))
         ok = False
 
+    # 真假无损鉴定：判定结果要实时刷新统计卡「假无损」（回归：旧版鉴定后统计卡不变）
+    from seqaudio.core.authenticity import VERDICT_FAKE, AuthenticityResult
+
+    suspect_before = window._stat_cards["suspect"]._value
+    window._on_auth_track(tracks[1], AuthenticityResult(verdict=VERDICT_FAKE, reasons=["测试"]))
+    suspect_mid = window._stat_cards["suspect"]._value
+    if suspect_mid != suspect_before + 1:
+        print(f"✗ 鉴定单曲后统计卡未刷新：假无损 {suspect_before} → {suspect_mid}")
+        ok = False
+    window._on_auth_finished(2, suspect_mid, 0)
+    if window._stat_cards["suspect"]._value != suspect_mid:
+        print("✗ 鉴定完成后统计卡未保持一致")
+        ok = False
+
     window.close()
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n界面流程测试：" + ("通过" if ok else "失败"))
