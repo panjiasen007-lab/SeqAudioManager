@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.9-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.3.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -179,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.2.9-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.2.9-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.3.0-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.3.0-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -537,8 +537,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.2.9-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.2.9-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.3.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.3.0-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
