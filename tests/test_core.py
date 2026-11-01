@@ -1175,6 +1175,50 @@ class TestQQMusicSource(unittest.TestCase):
         self.assertIsNone(qqmusic.lyrics(FakeClient(), "不存在", "", song_mid="x"))
 
 
+class TestDsdJudgement(unittest.TestCase):
+    """DSD 判定（V1.2）：噪声整形斜率是主判据，参考 check-dsd。"""
+
+    def test_genuine_dsd(self) -> None:
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, score, _ = _judge_dsd(12.0, -20.0, 20000.0, 5.0)
+        self.assertEqual(verdict, "真 DSD")
+        self.assertGreaterEqual(score, 0.8)
+
+    def test_flat_ultrasonic_is_fake(self) -> None:
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, _ = _judge_dsd(0.0, -90.0, 22050.0, 60.0)
+        self.assertEqual(verdict, "疑似假 DSD")
+
+    def test_cd_sourced_dsd_is_fake(self) -> None:
+        """噪声整形成立但基带 20kHz 硬截止 → CD/有损源转制。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(10.0, -25.0, 20000.0, 50.0)
+        self.assertEqual(verdict, "疑似假 DSD")
+        self.assertTrue(any("硬截止" in r for r in reasons))
+
+    def test_weak_shaping_is_suspect(self) -> None:
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, _ = _judge_dsd(2.0, -45.0, 0.0, 0.0)
+        self.assertEqual(verdict, "疑似假 DSD")
+
+    def test_noise_shaping_slope(self) -> None:
+        """上升频谱应得到正斜率，平坦频谱应接近 0。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _noise_shaping_slope
+
+        freqs = np.linspace(0, 176400, 20001)
+        rise = 12.0 * np.log2(np.maximum(freqs, 1.0) / 50000.0) - 80.0
+        self.assertGreater(_noise_shaping_slope(freqs, rise, 176400.0), 6.0)
+
+        flat = np.full_like(freqs, -80.0)
+        self.assertAlmostEqual(_noise_shaping_slope(freqs, flat, 176400.0), 0.0, places=1)
+
+
 class TestInstallerMode(unittest.TestCase):
     """安装器版本检测：全新 / 修复 / 升级（V1.1.1）。"""
 

@@ -47,6 +47,28 @@ FFT_SIZE = 8192
 #: 单段解码超时
 DECODE_TIMEOUT = 20.0
 
+# ---------------------------------------------------------------- DSD 判据
+# 参考 check-dsd（lossless-checker）的做法：
+#   * 噪声整形斜率是**主判据** —— 真 DSD 的 Sigma-Delta 量化噪声被整形到
+#     超声区，50kHz→100kHz 呈明显上升；PCM 转的假 DSD 在该频段是平坦的。
+#   * 超声能量比（>50kHz）作为辅助。
+#   * 基带截止只在 24kHz 以下找 —— 避免把 DXD 工作流的 176kHz 拐点误当成 CD 墙。
+
+#: 噪声整形分析频段
+DSD_SLOPE_BAND = (50_000.0, 100_000.0)
+#: 超声能量参考频段
+DSD_ULTRA_BAND = (50_000.0, 120_000.0)
+#: 基带截止扫描上限
+DSD_BASEBAND_MAX = 24_000.0
+
+#: 噪声整形斜率阈值（dB/oct）
+DSD_SLOPE_GENUINE = 6.0
+DSD_SLOPE_SUSPECT = 0.5
+
+#: 基带"硬悬崖"：低于该频率且陡度超过阈值，视为 CD/有损源转制的痕迹
+DSD_BASEBAND_CLIFF_HZ = 21_500.0
+DSD_BASEBAND_CLIFF_STEEP = 36.0
+
 VERDICT_TRUE = "真无损"
 VERDICT_SUSPECT = "疑似假无损"
 VERDICT_FAKE = "假无损"
@@ -76,6 +98,9 @@ class AuthenticityResult:
     bit_depth_declared: int = 0
     bit_depth_effective: int = 0
     high_band_energy_db: float = 0.0   # 20kHz 以上相对能量
+    noise_shaping_slope: float = 0.0   # DSD 噪声整形斜率（dB/oct，真 DSD 为正）
+    ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
+    baseband_cutoff: int = 0           # 基带（≤24kHz）截止频率
     analyzed_seconds: float = 0.0
     reasons: list[str] = field(default_factory=list)
     error: str = ""
@@ -103,6 +128,10 @@ class AuthenticityResult:
         parts = [f"截止 {self.cutoff_hz / 1000:.1f}kHz / 上限 {self.nyquist_hz / 1000:.1f}kHz"]
         if self.steepness_db:
             parts.append(f"陡度 {self.steepness_db:.0f}dB/kHz")
+        if self.noise_shaping_slope:
+            parts.append(f"噪声整形 {self.noise_shaping_slope:+.1f}dB/oct")
+        if self.ultrasonic_ratio:
+            parts.append(f"50kHz 以上 {self.ultrasonic_ratio:.0f}dB")
         # DSD 声明位深是 1bit，解码后是浮点/32bit，对比没有意义，不显示
         if (
             self.bit_depth_effective
@@ -248,22 +277,34 @@ def _average_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray
     return freqs, avg
 
 
-def _find_cutoff(freqs: np.ndarray, db: np.ndarray) -> tuple[float, float]:
+def _find_cutoff(
+    freqs: np.ndarray,
+    db: np.ndarray,
+    max_hz: Optional[float] = None,
+) -> tuple[float, float]:
     """找频谱截止：从最高频往回扫，第一个「连续多个点都有信号」的位置即截止。
 
     为什么要求连续：有损编码在高频会留下零星残留脉冲（量化噪声），
     只要有一个点超过阈值就认作"有信号"会严重误判。要求连续 5 个点
     （44.1kHz 下约 27Hz 宽）能有效过滤这类毛刺。
+
+    ``max_hz`` 限制扫描上限：DSD 的基带分析只扫 24kHz 以下，避免把噪声整形
+    或 DXD 工作流的超声拐点误当成 CD 墙。
     """
     if freqs.size == 0:
         return 0.0, 0.0
+
+    limit = freqs.size
+    if max_hz and max_hz > 0:
+        limit = int(np.searchsorted(freqs, max_hz, side="right"))
+        limit = max(5, min(limit, freqs.size))
 
     # 参考能量取 300Hz~3kHz（音乐主体），比取全局最大值稳
     ref_mask = (freqs >= 300) & (freqs <= 3000)
     reference = float(np.median(db[ref_mask])) if np.any(ref_mask) else float(np.max(db))
     threshold = reference - 62.0          # 低于主体 62dB 视为无有效信号
 
-    above = db > threshold
+    above = db[:limit] > threshold
     run = 0
     cutoff_index = 0
     for i in range(above.size - 1, -1, -1):
@@ -275,7 +316,7 @@ def _find_cutoff(freqs: np.ndarray, db: np.ndarray) -> tuple[float, float]:
         else:
             run = 0
 
-    cutoff = float(freqs[min(cutoff_index, freqs.size - 1)])
+    cutoff = float(freqs[min(cutoff_index, limit - 1)])
 
     # 陡度：截止点往前 2kHz 内的平均下降速度（dB/kHz）
     band = (freqs >= max(1000.0, cutoff - 2000)) & (freqs <= cutoff + 200)
@@ -288,6 +329,31 @@ def _find_cutoff(freqs: np.ndarray, db: np.ndarray) -> tuple[float, float]:
     else:
         steepness = 0.0
     return cutoff, steepness
+
+
+def _noise_shaping_slope(freqs: np.ndarray, db: np.ndarray, nyquist: float) -> float:
+    """噪声整形斜率：50~100kHz 区间每倍频程的能量变化（dB/oct）。
+
+    真 DSD 的 Sigma-Delta 量化噪声被整形到超声区，该频段能量随频率**上升**
+    （典型 +6 ~ +18dB/oct）；PCM 转制的假 DSD 在此频段平坦（≈0）或下降。
+    区间内有效点太少时返回 0（表示无法判断，交给上层按可疑处理）。
+    """
+    low, high = DSD_SLOPE_BAND
+    high = min(high, nyquist * 0.95)
+    if high <= low:
+        return 0.0
+    mask = (freqs >= low) & (freqs <= high)
+    if np.count_nonzero(mask) < 16:
+        return 0.0
+    x = np.log2(np.maximum(freqs[mask], 1.0))
+    y = db[mask]
+    ok = np.isfinite(y)
+    if np.count_nonzero(ok) < 16:
+        return 0.0
+    try:
+        return float(np.polyfit(x[ok], y[ok], 1)[0])
+    except (np.linalg.LinAlgError, ValueError):
+        return 0.0
 
 
 def _band_energy(freqs: np.ndarray, db: np.ndarray, low: float, high: float) -> float:
@@ -330,12 +396,65 @@ def _effective_bit_depth(samples: np.ndarray) -> int:
 # ---------------------------------------------------------------- 判定
 
 
+def _judge_dsd(
+    slope: float,
+    ultra: float,
+    base_cutoff: float,
+    base_steep: float,
+) -> tuple[str, float, list[str]]:
+    """DSD 判定（参考 check-dsd）：噪声整形斜率是主判据。
+
+    * 真 DSD 的 Sigma-Delta 量化噪声被整形到超声区，50→100kHz 呈明显上升
+      （典型 +6 ~ +18dB/oct）；
+    * PCM 转制的假 DSD 在该频段平坦（≈0）或下降；
+    * 基带截止只作辅助 —— 噪声整形成立时，基带的自然滚降是正常母带特征，
+      只有「硬悬崖」（<21.5kHz 且陡度 >36dB/kHz）才说明源头是 CD/有损。
+    """
+    reasons: list[str] = []
+
+    if slope >= DSD_SLOPE_GENUINE and ultra > -50:
+        if (
+            base_cutoff > 0
+            and base_cutoff < DSD_BASEBAND_CLIFF_HZ
+            and base_steep > DSD_BASEBAND_CLIFF_STEEP
+        ):
+            reasons.append(
+                f"噪声整形斜率 {slope:+.1f}dB/oct，但基带在 "
+                f"{base_cutoff / 1000:.1f}kHz 硬截止（陡度 {base_steep:.0f}dB/kHz），"
+                "疑似 CD/有损源经调制器转成 DSD"
+            )
+            return VERDICT_FAKE_DSD, 0.4, reasons
+        reasons.append(
+            f"噪声整形斜率 {slope:+.1f}dB/oct、50kHz 以上能量 {ultra:.0f}dB，"
+            "符合 Sigma-Delta 调制特征"
+        )
+        return VERDICT_DSD, 0.9, reasons
+
+    if slope >= DSD_SLOPE_SUSPECT and ultra > -58:
+        reasons.append(
+            f"噪声整形偏弱（斜率 {slope:+.1f}dB/oct、50kHz 以上 {ultra:.0f}dB），"
+            "可能是高规格 PCM 转制、模拟母带转录，或解码器做了超声低通"
+        )
+        return VERDICT_FAKE_DSD, 0.5, reasons
+
+    reasons.append(
+        f"超声区平坦（斜率 {slope:+.1f}dB/oct、50kHz 以上仅 {ultra:.0f}dB），"
+        "缺少 Sigma-Delta 噪声整形，疑似 PCM 升频/转制为 DSD"
+    )
+    return VERDICT_FAKE_DSD, 0.25, reasons
+
+
 def _judge(
     info: AudioInfo,
     cutoff: float,
     steepness: float,
     high_band: float,
     eff_depth: int,
+    *,
+    slope: float = 0.0,
+    ultra: float = 0.0,
+    base_cutoff: float = 0.0,
+    base_steep: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     reasons: list[str] = []
     sample_rate = info.sample_rate or 44100
@@ -344,20 +463,7 @@ def _judge(
     ratio = (cutoff / nyquist) if nyquist else 0.0
 
     if is_dsd:
-        # 真 DSD 把量化噪声整形到超声区，40kHz 以上能量很高（实测 -14dB）；
-        # PCM 转的假 DSD 在 22.05kHz 以上就掉到地板。
-        # 注意判据必须看 40kHz 以上 —— 20~40kHz 是 DSD 噪声整形的「谷」，
-        # 真 DSD 在那里反而只有 -60dB，用它判断会全部误判。
-        if high_band > -28:
-            reasons.append(f"40kHz 以上能量 {high_band:.0f}dB，符合 DSD 噪声整形特征")
-            return VERDICT_DSD, 0.9, reasons
-        if high_band > -48:
-            reasons.append(f"40kHz 以上能量偏低（{high_band:.0f}dB），可能是 PCM 转 DSD")
-            return VERDICT_FAKE_DSD, 0.5, reasons
-        reasons.append(
-            f"40kHz 以上几乎无能量（{high_band:.0f}dB），疑似 PCM 升频后封装为 DSD"
-        )
-        return VERDICT_FAKE_DSD, 0.25, reasons
+        return _judge_dsd(slope, ultra, base_cutoff, base_steep)
 
     if nyquist <= 24000:
         # CD 标准音源（44.1k / 48k）。
@@ -518,9 +624,22 @@ def analyze(
         spread_note = f"（各段截止 {cutoff_min / 1000:.1f}~{cutoff_max / 1000:.1f}kHz，含静音/前奏段）"
 
     is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
+    slope = 0.0
+    ultra = 0.0
+    base_cutoff = 0.0
+    base_steep = 0.0
     if is_dsd:
-        # DSD 的噪声整形能量在 40kHz 以上，20~40kHz 反而是谷
-        high_band = _band_energy(freqs, db, 40000, min(result.nyquist_hz or 40000, 140000))
+        nyq = float(result.nyquist_hz or 352800)
+        # 噪声整形斜率（主判据）
+        slope = _noise_shaping_slope(freqs, db, nyq)
+        # 超声能量比（辅助）
+        ultra = _band_energy(freqs, db, DSD_ULTRA_BAND[0], min(DSD_ULTRA_BAND[1], nyq))
+        # 基带截止只在 24kHz 以下找，避免 DXD 的 176kHz 缺口被误当 CD 墙
+        base_cutoff, base_steep = _find_cutoff(freqs, db, max_hz=DSD_BASEBAND_MAX)
+        high_band = _band_energy(freqs, db, 40000, min(nyq, 140000))
+        result.noise_shaping_slope = slope
+        result.ultrasonic_ratio = ultra
+        result.baseband_cutoff = int(base_cutoff)
     else:
         high_band = _band_energy(freqs, db, 20000, min(result.nyquist_hz or 22050, 40000))
     result.cutoff_hz = int(cutoff)
@@ -529,13 +648,120 @@ def analyze(
     result.bit_depth_effective = deepest_depth
     result.analyzed_seconds = analyzed
 
-    verdict, score, reasons = _judge(info, cutoff, steepness, high_band, deepest_depth)
+    verdict, score, reasons = _judge(
+        info,
+        cutoff,
+        steepness,
+        high_band,
+        deepest_depth,
+        slope=slope,
+        ultra=ultra,
+        base_cutoff=base_cutoff,
+        base_steep=base_steep,
+    )
     result.verdict = verdict
     result.score = score
     result.reasons = reasons
     if spread_note and verdict == VERDICT_TRUE:
         result.reasons.append(spread_note)
     return result
+
+
+def full_spectrum(
+    path: Path | str,
+    info: Optional[AudioInfo] = None,
+    *,
+    target_frames: int = 1000,
+    max_seconds: Optional[float] = 600.0,
+) -> Optional[tuple[np.ndarray, np.ndarray, int]]:
+    """解码整首歌，返回完整频谱 ``(db_matrix, freqs, sample_rate)``。
+
+    用于 Spek 式瀑布图（时间 × 频率）。为控制内存，时间轴压缩到约
+    ``target_frames`` 列；频率分辨率由自动选取的 FFT 长度决定。
+    dB 已减去 300Hz~3kHz 的主体能量（相对 dB），可直接按固定色阶绘制。
+    """
+    ffmpeg = find_ffmpeg()
+    path = Path(path)
+    if ffmpeg is None or not path.exists():
+        return None
+
+    if info is None:
+        from .probe import probe
+
+        info = probe(path, with_cue=False).info
+
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if max_seconds:
+        cmd += ["-t", f"{max_seconds:.1f}"]
+    is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
+    cmd += [
+        "-i", str(path),
+        "-map", "0:a:0",
+        "-ac", "1",
+    ]
+    if is_dsd:
+        # DSD 解码后采样率极高（DSD64 → 352.8kHz），整轨一次性载入内存吃不消；
+        # 降到 176.4kHz 仍能保留 88kHz 以下的噪声整形信息。
+        cmd += ["-ar", "176400"]
+    cmd += ["-f", "s16le", "-acodec", "pcm_s16le", "-"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+
+    data = np.frombuffer(proc.stdout, dtype="<i2").astype(np.float32)
+    total = int(data.size)
+    if total < 4096:
+        return None
+
+    duration = info.duration or _probe_duration(ffmpeg, path)
+    sample_rate = (
+        int(round(total / duration))
+        if duration and duration > 0
+        else (info.sample_rate or 44100)
+    )
+    if sample_rate <= 0:
+        sample_rate = info.sample_rate or 44100
+    # 对齐常见采样率，避免 ±1 的取整误差
+    for candidate in (44100, 48000, 88200, 96000, 176400, 192000,
+                      352800, 384000, 705600, 1411200):
+        if abs(sample_rate - candidate) / candidate < 0.02:
+            sample_rate = candidate
+            break
+
+    hop = max(512, total // max(1, target_frames))
+    fft_size = 1 << max(11, (hop - 1).bit_length())
+    if fft_size > 32768:
+        fft_size = 32768
+        hop = max(512, min(hop, 32768))
+    n_frames = max(0, (total - fft_size) // hop + 1)
+    if n_frames < 1:
+        return None
+
+    window = np.hanning(fft_size).astype(np.float32)
+    bins = fft_size // 2 + 1
+    out = np.empty((n_frames, bins), dtype=np.float32)
+    batch = max(1, min(128, n_frames))
+    for start in range(0, n_frames, batch):
+        end = min(start + batch, n_frames)
+        idx = np.arange(fft_size)[None, :] + hop * np.arange(start, end)[:, None]
+        frames = data[idx] * window[None, :]
+        spec = np.abs(np.fft.rfft(frames, axis=1))
+        out[start:end] = (20.0 * np.log10(spec + 1e-10)).astype(np.float32)
+
+    freqs = np.fft.rfftfreq(fft_size, d=1.0 / sample_rate).astype(np.float32)
+
+    ref_mask = (freqs >= 300) & (freqs <= 3000)
+    reference = float(np.median(out[:, ref_mask])) if np.any(ref_mask) else float(np.max(out))
+    out -= reference
+    return out, freqs, sample_rate
 
 
 def analyze_many(

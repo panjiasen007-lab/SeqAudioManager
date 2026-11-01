@@ -111,7 +111,7 @@ src/seqaudio/
     ├── delegate.py         自绘状态胶囊、等宽数字、选中高亮条
     ├── settings_panel.py   参数面板
     ├── cleanup.py          清理假无损 / 隔离区管理对话框
-    ├── spectrum.py         频谱查看器（QPainter 绘制）
+    ├── spectrum.py         频谱查看器（整首瀑布图 + 平均曲线，QPainter 绘制）
     ├── about.py            关于：协议全文、第三方组件、诊断信息
     ├── dialogs.py          标签编辑 / 候选选择 / 重命名预览
     ├── fonts.py            开源字体注册与选择
@@ -223,9 +223,16 @@ Visual Studio Build Tools。
 | 疑似升频 | 采样率很高但带宽利用率不足 55% |
 | 真 DSD / 疑似假 DSD | 见下 |
 
-**DSD 的判据和 PCM 完全不同**：真 DSD 会把量化噪声整形到超声区，40kHz 以上能量
-高达 -14dB（实测数据），而 20~40kHz 反而是个 -60dB 的「谷」。所以 DSD 只看 40kHz 以上，
-用 20kHz 附近判断会把所有真 DSD 判成假的。
+**DSD 的判据和 PCM 完全不同**（参考 check-dsd）：真 DSD 的 Sigma-Delta 量化噪声
+被整形到超声区，50kHz→100kHz 呈明显上升（典型 +6 ~ +18dB/oct）；PCM 转制的假 DSD
+在该频段平坦。判定用三个指标：
+
+1. **噪声整形斜率**（主判据，dB/oct）—— 50~100kHz 每倍频程的能量变化；
+2. **超声能量比** —— 50kHz 以上的相对能量；
+3. **基带截止** —— 只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
+
+真 DSD 的基带自然滚降是正常母带特征，不算问题；只有基带出现「硬悬崖」
+（<21.5kHz 且陡度 >36dB/kHz）才判定源头是 CD/有损。
 
 **验证过的样本**（同一段音乐）：
 
@@ -291,7 +298,7 @@ Visual Studio Build Tools。
 - 每文件夹封面 ✅（专辑封面 → 歌手照片 Deezer/网易云 三级兜底）
 - 艺术家名字简繁统一 ✅（同目录按多数投票统一为简体，纯繁体库保持原样）
 - 一键清理假无损 ✅（回收站 / 隔离区 / 彻底删除三级，隔离区可还原）
-- 频谱查看器 ✅（曲线 + 截止标记 + 判定依据，可自行复核）
+- 频谱查看器 ✅（整首完整瀑布图 + 平均曲线双视图、截止标记、判定依据）
 - 按鉴定结论筛选 ✅ / 鉴定结果进 CSV 报表 ✅
 - 星空动态背景 ✅（5 星区循环、视差飞行、可关闭）
 
@@ -450,7 +457,13 @@ Lossy encoding always cuts the high frequencies, leaving a cliff on the spectrum
 | Suspect upsample | High sample rate but bandwidth utilization under 55% |
 | Genuine DSD / suspect fake DSD | See below |
 
-**DSD criteria are completely different from PCM**: genuine DSD shapes quantization noise into the ultrasonic band, reaching −14 dB above 40 kHz (measured), while 20–40 kHz is actually a −60 dB "valley". So DSD only looks above 40 kHz; judging near 20 kHz would flag all genuine DSD as fake.
+**DSD criteria are completely different from PCM** (following check-dsd): genuine DSD shapes its Sigma-Delta quantization noise into the ultrasonic band, rising noticeably from 50 kHz to 100 kHz (typically +6 to +18 dB/oct); PCM-sourced fake DSD is flat in that region. Three metrics are used:
+
+1. **Noise-shaping slope** (primary, dB/oct) — energy change per octave across 50–100 kHz;
+2. **Ultrasonic energy ratio** — relative energy above 50 kHz;
+3. **Baseband cutoff** — scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall.
+
+Natural baseband roll-off in genuine DSD is a normal master characteristic; only a hard cliff (below 21.5 kHz with steepness over 36 dB/kHz) indicates a CD/lossy source.
 
 **Verified samples** (same music):
 
