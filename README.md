@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.4-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.5-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -179,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.2.4-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.2.4-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.2.5-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.2.5-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -247,31 +247,41 @@ Visual Studio Build Tools。
 **DSD 的判据和 PCM 完全不同**（参考 check-dsd）。关键认知：**CD 转 DSD 经过调制器后
 同样会产生噪声整形**，所以只看「超声能量」会把 CD 转制的假 DSD 判成真货。真正的破绽在基带：
 
-1. **噪声整形斜率**（50→100kHz，dB/oct）—— 确认是不是真的 DSD 比特流
+1. **PCM 带宽断崖**（主判据）—— 源码的带宽边界会原封不动留在基带上：
+   44.1k 源在 22.05kHz、48k 源在 24kHz、88.2k 在 44.1kHz、96k 在 48kHz、
+   192k 在 96kHz。断崖之上若是数字静音（< -75dB），说明那片高频从来就不存在，
+   只是被 DSD 调制器抬起来了。真 SACD 的能量会一路延伸进噪声整形区，
+   不会在某个 PCM 采样率边界整齐断掉；
+2. **噪声整形斜率**（50→100kHz，dB/oct）—— 确认比特流本身是真的
    （PCM 改后缀的假 DSD 在超声区是平坦的）；
-2. **CD 边界检测**（主判据）—— 基带截止是否落在 22.05kHz（CD 的 Nyquist）附近，
-   且截止之上是否为数字静音。实测 CD 转 DSD：基带截止 21.8~22.2kHz、
-   22.5~24kHz 只有 -83 ~ -96dB；真 DSD 的噪声整形在那里仍有 -60 ~ -75dB；
-3. **超声能量比** —— 50kHz 以上的相对能量，辅助确认噪声整形成立。
+3. **CD 边界兜底** —— 基带截止落在 22.05kHz 附近且之上是数字静音；
+4. **超声基底**（辅助）—— 真 DSD 在 30~40kHz 已有 -29 ~ -46dB 的能量，
+   PCM 转制只有 -59 ~ -61dB。
 
 基带截止只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
-噪声整形成立、基带又不在 CD 边界截止，才判真 DSD。
 
 FlacCompagnon 独立测到的数字可以互相印证：真 DSD 在 22.05kHz 只有约 3dB 台阶，
-PCM 转制有约 50dB 悬崖，判据是 ≥30dB —— 与这里的「数字静音」等价。
+PCM 转制有约 50dB 悬崖，判据是 ≥30dB —— 与这里的「断崖 + 数字静音」等价。
 
 **实测样本**（真实音乐，非合成）：
 
 ```
-24bit/48kHz（实为 44.1k 升采样）→ 疑似升频    带宽 92% / 扩展带 -140dB
-同上转 192k MP3                 → 假无损      带宽 84% / 截止之上 -101dB（数字静音）
-同上转 320k MP3                 → 疑似假无损  带宽 92% / 截止之上 -101dB
+44.1k CD 转 DSD（周杰伦 DFF） → 疑似假 DSD  22.05kHz 39dB 断崖，之上 -81dB
+真 SACD（Taylor, DSD128）     → 真 DSD      斜率 +43.6dB/oct，无断崖，30~40kHz -46dB
+真 SACD（Adele）              → 真 DSD      斜率 +9.3dB/oct，30~40kHz -39dB
+24bit/48kHz（实为 44.1k 升采样）→ 疑似升频   带宽 92% / 扩展带 -140dB
+同上转 192k MP3                → 假无损      带宽 84% / 截止之上 -101dB（数字静音）
+同上转 320k MP3                → 疑似假无损  带宽 92% / 截止之上 -101dB
 同上降回 44.1kHz/24bit          → 真无损      带宽 99%
 16bit 内容装进 24bit 容器        → 疑似升位深  峰值 -4.9dBFS，未越过 16bit 上限
-周杰伦 CD 转制 DFF              → 疑似假 DSD  基带 21.88kHz + 22.5~24kHz 数字静音
 ```
 
-速度约 0.3~1 秒/首（4 次解码并行），一千首约 5 分钟。
+速度约 0.3~3 秒/首（DSD 文件更大，解码更久），一千首约 10~30 分钟。
+
+**已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
+判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
+另外「SACD 母带本身做过 22kHz 低通」的情况会与 PCM 转制难以区分，
+所以这类结论一律标为「疑似」而非「假」。
 
 **已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
 判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
@@ -455,8 +465,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.2.4-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.2.4-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.2.5-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.2.5-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -516,11 +526,12 @@ Two implementation details matter:
 
 **DSD criteria are completely different from PCM** (following check-dsd). Key insight: **a CD-sourced DSD also has noise shaping** — the modulator generates it — so ultrasonic energy alone cannot separate it from a genuine master. The real giveaway is the baseband:
 
-1. **Noise-shaping slope** (50→100 kHz, dB/oct) — confirms whether it is a real DSD bitstream (a PCM file renamed to .dsf/.dff is flat in the ultrasonic region);
-2. **CD-boundary check** (primary) — whether the baseband cutoff falls near 22.05 kHz (CD Nyquist) and whether the region above it is digital silence. Measured CD-sourced DSD: cutoff at 21.8–22.2 kHz, with only −83 to −96 dB across 22.5–24 kHz; genuine DSD still carries −60 to −75 dB there from noise shaping;
-3. **Ultrasonic energy ratio** — relative energy above 50 kHz, as a supporting check.
+1. **PCM bandwidth cliff** (primary) — the source's bandwidth boundary stays exactly where it was: 44.1k source at 22.05 kHz, 48k at 24 kHz, 88.2k at 44.1 kHz, 96k at 48 kHz, 192k at 96 kHz. If the region above the cliff is digital silence (< −75 dB), that high frequency never existed — it was merely lifted by the DSD modulator. Genuine SACD energy runs straight into the noise-shaping region and never stops neatly at a PCM sample-rate boundary;
+2. **Noise-shaping slope** (50→100 kHz, dB/oct) — confirms the bitstream itself is real (a PCM file renamed to .dsf/.dff is flat in the ultrasonic region);
+3. **CD-boundary fallback** — baseband cutoff near 22.05 kHz with digital silence above it;
+4. **Ultrasonic base** (supporting) — genuine DSD already carries −29 to −46 dB across 30–40 kHz; PCM-sourced DSD only −59 to −61 dB.
 
-The baseband cutoff is scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall. Genuine DSD requires noise shaping *and* a baseband that does not stop at the CD boundary.
+The baseband cutoff is scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall.
 
 FlacCompagnon's independent measurement corroborates this: genuine DSD shows only a ~3 dB step across 22.05 kHz while PCM-sourced DSD shows a ~50 dB cliff, with a ≥30 dB criterion — equivalent to the "digital silence" check used here.
 

@@ -77,6 +77,20 @@ DSD_SILENCE_BAND = (22_500.0, 24_000.0)
 #: 基带陡度辅助阈值：断崖式截止同样视为 CD/有损源
 DSD_BASEBAND_CLIFF_STEEP = 30.0
 
+#: 常见 PCM 采样率的 Nyquist 网格（Hz）。
+#: PCM 转 DSD 时，源码的带宽边界会原封不动地留在基带上：
+#: 44.1k→22.05k、48k→24k、88.2k→44.1k、96k→48k、176.4k→88.2k、192k→96k。
+#: 断崖落在这些点上且之上是数字静音，就是 PCM 转制的铁证。
+PCM_NYQUISTS = (22_050.0, 24_000.0, 32_000.0, 44_100.0, 48_000.0, 88_200.0, 96_000.0)
+#: 断崖判定：Nyquist 前后各取一段，能量落差超过这个值才算断崖
+PCM_CLIFF_STEP_DB = 20.0
+#: 断崖之上的「数字静音」阈值：PCM 的 Nyquist 之上本来就是空白，
+#: 被 DSD 调制器抬起后仍显著低于真 DSD 的噪声整形基底
+PCM_CLIFF_SILENCE_DB = -75.0
+#: 真 DSD 的噪声整形基底：30~40kHz 应已有可观能量（实测 -29 ~ -46dB），
+#: PCM 转制只有 -59 ~ -61dB。仅作辅助理由，不单独判决
+DSD_ULTRA_BODY_DB = -52.0
+
 # ---------------------------------------------------------------- PCM 判据
 # 参考 2026 年开源实现的共识（lossless-checker / Lossless Audio Checker /
 # FlacCompagnon / audiojs measure-lossy）：
@@ -572,6 +586,33 @@ def _bit_depth_evidence(samples: np.ndarray) -> tuple[bool, float]:
     return above_16, float(peak_dbfs)
 
 
+def _pcm_source_cliff(
+    freqs: np.ndarray, db: np.ndarray, nyquist: float
+) -> tuple[float, float, float]:
+    """找 PCM 转 DSD 留下的带宽断崖。
+
+    返回 ``(源采样率Hz, 落差dB, 断崖之上能量dB)``；没找到返回 ``(0, 0, 0)``。
+
+    原理：PCM 源码的带宽边界转成 DSD 后仍然留在基带上 —— 44.1k 素材在
+    22.05kHz 以上是空白，48k 在 24kHz 以上，96k 在 48kHz 以上。DSD 调制器
+    会把这片空白抬成噪声整形，但抬升后的电平仍显著低于真 DSD 在超声区的
+    基底（实测 PCM 转制 -80dB 上下，真 SACD -40dB 上下）。
+
+    所以「Nyquist 处有 20dB 以上断崖 + 断崖之上是数字静音」几乎只可能是转制。
+    比原来的「固定查 22.05kHz」通用得多：48k/96k/192k 源码都能抓。
+    """
+    best: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    for boundary in PCM_NYQUISTS:
+        if boundary * 1.07 >= nyquist:
+            continue
+        below = _band_energy(freqs, db, boundary * 0.93, boundary * 0.99)
+        above = _band_energy(freqs, db, boundary * 1.01, boundary * 1.06)
+        step = below - above
+        if step >= PCM_CLIFF_STEP_DB and above <= PCM_CLIFF_SILENCE_DB and step > best[1]:
+            best = (boundary * 2.0, step, above)
+    return best
+
+
 def _effective_bit_depth(samples: np.ndarray) -> int:
     """从 32 位整数样本推导有效位深。
 
@@ -608,16 +649,25 @@ def _judge_dsd(
     base_cutoff: float,
     base_steep: float,
     base_silence: float,
+    *,
+    pcm_source: float = 0.0,
+    pcm_step: float = 0.0,
+    pcm_above: float = 0.0,
+    ultra_body: float = 0.0,
 ) -> tuple[str, float, list[str]]:
-    """DSD 判定（参考 check-dsd）：噪声整形斜率 + CD 边界双重判据。
+    """DSD 判定：先看噪声整形确认「是不是真 DSD 比特流」，再看基带找源码。
 
-    * 噪声整形斜率（50→100kHz，dB/oct）确认「是不是真的 DSD 比特流」——
-      PCM 直接改后缀的假 DSD 在超声区是平坦的；
-    * **CD 边界检测**确认「源头是不是 CD」—— CD 转 DSD 经过调制器后
-      **同样会有噪声整形**，所以斜率不能区分它；真正的破绽在基带：
-      截止落在 22.05kHz（CD 的 Nyquist）附近，且截止之上是数字静音
-      （实测 -83 ~ -94dB）。真 DSD 的噪声整形在 22.5~24kHz 仍有
-      -60 ~ -75dB 的能量，不会低于 -78dB。
+    * **噪声整形斜率**（50→100kHz，dB/oct）确认比特流本身是真的 —— PCM 直接
+      改后缀的假 DSD 在超声区是平坦的；
+    * **PCM 断崖**（主判据）—— 源码的带宽边界会留在基带上：44.1k 源在
+      22.05kHz、48k 源在 24kHz、96k 源在 48kHz。断崖之上若是数字静音，
+      说明那片高频从来就不存在，只是被调制器抬起来了。这条对 48k/96k/192k
+      源码同样有效，比只查 22.05kHz 通用；
+    * **CD 边界**（旧判据，保留作兜底）—— 基带截止落在 22.05kHz 附近且之上
+      为数字静音。CD 转 DSD 经过调制器后**同样有噪声整形**，所以斜率分不开，
+      真正的破绽在基带；
+    * **超声基底**（辅助）—— 真 DSD 在 30~40kHz 已有 -29 ~ -46dB 的噪声整形
+      能量，PCM 转制只有 -59 ~ -61dB。
     """
     reasons: list[str] = []
 
@@ -629,7 +679,20 @@ def _judge_dsd(
         )
         return VERDICT_FAKE_DSD, 0.25, reasons
 
-    # ---- 2. CD 边界：区分「CD 转 DSD」与「真 DSD 录音」 ----
+    # ---- 2. PCM 带宽断崖：通用于 44.1 / 48 / 96 / 192kHz 源码 ----
+    if pcm_source > 0:
+        reasons.append(
+            f"基带在 {pcm_source / 2000:.2f}kHz 出现 {pcm_step:.0f}dB 断崖，"
+            f"正是 {pcm_source / 1000:.1f}kHz PCM 的 Nyquist 边界；"
+            f"断崖之上仅 {pcm_above:.0f}dB（数字静音）"
+        )
+        reasons.append(
+            "真 DSD 的能量会一路延伸进噪声整形区、不会在某个 PCM 采样率边界"
+            "整齐断掉，因此判定为 PCM 转制"
+        )
+        return VERDICT_FAKE_DSD, 0.3, reasons
+
+    # ---- 3. CD 边界（旧判据兜底）：截止落在 22.05kHz 且之上数字静音 ----
     cd_boundary = 0.0 < base_cutoff < DSD_CD_BOUNDARY_HZ
     digital_silence = base_silence < DSD_DIGITAL_SILENCE_DB
     hard_cliff = base_steep > DSD_BASEBAND_CLIFF_STEEP
@@ -648,7 +711,7 @@ def _judge_dsd(
         )
         return VERDICT_FAKE_DSD, 0.3, reasons
 
-    # ---- 3. 噪声整形弱、但基带不是 CD 边界：可能是高规格 PCM 转制 ----
+    # ---- 4. 噪声整形弱、但基带不是 CD 边界：可能是高规格 PCM 转制 ----
     if slope < DSD_SLOPE_GENUINE:
         reasons.append(
             f"噪声整形偏弱（斜率 {slope:+.1f}dB/oct、50kHz 以上 {ultra:.0f}dB），"
@@ -658,9 +721,13 @@ def _judge_dsd(
 
     reasons.append(
         f"噪声整形斜率 {slope:+.1f}dB/oct、50kHz 以上能量 {ultra:.0f}dB，"
-        f"且基带未在 CD 边界截止（{base_cutoff / 1000:.1f}kHz），"
+        f"且基带未在 PCM 采样率边界断崖（{base_cutoff / 1000:.1f}kHz），"
         "符合真 DSD 录音特征"
     )
+    if ultra_body > DSD_ULTRA_BODY_DB:
+        reasons.append(
+            f"30~40kHz 已有 {ultra_body:.0f}dB 的噪声整形基底，与真 SACD 一致"
+        )
     return VERDICT_DSD, 0.9, reasons
 
 
@@ -684,6 +751,10 @@ def _judge(
     above16: bool = False,
     peak_dbfs: float = 0.0,
     depth_padding: bool = False,
+    pcm_source: float = 0.0,
+    pcm_step: float = 0.0,
+    pcm_above: float = 0.0,
+    ultra_body: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -701,7 +772,11 @@ def _judge(
     ratio = ratio or ((cutoff / nyquist) if nyquist else 0.0)
 
     if is_dsd:
-        return _judge_dsd(slope, ultra, base_cutoff, base_steep, base_silence)
+        return _judge_dsd(
+            slope, ultra, base_cutoff, base_steep, base_silence,
+            pcm_source=pcm_source, pcm_step=pcm_step,
+            pcm_above=pcm_above, ultra_body=ultra_body,
+        )
 
     # ---- 1. 升采样：声明高采样率，但扩展带是空的 ----
     #
@@ -956,6 +1031,10 @@ def analyze(
     base_cutoff = 0.0
     base_steep = 0.0
     base_silence = 0.0
+    pcm_source = 0.0
+    pcm_step = 0.0
+    pcm_above = 0.0
+    ultra_body = 0.0
     if is_dsd:
         nyq = float(result.nyquist_hz or 352800)
         # 噪声整形斜率（确认是不是真的 DSD 比特流）
@@ -971,6 +1050,9 @@ def analyze(
             freqs, db, DSD_SILENCE_BAND[0], min(DSD_SILENCE_BAND[1], nyq)
         )
         high_band = _band_energy(freqs, db, 40000, min(nyq, 140000))
+        # PCM 转制的带宽断崖（44.1/48/96/192k 源码通用）+ 噪声整形基底
+        pcm_source, pcm_step, pcm_above = _pcm_source_cliff(freqs, db, nyq)
+        ultra_body = _band_energy(freqs, db, 30000, min(40000, nyq))
         result.noise_shaping_slope = slope
         result.ultrasonic_ratio = ultra
         result.baseband_cutoff = int(base_cutoff)
@@ -1025,6 +1107,10 @@ def analyze(
         above16=above_16,
         peak_dbfs=peak_dbfs,
         depth_padding=depth_padding,
+        pcm_source=pcm_source,
+        pcm_step=pcm_step,
+        pcm_above=pcm_above,
+        ultra_body=ultra_body,
     )
     result.verdict = verdict
     result.score = score

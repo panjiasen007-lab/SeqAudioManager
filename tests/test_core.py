@@ -1571,6 +1571,84 @@ class TestAuthenticityV13(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestDsdSourceCliff(unittest.TestCase):
+    """PCM 转 DSD 的带宽断崖检测（V1.2.5）。
+
+    源码的带宽边界会留在基带上：44.1k 源在 22.05kHz、48k 源在 24kHz、
+    96k 源在 48kHz。断崖之上若是数字静音，说明那片高频从来就不存在。
+    """
+
+    def _spectrum(self, boundary: float, above_db: float = -110.0):
+        import numpy as np
+
+        freqs = np.arange(0.0, 176_400.0, 10.0)
+        db = np.where(freqs < boundary, -30.0, above_db)
+        return freqs, db
+
+    def test_48k_source_detected(self) -> None:
+        from seqaudio.core.authenticity import _pcm_source_cliff
+
+        freqs, db = self._spectrum(24_000.0)
+        source, step, above = _pcm_source_cliff(freqs, db, 176_400.0)
+        self.assertEqual(source, 48_000.0, (step, above))
+        self.assertGreater(step, 20.0)
+
+    def test_96k_source_detected(self) -> None:
+        from seqaudio.core.authenticity import _pcm_source_cliff
+
+        freqs, db = self._spectrum(48_000.0)
+        source, _, _ = _pcm_source_cliff(freqs, db, 176_400.0)
+        self.assertEqual(source, 96_000.0)
+
+    def test_44k_source_detected(self) -> None:
+        from seqaudio.core.authenticity import _pcm_source_cliff
+
+        freqs, db = self._spectrum(22_050.0)
+        source, _, _ = _pcm_source_cliff(freqs, db, 176_400.0)
+        self.assertEqual(source, 44_100.0)
+
+    def test_genuine_dsd_has_no_cliff(self) -> None:
+        """真 DSD 能量一路延伸，断崖之上不是静音 → 不该报。"""
+        from seqaudio.core.authenticity import _pcm_source_cliff
+
+        freqs, db = self._spectrum(22_050.0, above_db=-50.0)
+        source, _, _ = _pcm_source_cliff(freqs, db, 176_400.0)
+        self.assertEqual(source, 0.0)
+
+    def test_gradual_rolloff_not_a_cliff(self) -> None:
+        """平缓滚降（老录音）不是断崖。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _pcm_source_cliff
+
+        freqs = np.arange(0.0, 176_400.0, 10.0)
+        db = np.where(freqs < 22_050.0, -30.0, -30.0 - (freqs - 22_050.0) / 1000.0)
+        source, _, _ = _pcm_source_cliff(freqs, db, 176_400.0)
+        self.assertEqual(source, 0.0)
+
+    def test_judge_prefers_pcm_cliff(self) -> None:
+        """给出断崖证据时，判定要直接落到「疑似假 DSD」。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            12.0, -20.0, 0.0, 0.0, 0.0,
+            pcm_source=48_000.0, pcm_step=39.0, pcm_above=-81.0,
+        )
+        self.assertEqual(verdict, "疑似假 DSD", reasons)
+        self.assertTrue(any("48.0kHz" in r for r in reasons), reasons)
+
+    def test_judge_accepts_high_freq_extension(self) -> None:
+        """无断崖 + 超声基底 → 真 DSD。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, score, reasons = _judge_dsd(
+            9.0, -5.0, 29_000.0, 20.0, -50.0,
+            pcm_source=0.0, ultra_body=-39.0,
+        )
+        self.assertEqual(verdict, "真 DSD", reasons)
+        self.assertGreaterEqual(score, 0.8)
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 
