@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.2-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.3-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -179,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.2.2-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.2.2-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.2.3-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.2.3-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -190,6 +190,8 @@ onefile 每次启动都要把 250MB 内容解压到临时目录，首次要 3~5 
 **安装程序**是一个用 PySide6 写的三页向导（欢迎/授权 → 选择目录 → 安装进度）：
 
 - 装到 `%LOCALAPPDATA%\Programs\SeqAudioManager`，**不需要管理员权限**；
+- **自动识别安装模式**：注册表无记录 → 全新安装；已装同版本 → 修复安装；已装旧版本 → 升级安装（装回原路径，`data/` 里的配置、日志与备份始终保留）；
+- **程序运行中会拦下来**：动手前按完整路径枚举进程（不是按进程名猜），发现 `音序管家.exe` 在跑就提示「请先关闭」，关掉后点「重试」直接继续，不用重开安装包；安装失败时完成页也给「重试安装」；
 - 写 HKCU 卸载项，在「设置 → 应用」里能正常卸载；**安装目录与开始菜单都创建「卸载 音序管家」快捷方式**，双击即进入卸载流程（安装目录那个始终创建，不依赖快捷方式选项）；
 - 桌面与开始菜单快捷方式可取消；
 - 卸载由主程序 `--uninstall` 完成：先把 `data/`（配置、日志、**备份的原始音频**）
@@ -427,8 +429,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.2.2-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.2.2-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.2.3-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.2.3-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -436,6 +438,8 @@ The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile 
 The **installer** is a three-page wizard (welcome/license → choose directory → progress) written in PySide6:
 
 - Installs to `%LOCALAPPDATA%\Programs\SeqAudioManager`, **no admin rights required**;
+- **Detects the install mode automatically**: no registry entry → fresh install; same version present → repair; older version present → upgrade (reuses the original directory, always keeping config, logs and backups under `data/`);
+- **Refuses to run while the app is open**: before touching any file it enumerates processes and matches their full image path (not just the process name); if `音序管家.exe` is running it asks you to close it and offers a **Retry** button — no need to restart the installer. A failed install also shows "Retry install";
 - Writes an HKCU uninstall entry (visible in Settings → Apps), and creates an **"Uninstall SeqAudio Manager" shortcut in both the install directory and the Start menu** — double-click it to start uninstalling (the install-directory shortcut is always created, independent of the shortcut options);
 - Desktop and Start-menu shortcuts are optional;
 - Uninstall runs through the main program's `--uninstall`: it moves `data/` (config, logs, **backed-up original audio**) to `%APPDATA%` first, then removes the install directory — reversing the order would lose the backups;

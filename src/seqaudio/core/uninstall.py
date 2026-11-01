@@ -59,7 +59,16 @@ def uninstall_shortcut() -> Path:
 
 
 def build_uninstall_script(install_dir: Path, *, keep_data: bool) -> str:
-    """生成卸载用的 PowerShell 脚本。"""
+    """生成卸载用的 PowerShell 脚本。
+
+    为什么不用一行 ``Remove-Item`` 了事
+    ----------------------------------
+    ``Remove-Item`` 会走 PowerShell 的命令解析与安全策略：某些环境把删除
+    重定向到回收站、某些安全软件会拦下来，文件就删不掉。快捷方式与目录都
+    遇到过这种情况（不报错，只是没删）。所以这里先 ``Remove-Item``，失败
+    再用 .NET 的 ``File.Delete`` / ``Directory.Delete`` 兜底，并重试几轮 ——
+    卸载完还能看见残留图标，是用户最能直接感知的「卸载不干净」。
+    """
     install = str(install_dir).replace("'", "''")
     lines = [
         "$ErrorActionPreference = 'SilentlyContinue'",
@@ -67,7 +76,8 @@ def build_uninstall_script(install_dir: Path, *, keep_data: bool) -> str:
         f"$install = '{install}'",
     ]
     if keep_data:
-        # 先把 data 挪走，再删目录：反过来就再也找不回备份了
+        # 先把 data 挪走，再删目录：反过来就再也找不回备份了。
+        # 放在函数定义之前，保证「复制」一定早于任何删除动作。
         lines += [
             "$data = Join-Path $install 'data'",
             "$dest = Join-Path $env:APPDATA 'SeqAudioManager'",
@@ -76,12 +86,34 @@ def build_uninstall_script(install_dir: Path, *, keep_data: bool) -> str:
             "  Copy-Item -Path (Join-Path $data '*') -Destination $dest -Recurse -Force",
             "}",
         ]
+
     lines += [
-        "Remove-Item -LiteralPath $install -Recurse -Force",
+        "function Remove-FileHard($path) {",
+        "  if (-not (Test-Path -LiteralPath $path)) { return }",
+        "  for ($i = 0; $i -lt 5; $i++) {",
+        "    try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { }",
+        "    if (-not (Test-Path -LiteralPath $path)) { return }",
+        "    try { [System.IO.File]::SetAttributes($path, [System.IO.FileAttributes]::Normal) } catch { }",
+        "    try { [System.IO.File]::Delete($path) } catch { }",
+        "    if (-not (Test-Path -LiteralPath $path)) { return }",
+        "    Start-Sleep -Milliseconds 400",
+        "  }",
+        "}",
+        "function Remove-TreeHard($path) {",
+        "  if (-not (Test-Path -LiteralPath $path)) { return }",
+        "  for ($i = 0; $i -lt 5; $i++) {",
+        "    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop } catch { }",
+        "    if (-not (Test-Path -LiteralPath $path)) { return }",
+        "    try { [System.IO.Directory]::Delete($path, $true) } catch { }",
+        "    if (-not (Test-Path -LiteralPath $path)) { return }",
+        "    Start-Sleep -Milliseconds 400",
+        "  }",
+        "}",
+        "Remove-TreeHard $install",
         f"Remove-Item -LiteralPath 'HKCU:\\{UNINSTALL_KEY}' -Recurse -Force",
-        f"Remove-Item -LiteralPath '{desktop_shortcut()}' -Force",
-        f"Remove-Item -LiteralPath '{start_menu_shortcut()}' -Force",
-        f"Remove-Item -LiteralPath '{uninstall_shortcut()}' -Force",
+        f"Remove-FileHard '{desktop_shortcut()}'",
+        f"Remove-FileHard '{start_menu_shortcut()}'",
+        f"Remove-FileHard '{uninstall_shortcut()}'",
     ]
     return "\n".join(lines)
 

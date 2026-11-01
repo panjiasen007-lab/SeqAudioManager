@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -1330,6 +1331,100 @@ class TestInstallerExtract(unittest.TestCase):
             self.assertEqual((target / self.installer.EXE_NAME).read_bytes(), b"NEW-EXE")
             self.assertTrue((target / "_internal" / "new.dll").exists())
             self.assertFalse((target / self.ARC_ROOT).exists())
+
+
+class TestInstallerRunningGuard(unittest.TestCase):
+    """安装前拦住「程序正在运行」，关掉后可以重试（V1.2.3）。"""
+
+    def setUp(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT / "installer"))
+        try:
+            import installer
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"无法导入安装器：{exc}")
+        self.installer = installer
+
+    def test_running_instances_matches_full_path(self) -> None:
+        """按完整路径比对：同名但不同目录的可执行文件不算占用。"""
+        self.assertEqual(
+            self.installer.running_instances(Path(r"C:\other\notepad.exe")), []
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("SEQAUDIO_E2E") == "1",
+        "设置 SEQAUDIO_E2E=1 才启动真实进程（较慢）",
+    )
+    def test_running_instances_finds_running_app(self) -> None:
+        """真实启动便携版，应能被按路径找到，关掉后消失。"""
+        import subprocess
+        import time
+
+        exe = ROOT / "build" / "portable" / "dist" / "音序管家" / "音序管家.exe"
+        if not exe.exists():
+            self.skipTest("没有便携版可执行文件")
+        self.assertEqual(self.installer.running_instances(exe), [])
+
+        proc = subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        try:
+            deadline = time.time() + 60
+            pids: list[int] = []
+            while time.time() < deadline:
+                pids = self.installer.running_instances(exe)
+                if pids:
+                    break
+                time.sleep(0.5)
+            self.assertTrue(pids, "应检测到正在运行的便携版")
+            self.assertEqual(self.installer.blocking_pids(exe.parent), pids)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        deadline = time.time() + 20
+        while time.time() < deadline and self.installer.running_instances(exe):
+            time.sleep(0.3)
+        self.assertEqual(self.installer.running_instances(exe), [])
+
+    def test_wait_until_closed_retries_until_gone(self) -> None:
+        """占用 → 用户点重试 → 关掉 → 继续。"""
+        sequence = [[101], [202], []]
+        asked: list[list[int]] = []
+        original = self.installer.running_instances
+        self.installer.running_instances = lambda exe: sequence.pop(0) if sequence else []
+        try:
+            def ask(pids, action):
+                asked.append(list(pids))
+                return True
+
+            ok = self.installer.wait_until_closed(Path(r"C:\nonexistent"), "升级", ask=ask)
+        finally:
+            self.installer.running_instances = original
+        self.assertTrue(ok)
+        self.assertEqual(asked, [[101], [202]])
+
+    def test_wait_until_closed_cancel(self) -> None:
+        original = self.installer.running_instances
+        self.installer.running_instances = lambda exe: [7]
+        try:
+            ok = self.installer.wait_until_closed(
+                Path(r"C:\nonexistent"), "安装", ask=lambda pids, action: False
+            )
+        finally:
+            self.installer.running_instances = original
+        self.assertFalse(ok)
+
+    def test_wait_until_closed_no_need_to_ask(self) -> None:
+        original = self.installer.running_instances
+        self.installer.running_instances = lambda exe: []
+        try:
+            ok = self.installer.wait_until_closed(Path(r"C:\nonexistent"), "安装")
+        finally:
+            self.installer.running_instances = original
+        self.assertTrue(ok)
 
 
 class TestAuthenticityOldCD(unittest.TestCase):

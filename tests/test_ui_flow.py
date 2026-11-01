@@ -168,6 +168,57 @@ def main() -> int:
         print("✗ 批量编辑未记录变更字段")
         ok = False
 
+    # 安装器「请先关闭 / 重试」对话框：文案、按钮与返回值（V1.2.3）
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    sys.path.insert(0, str(ROOT / "installer"))
+    import installer as installer_mod  # noqa: E402
+
+    captured: dict[str, object] = {}
+
+    def grab_and_click(label: str):
+        def run() -> None:
+            for widget in QApplication.topLevelWidgets():
+                if isinstance(widget, QMessageBox) and widget.isVisible():
+                    captured["title"] = widget.windowTitle()
+                    captured["text"] = widget.text()
+                    captured["info"] = widget.informativeText()
+                    captured["buttons"] = [b.text() for b in widget.buttons()]
+                    for button in widget.buttons():
+                        if button.text() == label:
+                            button.click()
+                            return
+
+        return run
+
+    QTimer.singleShot(500, grab_and_click("重试"))
+    retry_result = installer_mod.ask_retry([4321], "升级")
+    first = dict(captured)
+    captured.clear()
+
+    QTimer.singleShot(500, grab_and_click("取消"))
+    cancel_result = installer_mod.ask_retry([4321], "升级")
+
+    print("  安装器对话框：", first.get("title"), "|", first.get("buttons"))
+    if retry_result is not True:
+        print("✗ 点「重试」应返回 True")
+        ok = False
+    if cancel_result is not False:
+        print("✗ 点「取消」应返回 False")
+        ok = False
+    if "音序管家" not in str(first.get("title", "")):
+        print("✗ 对话框标题应包含软件名：", first.get("title"))
+        ok = False
+    if "升级" not in str(first.get("text", "")):
+        print("✗ 对话框正文应说明当前动作：", first.get("text"))
+        ok = False
+    if "PID 4321" not in str(first.get("info", "")):
+        print("✗ 对话框应列出占用 PID：", first.get("info"))
+        ok = False
+    if first.get("buttons") != ["重试", "取消"]:
+        print("✗ 按钮应为「重试 / 取消」：", first.get("buttons"))
+        ok = False
+
     window.close()
     shutil.rmtree(tmp, ignore_errors=True)
     print("\n界面流程测试：" + ("通过" if ok else "失败"))

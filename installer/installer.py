@@ -208,6 +208,121 @@ def install_mode(installed_version: str) -> str:
     return "upgrade"
 
 
+def running_instances(exe: Path) -> list[int]:
+    """返回可执行文件路径等于 ``exe`` 的正在运行进程 PID。
+
+    只按进程名（tasklist）判断会误伤改了名的副本，所以用
+    EnumProcesses + QueryFullProcessImageNameW 逐个比对完整路径。
+    拿不到句柄的进程（系统进程、权限不足）直接跳过。
+    """
+    if os.name != "nt" or not Path(exe).exists():
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:  # noqa: BLE001
+        return []
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    target = os.path.normcase(str(exe))
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    except OSError:
+        return []
+
+    # 必须声明参数类型：64 位下 HANDLE 是 8 字节，不声明会被当 32 位 int
+    # 传递而截断，OpenProcess 拿到坏句柄后全部失败、什么都查不到。
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    psapi.EnumProcesses.argtypes = [
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    psapi.EnumProcesses.restype = wintypes.BOOL
+
+    count = 1024
+    while True:
+        pids = (wintypes.DWORD * count)()
+        needed = wintypes.DWORD()
+        if not psapi.EnumProcesses(
+            pids, ctypes.sizeof(pids), ctypes.byref(needed)
+        ):
+            return []
+        total = needed.value // ctypes.sizeof(wintypes.DWORD)
+        if total < count:
+            break
+        count *= 2  # 进程数超过缓冲，翻倍重来
+
+    found: list[int] = []
+    buf = ctypes.create_unicode_buffer(32768)
+    for index in range(min(total, count)):
+        pid = int(pids[index])
+        if pid <= 0:
+            continue
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            continue
+        try:
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                if os.path.normcase(buf.value) == target:
+                    found.append(pid)
+        finally:
+            kernel32.CloseHandle(handle)
+    return found
+
+
+def blocking_pids(target: Path) -> list[int]:
+    """安装前检查：目标目录里的主程序是否正在运行。"""
+    return running_instances(Path(target) / EXE_NAME)
+
+
+def wait_until_closed(target: Path, action: str, ask=None) -> bool:
+    """等主程序退出后再继续安装。
+
+    ``ask(pids, action)`` 负责问用户：返回 True 表示「重试」、False 表示放弃。
+    把它做成参数而不是写死 QMessageBox，是为了让这段循环能被单测覆盖
+    （GUI 对话框本身没法在无人值守里点）。
+    """
+    exe = Path(target) / EXE_NAME
+    while True:
+        pids = running_instances(exe)
+        if not pids:
+            return True
+        if not (ask or ask_retry)(pids, action):
+            return False
+
+
+def ask_retry(pids: list[int], action: str) -> bool:
+    """弹「请先关闭」对话框；用户点「重试」返回 True。"""
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle(f"请先关闭{APP_NAME}")
+    box.setText(f"{APP_NAME} 正在运行，暂时无法{action}。")
+    box.setInformativeText(
+        "占用进程："
+        + "、".join(f"PID {pid}" for pid in pids)
+        + "\n\n请关闭软件窗口（托盘图标也要退出）后点「重试」继续；"
+        "点「取消」退出安装。"
+    )
+    retry = box.addButton("重试", QMessageBox.AcceptRole)
+    box.addButton("取消", QMessageBox.RejectRole)
+    box.setDefaultButton(retry)
+    box.exec()
+    return box.clickedButton() is retry
+
+
 class _Progress:
     """把 py7zr 的逐文件回调折算成百分比。"""
 
@@ -341,6 +456,7 @@ class Installer(QWidget):
         self.setMinimumSize(660, 500)
 
         self.worker: Optional[InstallWorker] = None
+        self.install_failed = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 18)
@@ -560,6 +676,10 @@ class Installer(QWidget):
             return
         index = self.stack.currentIndex()
         self.btn_back.setVisible(index == 1)
+        # 进度页会禁用「取消」、完成页会隐藏它，退回其它页时必须恢复，
+        # 否则失败后既退不回也退不出
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setVisible(index != 3 or self.install_failed)
         if index == 0:
             self.btn_next.setText("下一步")
             self.btn_next.setEnabled(self.accept_check.isChecked())
@@ -570,9 +690,8 @@ class Installer(QWidget):
             self.btn_next.setEnabled(False)
             self.btn_cancel.setEnabled(False)
         else:
-            self.btn_cancel.setVisible(False)
             self.btn_back.setVisible(False)
-            self.btn_next.setText("完成")
+            self.btn_next.setText("重试安装" if self.install_failed else "完成")
             self.btn_next.setEnabled(True)
 
     def _go_back(self) -> None:
@@ -588,6 +707,11 @@ class Installer(QWidget):
             self._start_install()
             return
         elif index == 3:
+            if self.install_failed:
+                # 回到选项页：可以改目录，也可以直接再点「安装」重试
+                self.stack.setCurrentIndex(1)
+                self._refresh_buttons()
+                return
             if self.launch_check.isChecked():
                 self._launch()
             self.close()
@@ -610,10 +734,23 @@ class Installer(QWidget):
             self.space_label.setText("")
         self._refresh_buttons()
 
+    def _ensure_not_running(self) -> bool:
+        """安装前确认主程序没在跑；在跑就提示关闭，并给「重试」。
+
+        Windows 上正在运行的 exe 与 _internal 下的 dll 都被占用，
+        强行覆盖只会失败。与其事后报一句「拒绝访问」，不如在动手前拦住，
+        让用户关掉窗口再点重试 —— 不用重开安装包、不用重选目录。
+        """
+        action = {"repair": "修复", "upgrade": "升级"}.get(self.mode, "安装")
+        return wait_until_closed(self.target, action, ask=lambda pids, a: ask_retry(pids, a))
+
     def _start_install(self) -> None:
         payload = resource_path(PAYLOAD)
         if not payload.exists():
             QMessageBox.critical(self, "安装包损坏", f"找不到安装数据：{payload}")
+            return
+        # 程序还在跑就拦下来，让用户关掉后重试
+        if not self._ensure_not_running():
             return
         # 只有全新安装才需要确认「目录非空」；修复/升级本来就是覆盖安装，
         # 原安装目录里必然有文件，再弹一次只会让用户多点一下。
@@ -642,11 +779,18 @@ class Installer(QWidget):
         self.file_label.setText(name)
 
     def _on_finished(self, ok: bool, message: str) -> None:
+        self.install_failed = not ok
         if not ok:
             self.progress_label.setText("安装失败")
             self.done_title.setText("安装失败")
             self.done_title.setStyleSheet("font-size:18px; font-weight:700; color:#f87171;")
-            self.done_text.setText(message)
+            hint = ""
+            if "占用" in message or "Access" in message or "PermissionError" in message:
+                hint = (
+                    f"\n\n提示：请关闭正在运行的 {APP_NAME}（含托盘图标）"
+                    "后点「重试安装」。"
+                )
+            self.done_text.setText(message + hint)
             self.stack.setCurrentIndex(3)
             self._refresh_buttons()
             return
@@ -723,7 +867,13 @@ def silent_install(target: Path, *, shortcuts: bool = True) -> int:
     report["mode"] = install_mode(installed_version)
     payload = resource_path(PAYLOAD)
     report["payload"] = str(payload)
-    if not payload.exists():
+    # 程序还在跑就明确拒绝，别让用户对着「拒绝访问」猜原因。
+    # 返回码 2 专指「被占用」，脚本可据此提示关闭后重试。
+    running = blocking_pids(target)
+    if running:
+        report["error"] = "program_running"
+        report["running_pids"] = running
+    elif not payload.exists():
         report["error"] = "安装数据缺失"
     else:
         try:
@@ -773,6 +923,8 @@ def silent_install(target: Path, *, shortcuts: bool = True) -> int:
 
     out = Path(tempfile.gettempdir()) / "seqaudio_install.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if report.get("error") == "program_running":
+        return 2  # 专用返回码：程序在运行，关闭后重试即可
     return 0 if report["ok"] else 1
 
 
