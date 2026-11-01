@@ -247,6 +247,69 @@ def _make_callback(progress: _Progress):
     return Callback()
 
 
+def _merge_tree(source: Path, target: Path) -> None:
+    """递归把 ``source`` 的内容合并进 ``target``，同名文件覆盖。"""
+    for item in source.iterdir():
+        destination = target / item.name
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            _merge_tree(item, destination)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+
+
+def extract_payload(payload: Path, target: Path, on_progress=None) -> None:
+    """把随包 7z 的内容铺到 ``target`` 根目录（全新 / 修复 / 升级通用）。
+
+    不能直接 ``extractall(path=target)``：便携压缩包带一层顶层目录
+    （``音序管家-vX.Y.Z-x86-x64/``），直接解压会在安装目录里再套一层。
+    旧实现靠「target 下只有一个子目录」来决定要不要把文件提上来，
+    但**升级安装时 target 里已有旧文件，这个条件永远不成立**，于是新版本
+    被留在子目录里、根目录的 exe 还是旧版 —— 表现为「提示升级成功、
+    版本号写成了新版，实际跑的还是旧程序」。
+
+    现在的做法：先解压到临时目录，定位压缩包内的单一顶层目录，
+    清空 ``_internal`` 后整体覆盖到 target；``data/``（配置、日志、备份）
+    与快捷方式不在压缩包内，天然保留。
+    """
+    import py7zr
+
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="seqaudio_setup_") as tmp:
+        stage = Path(tmp)
+        with py7zr.SevenZipFile(payload, "r") as archive:
+            names = archive.getnames()
+            progress = _Progress(len(names), on_progress) if on_progress else None
+            archive.extractall(
+                path=stage,
+                callback=_make_callback(progress) if progress else None,
+            )
+
+        children = list(stage.iterdir())
+        source = children[0] if len(children) == 1 and children[0].is_dir() else stage
+
+        if on_progress is not None:
+            on_progress(99, "整理文件…")
+
+        # 程序文件整体替换，否则已删除的模块会残留在 _internal 里与新版本混用
+        internal = target / "_internal"
+        if internal.exists():
+            try:
+                shutil.rmtree(internal)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"旧程序文件被占用，请先关闭 {APP_NAME} 再安装：{exc}"
+                ) from exc
+
+        # 清理历史安装器留下的整包副本（旧 bug 会在安装目录里塞一层子目录）
+        for stale in target.glob(f"{APP_NAME}-v*"):
+            if stale.is_dir():
+                shutil.rmtree(stale, ignore_errors=True)
+
+        _merge_tree(source, target)
+
+
 class InstallWorker(QThread):
     progressed = Signal(int, str)
     finished_install = Signal(bool, str)
@@ -258,38 +321,10 @@ class InstallWorker(QThread):
 
     def run(self) -> None:
         try:
-            import py7zr
-
-            self.target.mkdir(parents=True, exist_ok=True)
-            with py7zr.SevenZipFile(self.payload, "r") as archive:
-                names = archive.getnames()
-                progress = _Progress(len(names), self.progressed.emit)
-                archive.extractall(path=self.target, callback=_make_callback(progress))
-
-            # 压缩包内通常带一层顶层目录（便携版就是这个文件夹），
-            # 安装时需要把内容提到 target 根下
-            self.progressed.emit(99, "整理文件…")
-            self._flatten()
+            extract_payload(self.payload, self.target, self.progressed.emit)
             self.finished_install.emit(True, "")
         except Exception as exc:  # noqa: BLE001
             self.finished_install.emit(False, f"{type(exc).__name__}: {exc}")
-
-    def _flatten(self) -> None:
-        children = [p for p in self.target.iterdir()]
-        if len(children) != 1 or not children[0].is_dir():
-            return
-        inner = children[0]
-        if (self.target / EXE_NAME).exists():
-            return
-        for item in inner.iterdir():
-            destination = self.target / item.name
-            if destination.exists():
-                continue
-            shutil.move(str(item), str(destination))
-        try:
-            inner.rmdir()
-        except OSError:
-            pass
 
 
 class Installer(QWidget):
@@ -692,19 +727,21 @@ def silent_install(target: Path, *, shortcuts: bool = True) -> int:
         report["error"] = "安装数据缺失"
     else:
         try:
-            import py7zr
-
             target.mkdir(parents=True, exist_ok=True)
             started = _time.time()
-            with py7zr.SevenZipFile(payload, "r") as archive:
-                archive.extractall(path=target)
-            worker = InstallWorker(payload, target)
-            worker._flatten()
+            extract_payload(payload, target)
             report["extract_seconds"] = round(_time.time() - started, 1)
 
             exe = target / EXE_NAME
             report["exe"] = str(exe)
             report["exe_exists"] = exe.exists()
+            # 记录 exe 大小与时间，便于验证升级后确实换成了新程序
+            if exe.exists():
+                stat = exe.stat()
+                report["exe_size"] = stat.st_size
+                report["exe_mtime"] = _time.strftime(
+                    "%Y-%m-%d %H:%M:%S", _time.localtime(stat.st_mtime)
+                )
             # 安装目录卸载入口：始终创建，不依赖 shortcuts 开关
             report["local_uninstall_lnk"] = create_shortcut(
                 target / f"卸载 {APP_NAME}.lnk",

@@ -1249,6 +1249,89 @@ class TestInstallerMode(unittest.TestCase):
         self.assertEqual(i._parse_version("1.1"), (1, 1))
 
 
+class TestInstallerExtract(unittest.TestCase):
+    """升级安装必须真的覆盖程序文件（V1.2.2 修复）。
+
+    旧实现靠「target 下只有一个子目录」判断要不要把压缩包的顶层目录拍平，
+    升级安装时 target 里已有旧文件，条件永远不成立：新版本被留在
+    ``音序管家-vX.Y.Z/`` 子目录里，根目录的 exe 还是旧版。
+    """
+
+    ARC_ROOT = "音序管家-v9.9.9"
+
+    def setUp(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT / "installer"))
+        try:
+            import installer
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"无法导入安装器：{exc}")
+        try:
+            import py7zr  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"缺少 py7zr：{exc}")
+        self.installer = installer
+
+    def _make_payload(self, path: Path, exe_bytes: bytes, dll_bytes: bytes) -> None:
+        """造一个和真实发行包同构的 7z：带一层顶层目录。"""
+        import py7zr
+
+        src = path.parent / "_stage"
+        inner = src / self.ARC_ROOT
+        inner.mkdir(parents=True, exist_ok=True)
+        (inner / self.installer.EXE_NAME).write_bytes(exe_bytes)
+        (inner / "_internal").mkdir(exist_ok=True)
+        (inner / "_internal" / "new.dll").write_bytes(dll_bytes)
+        (inner / "使用说明.txt").write_text("新版说明", encoding="utf-8")
+        with py7zr.SevenZipFile(path, "w") as archive:
+            archive.writeall(inner, arcname=self.ARC_ROOT)
+
+    def test_upgrade_overwrites_old_files(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "payload.7z"
+            self._make_payload(payload, b"NEW-EXE", b"NEW-DLL")
+
+            target = root / "installed"
+            (target / "_internal").mkdir(parents=True)
+            (target / "data").mkdir(parents=True)
+            (target / self.installer.EXE_NAME).write_bytes(b"OLD-EXE")
+            (target / "_internal" / "old.dll").write_bytes(b"OLD-DLL")
+            (target / "data" / "config.json").write_text('{"keep": true}', encoding="utf-8")
+            # 旧 bug 留下的整包副本
+            stale = target / "音序管家-v1.2.1-x86-x64"
+            stale.mkdir()
+            (stale / "音序管家.exe").write_bytes(b"STALE")
+
+            self.installer.extract_payload(payload, target)
+
+            exe = target / self.installer.EXE_NAME
+            self.assertEqual(exe.read_bytes(), b"NEW-EXE")           # 程序被真的换成新版
+            self.assertTrue((target / "_internal" / "new.dll").exists())
+            self.assertFalse((target / "_internal" / "old.dll").exists())  # 旧模块不残留
+            self.assertEqual((target / "data" / "config.json").read_text(encoding="utf-8"), '{"keep": true}')
+            self.assertFalse(stale.exists())                          # 历史残留被清理
+            self.assertFalse((target / self.ARC_ROOT).exists())        # 不再套一层子目录
+
+    def test_fresh_install_flattens_root_dir(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "payload.7z"
+            self._make_payload(payload, b"NEW-EXE", b"NEW-DLL")
+            target = root / "fresh"
+
+            self.installer.extract_payload(payload, target)
+
+            self.assertEqual((target / self.installer.EXE_NAME).read_bytes(), b"NEW-EXE")
+            self.assertTrue((target / "_internal" / "new.dll").exists())
+            self.assertFalse((target / self.ARC_ROOT).exists())
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 
