@@ -85,13 +85,19 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
                         "ko": "가짜 의심", "ru": "Подозрение на фейк", "fr": "Faux suspecté", "de": "Verdacht"},
     "verdict_upsampled": {"zh_CN": "疑似升频", "zh_TW": "疑似升頻", "en": "Upsampled", "ja": "アップサンプリング疑い",
                           "ko": "업샘플 의심", "ru": "Апсемплинг", "fr": "Suréchantillonné", "de": "Hochskaliert"},
+    "verdict_upscaled": {"zh_CN": "疑似升位深", "zh_TW": "疑似升位深", "en": "Bit depth upscaled",
+                         "ja": "ビット深度の水増し疑い", "ko": "비트 심도 업스케일 의심",
+                         "ru": "Апскейлинг разрядности", "fr": "Résolution augmentée", "de": "Bit-Tiefe hochskaliert"},
+    "verdict_fake_dsd": {"zh_CN": "疑似假 DSD", "zh_TW": "疑似假 DSD", "en": "Suspected fake DSD",
+                         "ja": "偽 DSD の疑い", "ko": "가짜 DSD 의심", "ru": "Подозрение на фейк DSD",
+                         "fr": "Faux DSD suspecté", "de": "Verdacht auf Fake-DSD"},
     "verdict_unknown": {"zh_CN": "无法判定", "zh_TW": "無法判定", "en": "Unknown", "ja": "判定不能",
                         "ko": "판정 불가", "ru": "Не определено", "fr": "Inconnu", "de": "Unbekannt"},
 
     # 判定筛选
     "filter_all": {"zh_CN": "全部判定", "zh_TW": "全部判定", "en": "All verdicts", "ja": "すべて",
                    "ko": "전체", "ru": "Все", "fr": "Tous", "de": "Alle"},
-    "filter_suspect": {"zh_CN": "可疑（升频/低码）", "zh_TW": "可疑（升頻/低碼）", "en": "Suspicious",
+    "filter_suspect": {"zh_CN": "可疑（升频/升位深/低码）", "zh_TW": "可疑（升頻/升位深/低碼）", "en": "Suspicious",
                        "ja": "疑わしい", "ko": "의심", "ru": "Подозрительные", "fr": "Suspects", "de": "Verdächtig"},
     "filter_any": {"zh_CN": "假无损 + 可疑", "zh_TW": "假無損 + 可疑", "en": "Fake + Suspect",
                    "ja": "偽物+疑い", "ko": "가짜+의심", "ru": "Фейк + подозрение", "fr": "Faux + suspects", "de": "Fake + Verdacht"},
@@ -154,6 +160,7 @@ def tr_verdict(verdict: str) -> str:
     mapping = {
         "真无损": "verdict_true", "真 DSD": "verdict_dsd", "假无损": "verdict_fake",
         "疑似假无损": "verdict_suspect", "疑似升频": "verdict_upsampled",
+        "疑似升位深": "verdict_upscaled", "疑似假 DSD": "verdict_fake_dsd",
         "无法判定": "verdict_unknown",
     }
     key = mapping.get(verdict)

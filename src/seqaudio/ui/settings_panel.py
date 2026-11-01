@@ -275,7 +275,7 @@ class SettingsPanel(QWidget):
 
         self.suspect_check = QCheckBox("清理时包含「疑似」项")
         self.suspect_check.setToolTip(
-            "勾选：连「疑似假无损 / 疑似升频」一起清理\n"
+            "勾选：连「疑似假无损 / 疑似升频 / 疑似升位深」一起清理\n"
             "取消：只清理明确判定为假无损的文件（更保守）"
         )
         self.suspect_check.toggled.connect(self._notify)

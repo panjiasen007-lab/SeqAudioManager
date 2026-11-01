@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.3-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.4-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -86,7 +86,7 @@ src/seqaudio/
 │   ├── rename.py           模板重命名（非法字符、保留名、循环改名安全）
 │   ├── lyrics.py           LRC 清洗、同步歌词判定、同名 .lrc 读写
 │   ├── integrity.py        FLAC / DSDIFF 结构校验
-│   ├── authenticity.py     真假无损鉴定（频谱截止 + 陡度 + 位深 + DSD 噪声整形）
+│   ├── authenticity.py     真假无损鉴定（转码/升采样/升位深三类判据 + DSD 噪声整形）
 │   ├── quarantine.py       隔离区：回收站 / 隔离 / 彻底删除，manifest 可还原
 │   ├── uninstall.py        卸载：延时删除 + 数据迁移
 │   ├── report.py           CSV 报表（UTF-8-SIG，Excel 直开不乱码）
@@ -179,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.2.3-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.2.3-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.2.4-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.2.4-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -211,18 +211,37 @@ Visual Studio Build Tools。
 
 ## 真假无损鉴定
 
-针对「拿 MP3 转码冒充无损」「44.1kHz 升频冒充高解析」这两类常见坑。
+针对三类常见的「注水」：**转码**（MP3 冒充无损）、**升采样**（44.1kHz 冒充 48/96kHz）、
+**升位深**（16bit 冒充 24bit）。三类问题独立成立，可以同时存在。
 
-原理是有损编码必然砍高频，在频谱上留下悬崖：128kbps 切在 16kHz、320kbps 切在 20kHz，
-而 CD 真无损平滑延伸到 22.05kHz。所以取 4 个时间点各解码 2 秒，做 FFT 后从 Nyquist
-往回扫，找能量跌破阈值的点，再结合**下降陡度**与**有效位深**判定。
+判据的取舍参考了 Lossless Audio Checker（AES 2015）、Derrien（JAES 2019）与
+2026 年的几个开源实现（lossless-checker、FlacCompagnon、audiojs measure-lossy）。
+最重要的一条结论是：**截止频率只是证据，不是结论** —— 母带自然滚降与编码器低通在
+频谱上无法用单一阈值分开，所以三类问题要各自找**不可伪造的物理事实**。
+
+| 判据 | 物理事实 | 用来判 |
+|---|---|---|
+| 带宽 + 扩展带能量 | 升采样后原 Nyquist 之上只剩插值残余（-100dB 以下），真母带仍有 -60~-80dB 内容 | 升采样 |
+| 样本是否越过 16bit 上限 | 16bit 内容零填充成 24bit 后，样本绝对值永远 ≤ 32767 | 升位深 |
+| 截止之上是否数字静音 | 编码器砍完高频留下数字空白（-100dB）；磁带/母带总有模拟底噪（-70~-85dB） | 转码 |
+| 截止位置 + 陡度 | 128k≈16kHz、192k≈18.5kHz、320k≈20kHz、CD≈22.05kHz | 转码分档 |
+| 陡度（dB/oct） | 编码器 >60dB/oct，话筒/磁带更平缓 | 辅助 |
+| 频谱空洞 / sfb21 凹陷 | 低码率编码器「位不够」留下的窄凹，MP3 在 16kHz 有特征凹陷 | 辅助证据 |
+
+实现细节上还有两点：
+
+- **截止的参考系取「峰值相对」与「主体中位数相对」的较严格者**。只用峰值，低频能量强的
+  流行/摇滚会把编码器残留的量化噪声也算作内容（实测 128k 被读成满带宽）；只用中位数，
+  高频本来就弱的管弦/人声会被读成「早早就截止」。取交集两头都不走偏。
+- **陡度同时输出 dB/kHz 与 dB/oct**，后者便于和文献阈值对照。
 
 | 判定 | 含义 |
 |---|---|
-| 真无损 | 频谱平滑延伸到接近 Nyquist |
-| 疑似假无损 | 在 20kHz 附近断崖截止（320kbps 转码特征） |
-| 假无损 | 在 16~19kHz 截止（128/192kbps 转码特征） |
-| 疑似升频 | 采样率很高但带宽利用率不足 55% |
+| 真无损 | 带宽接近满值，无数字静音、无位深注水 |
+| 疑似假无损 | 截止之上是数字静音，但带宽仍 >85%（320kbps 特征） |
+| 假无损 | 带宽 <85% 且截止之上数字静音（128/192kbps 特征） |
+| 疑似升频 | 声明高采样率，带宽不足且扩展带为空 |
+| 疑似升位深 | 声明 24bit，但样本从未越过 16bit 上限 |
 | 真 DSD / 疑似假 DSD | 见下 |
 
 **DSD 的判据和 PCM 完全不同**（参考 check-dsd）。关键认知：**CD 转 DSD 经过调制器后
@@ -238,17 +257,24 @@ Visual Studio Build Tools。
 基带截止只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
 噪声整形成立、基带又不在 CD 边界截止，才判真 DSD。
 
-**验证过的样本**（同一段音乐）：
+FlacCompagnon 独立测到的数字可以互相印证：真 DSD 在 22.05kHz 只有约 3dB 台阶，
+PCM 转制有约 50dB 悬崖，判据是 ≥30dB —— 与这里的「数字静音」等价。
+
+**实测样本**（真实音乐，非合成）：
 
 ```
-真无损 WAV 44.1k    → 真无损      截止 21.7kHz / 上限 22.1kHz
-128kbps 转码        → 假无损      截止 16.1kHz
-320kbps 转码        → 疑似假无损  截止 20.0kHz（陡度 6dB/kHz）
-44.1k 升频到 96k    → 疑似升频    截止 23.3kHz / 上限 48.0kHz（带宽利用率 49%）
-真 DSD64 母带       → 真 DSD      40kHz 以上能量 -14dB
+24bit/48kHz（实为 44.1k 升采样）→ 疑似升频    带宽 92% / 扩展带 -140dB
+同上转 192k MP3                 → 假无损      带宽 84% / 截止之上 -101dB（数字静音）
+同上转 320k MP3                 → 疑似假无损  带宽 92% / 截止之上 -101dB
+同上降回 44.1kHz/24bit          → 真无损      带宽 99%
+16bit 内容装进 24bit 容器        → 疑似升位深  峰值 -4.9dBFS，未越过 16bit 上限
+周杰伦 CD 转制 DFF              → 疑似假 DSD  基带 21.88kHz + 22.5~24kHz 数字静音
 ```
 
 速度约 0.3~1 秒/首（4 次解码并行），一千首约 5 分钟。
+
+**已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
+判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
 
 ## 安全设计（无损部分最关键）
 
@@ -293,7 +319,7 @@ Visual Studio Build Tools。
 - 数据源优先级、限流、熔断、缓存
 
 **P1+（已实现）**
-- 真假无损鉴定 ✅（频谱截止 + 陡度 + 有效位深 + DSD 噪声整形判据，多段中位数稳健判定）
+- 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、16bit 上限检查、频谱空洞与 sfb21、DSD 噪声整形；多段中位数稳健判定）
 - 一键切换 7 套主题 ✅（深空/春/夏/秋/冬/黑白极简/太极）
 - 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，首屏核心字符串已翻译）
 - 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云→QQ音乐；歌词 LRCLIB→网易云→QQ音乐；封面 CAA→远程）
@@ -429,8 +455,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.2.3-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.2.3-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.2.4-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.2.4-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -451,16 +477,41 @@ See `installer/installer.py` for the installer and `src/seqaudio/core/uninstall.
 
 ## Fake-lossless detection
 
-Targets two common scams: MP3 transcodes disguised as lossless, and 44.1 kHz upsampled as "hi-res".
+Targets three common "watering down" tricks: **transcoding** (MP3 posing as lossless),
+**upsampling** (44.1 kHz sold as 48/96 kHz) and **bit-depth padding** (16-bit sold as 24-bit).
+They are judged independently and can co-exist.
 
-Lossy encoding always cuts the high frequencies, leaving a cliff on the spectrum: 128 kbps cuts at 16 kHz, 320 kbps at 20 kHz, while genuine CD lossless extends smoothly to 22.05 kHz. It decodes 2 s at 4 time points, runs FFT, then scans backward from Nyquist to find where the energy drops below a threshold — combined with **drop steepness** and **effective bit depth**.
+The criteria follow Lossless Audio Checker (AES 2015), Derrien (JAES 2019) and several
+2026 open-source implementations (lossless-checker, FlacCompagnon, audiojs measure-lossy).
+The most important conclusion: **the cutoff frequency is evidence, not a verdict** — a
+master's natural roll-off and an encoder's low-pass cannot be separated by any single
+threshold, so each of the three problems is matched against a *physical fact that cannot
+be forged*.
+
+| Criterion | Physical fact | Detects |
+|---|---|---|
+| Bandwidth + edge energy | After upsampling, above the original Nyquist there is only interpolation residue (below −100 dB); a real master still carries −60 to −80 dB | Upsampling |
+| Samples crossing the 16-bit ceiling | 16-bit content zero-padded to 24-bit can never exceed ±32767 | Bit-depth padding |
+| Digital silence above cutoff | An encoder leaves digital blankness (below −100 dB); tape and masters always keep analogue noise floor (−70 to −85 dB) | Transcoding |
+| Cutoff position + steepness | 128k≈16 kHz, 192k≈18.5 kHz, 320k≈20 kHz, CD≈22.05 kHz | Transcode grading |
+| Steepness (dB/oct) | Encoders exceed 60 dB/oct; microphones and tape roll off far more gently | Supporting |
+| Spectral holes / sfb21 notch | Narrow gaps left where a low-bitrate encoder ran out of bits; MP3 has a characteristic notch at 16 kHz | Supporting |
+
+Two implementation details matter:
+
+- **The cutoff reference takes the stricter of "relative to spectral peak" and "relative to
+  mid-band median"**. Peak-only lets bass-heavy pop/rock read encoder residue as content
+  (a 128k transcode measured as full-band); median-only makes naturally dark orchestral or
+  vocal material look "cut off early". The intersection avoids both.
+- **Steepness is reported in both dB/kHz and dB/oct**, the latter for comparison with the literature.
 
 | Verdict | Meaning |
 |---|---|
-| Genuine lossless | Spectrum extends smoothly to near Nyquist |
-| Suspect fake | Sharp cutoff near 20 kHz (320 kbps transcode) |
-| Fake | Cutoff at 16–19 kHz (128/192 kbps transcode) |
-| Suspect upsample | High sample rate but bandwidth utilization under 55% |
+| Genuine lossless | Bandwidth near full, no digital silence, no bit-depth padding |
+| Suspect fake | Digital silence above cutoff but bandwidth still >85% (320 kbps) |
+| Fake | Bandwidth <85% with digital silence above cutoff (128/192 kbps) |
+| Suspect upsample | High declared sample rate, insufficient bandwidth, empty edge band |
+| Suspect bit-depth padding | 24-bit declared, but samples never cross the 16-bit ceiling |
 | Genuine DSD / suspect fake DSD | See below |
 
 **DSD criteria are completely different from PCM** (following check-dsd). Key insight: **a CD-sourced DSD also has noise shaping** — the modulator generates it — so ultrasonic energy alone cannot separate it from a genuine master. The real giveaway is the baseband:
@@ -471,17 +522,24 @@ Lossy encoding always cuts the high frequencies, leaving a cliff on the spectrum
 
 The baseband cutoff is scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall. Genuine DSD requires noise shaping *and* a baseband that does not stop at the CD boundary.
 
-**Verified samples** (same music):
+FlacCompagnon's independent measurement corroborates this: genuine DSD shows only a ~3 dB step across 22.05 kHz while PCM-sourced DSD shows a ~50 dB cliff, with a ≥30 dB criterion — equivalent to the "digital silence" check used here.
+
+**Verified samples** (real music, not synthetic):
 
 ```
-Genuine WAV 44.1k   → genuine lossless   cutoff 21.7 kHz / ceiling 22.1 kHz
-128 kbps transcode  → fake               cutoff 16.1 kHz
-320 kbps transcode  → suspect fake       cutoff 20.0 kHz (steepness 6 dB/kHz)
-44.1k → 96k upsample→ suspect upsample   cutoff 23.3 kHz / ceiling 48.0 kHz (utilization 49%)
-Genuine DSD64 master→ genuine DSD         −14 dB above 40 kHz
+24-bit/48 kHz (really 44.1k upsampled) → suspect upsample  bandwidth 92% / edge −140 dB
+same, transcoded to 192k MP3           → fake              bandwidth 84% / −101 dB above cutoff
+same, transcoded to 320k MP3           → suspect fake      bandwidth 92% / −101 dB above cutoff
+same, downsampled to 44.1 kHz/24-bit   → genuine lossless  bandwidth 99%
+16-bit content in a 24-bit container   → suspect padding   peak −4.9 dBFS, never crosses 16-bit
+Jay Chou CD-sourced DFF                → suspect fake DSD  baseband 21.88 kHz + digital silence 22.5–24 kHz
 ```
 
 About 0.3–1 s per track (4 parallel decodes), ~5 minutes for a thousand tracks.
+
+**Known blind spot**: Opus and transparent bitrates (Vorbis q8+) apply no low-pass wall at
+all, so no spectral method can flag them; catching those requires Derrien's quantization-lattice
+detector (a few seconds per track, not integrated yet).
 
 ## Safety design (most critical for lossless)
 

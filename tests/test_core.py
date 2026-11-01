@@ -1427,6 +1427,150 @@ class TestInstallerRunningGuard(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestAuthenticityV13(unittest.TestCase):
+    """升采样 / 升位深 / 数字静音三类判据（V1.2.4）。
+
+    这三条对应 LAC 2015 与 Derrien 2019 的做法：把「截止频率」从判决依据
+    降级为证据，改看三类各自独立的物理事实。
+    """
+
+    def setUp(self) -> None:
+        from seqaudio.core.model import AudioInfo
+
+        self.info16 = AudioInfo(
+            fmt="FLAC", lossless=True, sample_rate=44100, bit_depth=16,
+            channels=2, duration=30.0,
+        )
+        self.info24 = AudioInfo(
+            fmt="FLAC", lossless=True, sample_rate=48000, bit_depth=24,
+            channels=2, duration=30.0,
+        )
+
+    def test_digital_silence_marks_transcode(self) -> None:
+        """截止之上是数字静音（-101dB）→ 高频被编码器砍掉，不能判真无损。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 20286.0, 16.0, -75.0, 16, edge_db=-101.3, ratio=0.92
+        )
+        self.assertIn(verdict, ("假无损", "疑似假无损"), reasons)
+
+    def test_analog_noise_is_not_condemned(self) -> None:
+        """老录音截止之上有模拟底噪（-75dB），不能因截止偏低就判假。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 18500.0, 15.0, -70.0, 16, edge_db=-75.0, ratio=0.84
+        )
+        self.assertEqual(verdict, "真无损", reasons)
+
+    def test_full_bandwidth_is_true(self) -> None:
+        """带宽接近满值 → 真无损，不受数字静音判据影响。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 21850.0, 30.0, -70.0, 16, edge_db=-120.0, ratio=0.99
+        )
+        self.assertEqual(verdict, "真无损", reasons)
+
+    def test_24bit_padding_detected(self) -> None:
+        """声明 24bit 但样本从未越过 16bit 上限 → 位深注水。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 23000.0, 30.0, -70.0, 24,
+            edge_db=-90.0, ratio=0.96, above16=False, peak_dbfs=-4.9,
+        )
+        self.assertEqual(verdict, "疑似升位深", reasons)
+
+    def test_real_24bit_not_flagged(self) -> None:
+        """真 24bit：样本越过 16bit 上限，不能判位深注水。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 23000.0, 30.0, -70.0, 24,
+            edge_db=-80.0, ratio=0.96, above16=True, peak_dbfs=-1.0,
+        )
+        self.assertNotEqual(verdict, "疑似升位深", reasons)
+
+    def test_quiet_24bit_not_flagged(self) -> None:
+        """电平极低的 24bit 文件本来就用不满动态范围，不能据此判注水。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 23000.0, 30.0, -70.0, 24,
+            edge_db=-80.0, ratio=0.96, above16=False, peak_dbfs=-52.0,
+        )
+        self.assertNotEqual(verdict, "疑似升位深", reasons)
+
+    def test_upsample_by_empty_edge(self) -> None:
+        """48kHz 声明但内容止于 22kHz、扩展带全空 → 44.1k 升采样。"""
+        from seqaudio.core.authenticity import _judge
+
+        info = self.info24
+        verdict, _, reasons = _judge(
+            info, 21984.0, 30.0, -70.0, 24,
+            edge_db=-139.7, ratio=0.92, above16=True, peak_dbfs=-1.0,
+        )
+        self.assertEqual(verdict, "疑似升频", reasons)
+
+    def test_spectral_holes_detects_narrow_dips(self) -> None:
+        """4~16kHz 的窄带凹陷应被计数。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _spectral_holes
+
+        freqs = np.arange(0, 22050, 5.4)
+        db = np.full(freqs.size, -40.0)
+        # 在 6k / 9k / 12k 各挖一个 200Hz 宽、40dB 深的窄洞
+        for center in (6000.0, 9000.0, 12000.0):
+            db[(freqs > center) & (freqs < center + 200)] = -80.0
+        self.assertGreaterEqual(_spectral_holes(freqs, db), 3.0)
+
+    def test_sfb21_notch_depth(self) -> None:
+        import numpy as np
+
+        from seqaudio.core.authenticity import _sfb21_notch
+
+        freqs = np.arange(0, 22050, 5.4)
+        db = np.full(freqs.size, -40.0)
+        db[(freqs >= 15500) & (freqs <= 16800)] = -60.0   # 20dB 凹陷
+        self.assertGreater(_sfb21_notch(freqs, db), 10.0)
+
+    @unittest.skipUnless(
+        __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
+        "需要 ffmpeg",
+    )
+    def test_16bit_padded_to_24bit_file(self) -> None:
+        """真实文件：16bit 内容装进 24bit 容器，应判「疑似升位深」。"""
+        import subprocess
+
+        ff = __import__("seqaudio.core.authenticity", fromlist=["x"]).find_ffmpeg()
+        tmp = Path(tempfile.mkdtemp(prefix="seq_up_"))
+        try:
+            src16 = tmp / "a16.wav"
+            subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "anoisesrc=d=8:c=pink:a=0.5",
+                 "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(src16)],
+                check=True, timeout=120,
+            )
+            src24 = tmp / "a24.wav"
+            subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", "-y",
+                 "-i", str(src16), "-c:a", "pcm_s24le", str(src24)],
+                check=True, timeout=120,
+            )
+            info = probe.probe(src24, with_cue=False).info
+            self.assertEqual(info.bit_depth, 24)
+            from seqaudio.core.authenticity import analyze
+
+            result = analyze(src24, info)
+            self.assertEqual(result.verdict, "疑似升位深", result.reasons)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 
