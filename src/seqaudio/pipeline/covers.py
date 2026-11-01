@@ -64,6 +64,25 @@ def _first_nonempty(tracks: list[Track], field: str) -> str:
     return ""
 
 
+#: 无效/占位歌手名：这些名字搜歌手照片必然命中错误的"合辑/群星"头像，
+#: 应该跳过歌手照片兜底，让专辑封面（或歌名封面）顶上。
+_INVALID_ARTISTS = {
+    "群星", "群星合唱", "各种艺人", "合辑", "杂锦", "合集", "佚名", "未知", "未知歌手",
+    "various artists", "various artist", "various", "va", "unknown", "unknown artist",
+    "compilation", "soundtrack",
+}
+
+
+def _valid_artist(artist: str) -> bool:
+    """歌手名是否值得用来搜歌手照片（排除群星/Various 等占位名）。"""
+    name = (artist or "").strip().lower()
+    if not name:
+        return False
+    if name in _INVALID_ARTISTS:
+        return False
+    return True
+
+
 def ensure_folder_covers(
     tracks: list[Track],
     client: HttpClient,
@@ -132,11 +151,12 @@ def _make_one(
     artist = _first_nonempty(group, "artist")
     album = _first_nonempty(group, "album")
 
-    # 2) 专辑封面（联网）。没有专辑名时跳过 —— 用孤立的歌名搜封面
-    #    很容易命中同名歌曲的封面，不如直接落到歌手照片更可靠。
+    # 2) 专辑封面（联网）。album 或 title 都能搜：fetch_album_cover 内部
+    #    用「专辑名优先、搜不到退回歌名」的策略，所以不再因 album 为空跳过 ——
+    #    否则一堆只有歌名的文件夹会直接落到歌手照片（往往还匹配错歌手）。
     img: Optional[bytes] = None
     mime = ""
-    if album:
+    if album or title:
         img, mime, _source = aggregator.fetch_album_cover(
             client, title, artist, album,
             use_itunes=use_itunes, use_netmusic=use_netmusic, use_qqmusic=use_qqmusic,
@@ -144,8 +164,9 @@ def _make_one(
         if img:
             summary.album_cover += 1
 
-    # 3) 歌手照片（联网兜底）
-    if img is None:
+    # 3) 歌手照片（联网兜底）。只在歌手名有效时搜 —— 群星/Various Artists
+    #    这类占位名搜照片必然命中错误的合辑头像，跳过让位给专辑封面。
+    if img is None and _valid_artist(artist):
         img, mime, _source = aggregator.fetch_artist_photo(
             client, artist, use_deezer=use_deezer, use_netmusic=use_netmusic
         )
@@ -153,6 +174,8 @@ def _make_one(
             summary.artist_photo += 1
         else:
             return False
+    elif img is None:
+        return False
 
     try:
         cover_mod.write_folder_cover(folder, img, mime)

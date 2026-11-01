@@ -275,3 +275,81 @@ class CoverWorker(QThread):
     def cancel(self) -> None:
         if self._cancel_event is not None:
             self._cancel_event.set()
+
+
+class SplitCueWorker(QThread):
+    """独立的「CUE 分轨导出」操作：把整轨 WAV/APE/FLAC + CUE 切成独立文件。"""
+
+    progressChanged = Signal(int, int)
+    summaryReady = Signal(object)         # SplitSummary
+    logMessage = Signal(str, str)
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self, settings: Settings, tracks: list[Track], output_dir: Path, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.tracks = list(tracks)
+        self.output_dir = output_dir
+        self._cancel_event = None
+
+    def run(self) -> None:
+        import threading
+
+        from ..core.model import TrackStatus
+        from ..net.http import DiskCache, HttpClient
+        from ..pipeline.cue_split import SplitSummary, split_cue_sheet
+
+        cancel = threading.Event()
+        self._cancel_event = cancel
+
+        client = HttpClient(
+            proxy=self.settings.http_proxy,
+            timeout=self.settings.request_timeout,
+            concurrency=self.settings.concurrency,
+            cache=DiskCache(ttl_days=self.settings.cache_ttl_days),
+            offline=self.settings.offline_mode,
+        )
+
+        # 分轨条目共享同一整轨文件，按 path 去重，每个整轨文件只切分一次
+        seen: set[str] = set()
+        whole_tracks = []
+        for t in self.tracks:
+            if t.status is TrackStatus.UNSUPPORTED or not t.path.exists():
+                continue
+            key = str(t.path).lower()
+            if key in seen or t.cue is None or len(t.cue.tracks) <= 1:
+                continue
+            seen.add(key)
+            whole_tracks.append(t)
+
+        summary = SplitSummary()
+        try:
+            for track in whole_tracks:
+                if cancel.is_set():
+                    break
+                # 输出到整轨文件同目录的「<stem>_分轨」子目录
+                out_dir = self.output_dir / f"{track.path.stem}_分轨"
+                one = split_cue_sheet(
+                    track, out_dir, client,
+                    use_lrclib=self.settings.use_lrclib,
+                    use_netmusic=self.settings.use_netmusic,
+                    use_qqmusic=self.settings.use_qqmusic,
+                    on_progress=lambda i, n: self.progressChanged.emit(i, n),
+                    cancel=cancel,
+                )
+                summary.total += one.total
+                summary.created += one.created
+                summary.with_lyrics += one.with_lyrics
+                summary.failed += one.failed
+                summary.elapsed_sec += one.elapsed_sec
+            self.summaryReady.emit(summary)
+            self.logMessage.emit("INFO", summary.text())
+        except Exception as exc:  # noqa: BLE001
+            log.exception("分轨导出失败")
+            self.failed.emit(str(exc))
+        self.finished.emit()
+
+    def cancel(self) -> None:
+        if self._cancel_event is not None:
+            self._cancel_event.set()

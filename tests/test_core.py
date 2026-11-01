@@ -97,6 +97,26 @@ class TestCue(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIsNone(out[0].cue_track)
 
+    def test_safe_split_filename(self) -> None:
+        """分轨文件名：清理非法字符、带轨号前缀。"""
+        from seqaudio.pipeline.cue_split import _safe_filename
+
+        self.assertEqual(_safe_filename(3, "心相印手牵手"), "03 - 心相印手牵手.flac")
+        self.assertEqual(_safe_filename(1, 'A/B:C*D?'), "01 - A_B_C_D_.flac")
+        self.assertEqual(_safe_filename(5, ""), "05 - Track 05.flac")
+
+    def test_valid_artist_filters_placeholders(self) -> None:
+        """封面兜底：群星/Various Artists 等占位名不搜歌手照片。"""
+        from seqaudio.pipeline.covers import _valid_artist
+
+        self.assertTrue(_valid_artist("杨钰莹"))
+        self.assertTrue(_valid_artist("Taylor Swift"))
+        self.assertFalse(_valid_artist("群星"))
+        self.assertFalse(_valid_artist("Various Artists"))
+        self.assertFalse(_valid_artist("VA"))
+        self.assertFalse(_valid_artist(""))
+        self.assertFalse(_valid_artist("   "))
+
 
 class TestWatermark(unittest.TestCase):
     def test_comment_cleared(self) -> None:

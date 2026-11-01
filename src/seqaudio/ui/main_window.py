@@ -52,7 +52,14 @@ from .track_model import (
 )
 from .space import SpaceView
 from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
-from .worker import AuthenticityWorker, CoverWorker, MatchPreviewWorker, ProcessorWorker, ScanWorker
+from .worker import (
+    AuthenticityWorker,
+    CoverWorker,
+    MatchPreviewWorker,
+    ProcessorWorker,
+    ScanWorker,
+    SplitCueWorker,
+)
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +89,7 @@ class MainWindow(QMainWindow):
         self._match_workers: list[MatchPreviewWorker] = []
         self.auth_worker: Optional[AuthenticityWorker] = None
         self.cover_worker: Optional[CoverWorker] = None
+        self.split_worker: Optional[SplitCueWorker] = None
         self._stat_cards: dict[str, StatCard] = {}
         self._i18n_buttons: dict[QPushButton, str] = {}
         self._i18n_stat_keys: dict[str, str] = {}
@@ -918,6 +926,7 @@ class MainWindow(QMainWindow):
         menu.addAction("撤销本地修改", self.revert_selected)
         menu.addSeparator()
         menu.addAction("查看频谱", self.show_spectrum)
+        menu.addAction("CUE 分轨导出…", self.run_split_cue)
         menu.addAction("移入隔离区", self._quarantine_selected)
         menu.addAction("删除歌曲…", self.delete_selected)
         menu.addSeparator()
@@ -1447,6 +1456,65 @@ class MainWindow(QMainWindow):
         self.brand_bar.set_status("就绪", theme.FG_DIM)
         self.model.refresh_all()
         self._refresh_stats()
+
+    # ------------------------------------------------------------ CUE 分轨导出
+
+    def run_split_cue(self) -> None:
+        """CUE 分轨导出：把选中的整轨 WAV/APE/FLAC + CUE 切成独立 FLAC。"""
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "请稍候", "批处理正在运行，先等它完成。")
+            return
+        if self.split_worker is not None and self.split_worker.isRunning():
+            QMessageBox.information(self, "请稍候", "分轨导出正在进行中。")
+            return
+
+        # 选中项或全部里带多轨 CUE 的整轨文件
+        scope = self._selected_tracks() or self.model.tracks()
+        targets = [
+            t for t in scope
+            if t.cue is not None and len(t.cue.tracks) > 1 and t.path.exists()
+        ]
+        if not targets:
+            QMessageBox.information(
+                self, "没有可导出的整轨",
+                "请先添加带 CUE 索引的整轨文件（WAV/APE/FLAC + CUE），或选中它们。",
+            )
+            return
+
+        # 选输出目录
+        first = targets[0]
+        default = str(first.path.parent)
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择分轨导出目录", self.settings.last_folder or default
+        )
+        if not folder:
+            return
+
+        self._set_running(True)
+        self.progress.setMaximum(max(1, sum(len(t.cue.tracks) for t in targets)))
+        self.progress.setValue(0)
+        self.brand_bar.set_status("分轨导出", theme.CYAN)
+        self._append_log("INFO", f"开始分轨导出 {len(targets)} 个整轨文件")
+
+        self.split_worker = SplitCueWorker(self.settings, targets, Path(folder))
+        self.split_worker.progressChanged.connect(self._on_split_progress)
+        self.split_worker.summaryReady.connect(self._on_split_summary)
+        self.split_worker.logMessage.connect(self._append_log)
+        self.split_worker.finished.connect(self._on_split_finished)
+        self.split_worker.failed.connect(lambda m: self._append_log("ERROR", f"分轨导出失败：{m}"))
+        self.split_worker.start()
+
+    def _on_split_progress(self, index: int, total: int) -> None:
+        self.progress.setMaximum(max(1, total))
+        self.progress.setValue(index)
+        self.status_hint.setText(f"分轨导出 {index} / {total}")
+
+    def _on_split_summary(self, summary) -> None:
+        self.status_hint.setText(summary.text())
+
+    def _on_split_finished(self) -> None:
+        self._set_running(False)
+        self.brand_bar.set_status("就绪", theme.FG_DIM)
 
     # ------------------------------------------------------------ 重命名 / 报表
 
