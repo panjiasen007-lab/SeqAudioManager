@@ -91,6 +91,12 @@ PCM_CLIFF_SILENCE_DB = -75.0
 #: PCM 转制只有 -59 ~ -61dB。仅作辅助理由，不单独判决
 DSD_ULTRA_BODY_DB = -52.0
 
+#: PCM 升采样的「源码边界台阶」阈值（dB）。
+#: 44.1k→48k 升采样后，22.05kHz 处会留下一个台阶；有些工具会加 dither 把台阶
+#: 填成噪声伪装成内容（实测台阶之上 -53 ~ -60dB），但台阶本身 ≥18dB 就能
+#: 暴露断层 —— 自然滚降不会在某个采样率边界上突然跌 18dB。
+PCM_UPSAMPLE_STEP_DB = 18.0
+
 #: 信号边界判据（V1.2.6）：分频段统计**帧间电平波动**。
 #:
 #: 为什么需要它：上面两条判据看的都是「电平台阶」，而台阶会被噪声盖住 ——
@@ -716,6 +722,31 @@ def _match_edge_grid(edge_hz: float) -> float:
     return best
 
 
+def _pcm_upsample_cliff(
+    freqs: np.ndarray, db: np.ndarray, nyquist: float
+) -> tuple[float, float]:
+    """PCM 文件里检测「更低的 PCM 采样率」留下的带宽台阶。
+
+    44.1k→48k 升采样后，22.05kHz 处会有一个台阶；48k→96k 在 24kHz、
+    96k→192k 在 48kHz。与 :func:`_pcm_source_cliff` 的区别是：这里**不看
+    台阶之上的绝对电平**，只看台阶本身 —— 因为有些工具会加 dither 把台阶
+    填成噪声伪装成内容（实测台阶之上只有 -53 ~ -60dB，不是数字静音），
+    但台阶 ≥18dB 本身就是「上面是断层、不是自然滚降」的铁证。
+
+    返回 ``(源码采样率Hz, 台阶深度dB)``；没找到返回 ``(0, 0)``。
+    """
+    best: tuple[float, float] = (0.0, 0.0)
+    for boundary in PCM_NYQUISTS:
+        if boundary >= nyquist * 0.97:
+            continue
+        below = _band_energy(freqs, db, boundary * 0.93, boundary * 0.99)
+        above = _band_energy(freqs, db, boundary * 1.01, boundary * 1.08)
+        step = below - above
+        if step >= PCM_UPSAMPLE_STEP_DB and step > best[1]:
+            best = (boundary * 2.0, step)
+    return best
+
+
 def _pcm_source_cliff(
     freqs: np.ndarray, db: np.ndarray, nyquist: float
 ) -> tuple[float, float, float]:
@@ -919,6 +950,8 @@ def _judge(
     edge_hz: float = 0.0,
     edge_std: float = 0.0,
     edge_floor: float = 0.0,
+    upsample_src: float = 0.0,
+    upsample_step: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -961,6 +994,26 @@ def _judge(
                 reasons.append("截止位置正好落在 CD 的 22.05kHz 边界，符合 44.1kHz 升采样特征")
             reasons.append("扩展带为空说明上面没有真实录音内容，疑似采样率注水")
             return VERDICT_UPSAMPLED, 0.3, reasons
+
+    # ---- 1b. 源码带宽台阶：声明 hi-res，但内容停在更低的采样率边界 ----
+    #
+    # 上面的分支要求「扩展带是数字静音（<-95dB）」，但有些升采样工具会故意
+    # 加 dither 把台阶之上填成 -50~-70dB 的噪声，伪装成「有超声内容」。
+    # 这种时候扩展带不空，但「台阶」仍在 —— 自然滚降不会在某个采样率边界
+    # 上突然跌 18dB。所以在 analyze() 里已经用 _pcm_upsample_cliff 找过台阶，
+    # 或判断「截止正好落在 22.05k」。命中任一即判升频。
+    if nyquist >= 23000 and upsample_src > 0:
+        reasons.append(
+            f"声明 {sample_rate / 1000:.1f}kHz（上限 {nyquist / 1000:.1f}kHz），"
+            f"但内容在 {upsample_src / 2000:.2f}kHz 处出现台阶"
+            + (f"（{upsample_step:.0f}dB）" if upsample_step else "")
+            + f"，正是 {upsample_src / 1000:.1f}kHz PCM 的 Nyquist 边界"
+        )
+        reasons.append(
+            "台阶之上是被填充的噪声而非真实内容 —— 44.1kHz 升采样后加噪声"
+            "伪装成 48kHz 的典型手法"
+        )
+        return VERDICT_UPSAMPLED, 0.3, reasons
 
     # ---- 2. 升位深：声明 24bit，但样本从未碰到 16bit 天花板 ----
     #
@@ -1256,6 +1309,15 @@ def analyze(
     nyq = float(result.nyquist_hz or 0)
     bandwidth = (cutoff / nyq) if nyq else 0.0
     edge_db = _edge_energy(freqs, db, cutoff, nyq, peak) if nyq else 0.0
+    # PCM 升采样：声明 hi-res，但内容停在更低的 PCM 采样率边界。
+    # 噪声填充会把台阶之上填到 -50~-70dB，所以单看 edge_db 会漏；
+    # 这里直接测「台阶本身」，再补一条「截止正好落在 22.05k」。
+    upsample_src = 0.0
+    upsample_step = 0.0
+    if not is_dsd and nyq >= 23000:
+        upsample_src, upsample_step = _pcm_upsample_cliff(freqs, db, nyq)
+        if not upsample_src and abs(cutoff - 22050.0) <= 400.0:
+            upsample_src, upsample_step = 44100.0, 0.0
     holes = float(np.median(hole_counts)) if hole_counts else 0.0
     notch = float(np.median(notch_depths)) if notch_depths else 0.0
     # 位深注水：声明 24bit 却从没用到 16bit 以上（且电平正常，排除近乎无声的文件）
@@ -1299,6 +1361,8 @@ def analyze(
         edge_hz=edge_hz,
         edge_std=edge_std,
         edge_floor=edge_floor,
+        upsample_src=upsample_src,
+        upsample_step=upsample_step,
     )
     result.verdict = verdict
     result.score = score

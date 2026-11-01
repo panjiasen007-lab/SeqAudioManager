@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.2.7-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.2.8-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -179,8 +179,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.2.7-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.2.7-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.2.8-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.2.8-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -222,11 +222,19 @@ Visual Studio Build Tools。
 | 判据 | 物理事实 | 用来判 |
 |---|---|---|
 | 带宽 + 扩展带能量 | 升采样后原 Nyquist 之上只剩插值残余（-100dB 以下），真母带仍有 -60~-80dB 内容 | 升采样 |
+| **源码带宽台阶** | 44.1k→48k 升采样后 22.05kHz 处有 ≥18dB 台阶；有些工具加 dither 把台阶填成噪声伪装成内容，但台阶本身仍在 | 升采样（噪声填充型） |
 | 样本是否越过 16bit 上限 | 16bit 内容零填充成 24bit 后，样本绝对值永远 ≤ 32767 | 升位深 |
 | 截止之上是否数字静音 | 编码器砍完高频留下数字空白（-100dB）；磁带/母带总有模拟底噪（-70~-85dB） | 转码 |
 | 截止位置 + 陡度 | 128k≈16kHz、192k≈18.5kHz、320k≈20kHz、CD≈22.05kHz | 转码分档 |
 | 陡度（dB/oct） | 编码器 >60dB/oct，话筒/磁带更平缓 | 辅助 |
 | 频谱空洞 / sfb21 凹陷 | 低码率编码器「位不够」留下的窄凹，MP3 在 16kHz 有特征凹陷 | 辅助证据 |
+
+**「噪声填充型升采样」是 V1.2.8 新抓的一类**。44.1kHz 升到 48kHz 时，正经的重采样器
+会在 22.05kHz 以上留下数字静音（-100dB 以下）；但有些工具故意加 dither 把上面填成
+-50~-70dB 的噪声，伪装成「有超声内容」—— 单看扩展带能量会把它当成真无损。
+真正的破绽是**台阶本身**：自然滚降不会在某个采样率边界上突然跌 18dB。
+实测 Avril Lavigne 的 Nobody's Home、Who Knows 两首，22.05kHz 处就有 21~28dB 台阶，
+台阶之上是平坦噪声，被这条判据抓了出来。
 
 实现细节上还有两点：
 
@@ -375,7 +383,7 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - 数据源优先级、限流、熔断、缓存
 
 **P1+（已实现）**
-- 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、16bit 上限检查、频谱空洞与 sfb21；DSD 额外用「信号边界」帧间波动判据定位源码带宽，可识别有损/CD/48k/96k 四类转制；同批一致性按调制器指纹推定；多段中位数稳健判定）
+- 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、源码带宽台阶（噪声填充升频）、16bit 上限检查、频谱空洞与 sfb21；DSD 额外用「信号边界」帧间波动判据定位源码带宽，可识别有损/CD/48k/96k 四类转制；同批一致性按调制器指纹推定；多段中位数稳健判定）
 - 一键切换 7 套主题 ✅（深空/春/夏/秋/冬/黑白极简/太极）
 - 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，首屏核心字符串已翻译）
 - 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云→QQ音乐；歌词 LRCLIB→网易云→QQ音乐；封面 CAA→远程）
@@ -511,8 +519,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.2.7-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.2.7-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.2.8-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.2.8-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -547,11 +555,14 @@ be forged*.
 | Criterion | Physical fact | Detects |
 |---|---|---|
 | Bandwidth + edge energy | After upsampling, above the original Nyquist there is only interpolation residue (below −100 dB); a real master still carries −60 to −80 dB | Upsampling |
+| **Source-bandwidth step** | A 44.1k→48k upsample leaves a ≥18 dB step at 22.05 kHz; some tools add dither to fill the step with noise and fake content, but the step itself remains | Noise-filled upsampling |
 | Samples crossing the 16-bit ceiling | 16-bit content zero-padded to 24-bit can never exceed ±32767 | Bit-depth padding |
 | Digital silence above cutoff | An encoder leaves digital blankness (below −100 dB); tape and masters always keep analogue noise floor (−70 to −85 dB) | Transcoding |
 | Cutoff position + steepness | 128k≈16 kHz, 192k≈18.5 kHz, 320k≈20 kHz, CD≈22.05 kHz | Transcode grading |
 | Steepness (dB/oct) | Encoders exceed 60 dB/oct; microphones and tape roll off far more gently | Supporting |
 | Spectral holes / sfb21 notch | Narrow gaps left where a low-bitrate encoder ran out of bits; MP3 has a characteristic notch at 16 kHz | Supporting |
+
+**"Noise-filled upsampling" is newly caught in v1.2.8.** A proper resampler leaves digital silence above 22.05 kHz; some tools deliberately add dither to fill it to −50 to −70 dB and fake ultrasonic content — edge energy alone would then read it as genuine. The tell is the step itself: a natural roll-off never drops 18 dB exactly on a sample-rate boundary. Two Avril Lavigne tracks (Nobody's Home, Who Knows) show a 21–28 dB step at 22.05 kHz with flat noise above it, and are now caught.
 
 Two implementation details matter:
 

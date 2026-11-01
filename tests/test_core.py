@@ -1826,6 +1826,77 @@ class TestBatchConsensus(unittest.TestCase):
         self.assertIn("原始理由", changed[0][1].reasons)
 
 
+class TestPcmUpsampleCliff(unittest.TestCase):
+    """PCM 噪声填充升采样检测（V1.2.8）。
+
+    44.1k→48k 升采样后 22.05kHz 处有台阶；有些工具加 dither 把台阶填成噪声
+    伪装成内容，所以不能只看「台阶之上是否数字静音」，要看台阶本身。
+    """
+
+    def _spectrum(self, boundary: float, above_db: float, nyquist: float = 24_000.0):
+        import numpy as np
+
+        freqs = np.arange(0.0, nyquist, 10.0)
+        db = np.where(freqs < boundary, -30.0, above_db)
+        return freqs, db
+
+    def test_noise_filled_step_detected(self) -> None:
+        """台阶之上被噪声填到 -60dB，不再是数字静音，也要检出。"""
+        from seqaudio.core.authenticity import _pcm_upsample_cliff
+
+        freqs, db = self._spectrum(22_050.0, -60.0)
+        source, step = _pcm_upsample_cliff(freqs, db, 24_000.0)
+        self.assertEqual(source, 44_100.0)
+        self.assertGreaterEqual(step, 18.0)
+
+    def test_smooth_rolloff_not_a_step(self) -> None:
+        import numpy as np
+
+        from seqaudio.core.authenticity import _pcm_upsample_cliff
+
+        freqs = np.arange(0.0, 24_000.0, 10.0)
+        db = -30.0 - np.maximum(0.0, (freqs - 15_000.0) / 1000.0) * 3.0
+        source, _ = _pcm_upsample_cliff(freqs, db, 24_000.0)
+        self.assertEqual(source, 0.0)
+
+    def test_48k_source_in_96k_container(self) -> None:
+        """96k 文件里 48k 源码的台阶在 24kHz。"""
+        from seqaudio.core.authenticity import _pcm_upsample_cliff
+
+        freqs, db = self._spectrum(24_000.0, -100.0, nyquist=48_000.0)
+        source, _ = _pcm_upsample_cliff(freqs, db, 48_000.0)
+        self.assertEqual(source, 48_000.0)
+
+    def test_no_step_within_native_rate(self) -> None:
+        """44.1k 文件本身不该被当升频。"""
+        from seqaudio.core.authenticity import _pcm_upsample_cliff
+
+        freqs, db = self._spectrum(22_050.0, -100.0, nyquist=22_050.0)
+        source, _ = _pcm_upsample_cliff(freqs, db, 22_050.0)
+        self.assertEqual(source, 0.0)
+
+    def test_judge_flags_noise_filled_upsample(self) -> None:
+        from seqaudio.core.authenticity import _judge
+
+        verdict, score, reasons = _judge(
+            _FakeInfo(48_000, 24), 21_990.0, 8.0, -40.0, 20,
+            steep_oct=30.0, edge_db=-60.0, ratio=0.92, holes=0.0, sfb21=0.0,
+            above16=True, peak_dbfs=-4.0, depth_padding=False,
+            upsample_src=44_100.0, upsample_step=21.0,
+        )
+        self.assertEqual(verdict, "疑似升频", reasons)
+        self.assertLess(score, 0.5)
+        self.assertTrue(any("44.1" in r for r in reasons), reasons)
+
+
+class _FakeInfo:
+    def __init__(self, sample_rate: int, bit_depth: int):
+        self.sample_rate = sample_rate
+        self.bit_depth = bit_depth
+        self.fmt = "WAV"
+        self.dsd_rate = 0
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 
