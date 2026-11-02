@@ -36,10 +36,18 @@ ALIASES = {
     "流派": "genre",
     "genre": "genre",
     "曲目": "track",
+    "曲目号": "track",
+    "轨号": "track",
+    "音轨号": "track",
+    "序号": "track",
+    "tracknumber": "track",
+    "trackno": "track",
     "音轨": "track",
     "track": "track",
     "碟号": "disc",
+    "碟": "disc",
     "disc": "disc",
+    "discnumber": "disc",
     "格式": "format",
     "format": "format",
     "位深": "bitdepth",
@@ -124,6 +132,21 @@ def sanitize_component(text: str) -> str:
     if stem_upper in _RESERVED_NAMES:
         text = f"_{text}"
     return text
+
+
+def unknown_fields(template: str) -> list[str]:
+    """模板里无法识别的字段名（用于预览前防呆）。
+
+    未知字段会被 :func:`render_name` 静默替换成空串 —— 例如误写 ``{曲目号}``
+    （旧别名表只认 ``{曲目}``）时，生成的文件名会悄悄丢掉轨道号，用户很难
+    察觉。所以界面上先把它挑出来提示，而不是直接生成一个缺段的文件名。
+    """
+    unknown: list[str] = []
+    for match in _TOKEN.finditer(template or ""):
+        raw_key = match.group(1).strip()
+        if not ALIASES.get(raw_key.lower(), ALIASES.get(raw_key, "")):
+            unknown.append(raw_key)
+    return unknown
 
 
 def render_name(template: str, track: Track) -> str:

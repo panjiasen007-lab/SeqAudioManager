@@ -168,6 +168,31 @@ def main() -> int:
         print("✗ 批量编辑未记录变更字段")
         ok = False
 
+    # 单曲标签编辑：占位符 title（Track 03）可用「按文件名补全」一键对齐（V1.4.2）
+    from seqaudio.ui.dialogs import TagEditDialog
+
+    target = tracks[0]
+    target.working.title = "Track 03"
+    target.working.artist = ""
+    fill_dialog = TagEditDialog(target, window)
+    fill_dialog._fill_from_filename()
+    filled_title = fill_dialog.edits["title"].text()
+    if not filled_title or filled_title.lower().startswith("track"):
+        print("✗ 按文件名补全未替换占位符歌名：", filled_title)
+        ok = False
+    if fill_dialog.result_tags().title != filled_title:
+        print("✗ 补全结果未进入返回值")
+        ok = False
+    fill_dialog.close()
+
+    # 右键「按标签重命名本目录」入口存在，且无选中时不崩（V1.4.2）
+    if not hasattr(window, "rename_folder") or not hasattr(window, "_run_rename"):
+        print("✗ 缺少按标签重命名本目录的入口")
+        ok = False
+    else:
+        window.table.clearSelection()
+        window.rename_folder()  # 无选中应直接返回，不弹窗
+
     # 安装器「请先关闭 / 重试」对话框：文案、按钮与返回值（V1.2.3）
     from PySide6.QtWidgets import QApplication, QMessageBox
 

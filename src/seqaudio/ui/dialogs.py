@@ -59,6 +59,32 @@ class TagEditDialog(QDialog):
         # ---- 曲目信息 ----
         info_card = Card("曲目信息", track.info.fmt)
         self.edits: dict[str, QLineEdit] = {}
+
+        # 文件名（只读）+ 按文件名补全。
+        # 文件名不是标签，改它不等于改标签，所以不做成可编辑字段；但抓轨工具
+        # 常把真实歌名只留在文件名里（title 写成 Track 01），这里给一个一键
+        # 反向补全的入口，比让用户对着两列手动抄要可靠。
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        filename_label = QLabel(track.path.name)
+        filename_label.setStyleSheet(f"color:{theme.FG_DIM};")
+        filename_label.setToolTip(str(track.path))
+        filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.fill_hint = QLabel("")
+        self.fill_hint.setStyleSheet(f"color:{theme.FG_MUTE}; font-size:11px;")
+        fill_btn = QPushButton("按文件名补全")
+        fill_btn.setObjectName("ghost")
+        fill_btn.setCursor(Qt.PointingHandCursor)
+        fill_btn.setToolTip(
+            "把文件名里的「轨道号 / 歌手 / 歌名」填进上面的字段（只填空值或占位符，不覆盖已有内容）"
+        )
+        fill_btn.clicked.connect(self._fill_from_filename)
+        name_row.addWidget(self._dim_label("文件名"))
+        name_row.addWidget(filename_label, 1)
+        name_row.addWidget(fill_btn)
+        info_card.add_layout(name_row)
+        info_card.add_widget(self.fill_hint)
+
         rows: list[tuple[str, QWidget]] = []
         left_form: list[tuple[str, QWidget]] = []
         right_form: list[tuple[str, QWidget]] = []
@@ -152,6 +178,37 @@ class TagEditDialog(QDialog):
         label = QLabel(text)
         label.setObjectName("hint")
         return label
+
+    def _fill_from_filename(self) -> None:
+        """用文件名解析结果补标签：只填空值 / 占位符，不覆盖用户已有内容。"""
+        from ..core.probe import (
+            guess_from_filename,
+            is_placeholder_artist,
+            is_placeholder_title,
+        )
+
+        guessed = guess_from_filename(self.track.path)
+        filled: list[str] = []
+        for key, label in (("track", "曲目号"), ("artist", "歌手"), ("title", "歌名")):
+            edit = self.edits.get(key)
+            if edit is None:
+                continue
+            value = (getattr(guessed, key, "") or "").strip()
+            if not value:
+                continue
+            current = edit.text().strip()
+            placeholder = (
+                (key == "title" and is_placeholder_title(current))
+                or (key == "artist" and is_placeholder_artist(current))
+            )
+            if (not current or placeholder) and value != current:
+                edit.setText(value)
+                filled.append(label)
+        if filled:
+            self.fill_hint.setText("已按文件名补全：" + "、".join(filled)
+                                   + "（仍需点「保存到列表」才生效）")
+        else:
+            self.fill_hint.setText("文件名里没有可用的新信息，字段保持原样")
 
     def _render_cover(self) -> None:
         if not self._pending_cover:

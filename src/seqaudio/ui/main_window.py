@@ -933,6 +933,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("打开所在文件夹", self.open_folder)
         menu.addAction("复制完整路径", self.copy_path)
+        menu.addSeparator()
+        menu.addAction("按标签重命名本目录…", self.rename_folder)
         menu.addAction("仅处理选中项", self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -1506,25 +1508,64 @@ class MainWindow(QMainWindow):
         if not tracks:
             QMessageBox.information(self, "没有曲目", "请先添加音频文件。")
             return
+        self._run_rename(tracks, scope="列表全部曲目")
+
+    def rename_folder(self) -> None:
+        """按标签统一重命名「选中项所在目录」的全部曲目。
+
+        与「重命名预览」的区别只在范围：文件名与标签的一致性通常是**按专辑**
+        对齐的（一张专辑一套命名规则），逐首右键去改既慢又容易漏，所以这里
+        以选中项所在目录为单位整批处理。
+        """
+        selected = self._selected_tracks()
+        if not selected:
+            return
+        folders = {t.path.parent for t in selected}
+        tracks = [
+            t for t in self.model.tracks()
+            if t.path.parent in folders and t.status is not TrackStatus.UNSUPPORTED
+        ]
+        if not tracks:
+            QMessageBox.information(self, "没有曲目", "所选目录下没有可重命名的曲目。")
+            return
+        name = next(iter(folders)).name if len(folders) == 1 else f"{len(folders)} 个目录"
+        self._run_rename(tracks, scope=f"{name}（{len(tracks)} 首）")
+
+    def _run_rename(self, tracks: list[Track], scope: str) -> None:
+        """按当前模板生成计划 → 预览 → 执行。"""
         self.settings_panel.apply_to(self.settings)
+        bad = rename_mod.unknown_fields(self.settings.rename_template)
+        if bad:
+            QMessageBox.warning(
+                self, "模板字段无效",
+                "重命名模板里有无法识别的字段："
+                + "、".join(f"{{{b}}}" for b in bad)
+                + "\n\n这些字段会被替换成空，文件名会缺段。"
+                "请先在参数面板里改正模板（可用字段：歌手 / 歌名 / 专辑 / 曲目 / 年份 等）。",
+            )
+            return
         plan = rename_mod.build_plan(tracks, self.settings.rename_template)
         if not plan.pending and not plan.blocked:
-            QMessageBox.information(self, "无需重命名", "按当前模板，所有文件命名已符合规则。")
+            QMessageBox.information(
+                self, "无需重命名",
+                f"{scope}：按当前模板，所有文件命名已符合规则。",
+            )
             return
         dialog = RenamePreviewDialog(plan, self)
-        if dialog.exec() == RenamePreviewDialog.Accepted:
-            success, failed = rename_mod.execute_plan(plan)
-            for item in plan.items:
-                if item.changed and item.ok:
-                    old_lrc = lyrics_mod.sidecar_path(item.old_path)
-                    if old_lrc.exists():
-                        try:
-                            old_lrc.rename(lyrics_mod.sidecar_path(item.new_path))
-                        except OSError:
-                            pass
-            self.model.refresh_all()
-            self._append_log("INFO", f"重命名完成：成功 {success}，失败 {failed}")
-            QMessageBox.information(self, "完成", f"成功 {success} 项，失败 {failed} 项。")
+        if dialog.exec() != RenamePreviewDialog.Accepted:
+            return
+        success, failed = rename_mod.execute_plan(plan)
+        for item in plan.items:
+            if item.changed and item.ok:
+                old_lrc = lyrics_mod.sidecar_path(item.old_path)
+                if old_lrc.exists():
+                    try:
+                        old_lrc.rename(lyrics_mod.sidecar_path(item.new_path))
+                    except OSError:
+                        pass
+        self.model.refresh_all()
+        self._append_log("INFO", f"重命名完成（{scope}）：成功 {success}，失败 {failed}")
+        QMessageBox.information(self, "完成", f"成功 {success} 项，失败 {failed} 项。")
 
     def export_report(self) -> None:
         tracks = self.model.tracks()

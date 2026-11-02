@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.1-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.2-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,20 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。界面字体 Noto Sans SC / JetBrains Mono 为 SIL OFL 1.1，随包分发。
+
+### V1.4.2 更新摘要
+
+围绕「歌名与文件名对不上」做的一轮修复（实测样本：梁静茹 Fish Leong Collection SACD ISO）：
+
+- **占位符标签按文件名回填**：SACD ISO 分轨软件会把 title 一律写成 `Track 01`…`Track 15`，
+  真实歌名只剩在文件名里。扫描时即识别（`Track NN` / 纯序号 / `Unknown` / `未命名`）并用
+  文件名解析结果填进「当前标签」，`原始标签` 保留原值可还原；
+- **单曲编辑对话框加「文件名」只读展示 + 「按文件名补全」按钮**，只填空值/占位符，
+  不覆盖已有内容；
+- **右键新增「按标签重命名本目录…」**：以选中项所在目录为单位，按当前模板整批重命名，
+  预览后执行（文件名与标签的一致性通常按专辑对齐，逐首改既慢又易漏）；
+- **重命名模板字段补别名**：`{曲目号}` / `{轨号}` / `{序号}` / `{tracknumber}` 等原先不被识别，
+  会被**静默替换成空**导致文件名缺段；现在补进别名表，且模板里有未知字段时预览前先提示。
 
 ### V1.4.1 更新摘要
 
@@ -210,8 +224,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.4.1-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.4.1-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.4.2-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.4.2-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -444,7 +458,8 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - **伪专辑名过滤**：`[unknown]`、`[unknown xxx bootleg release]` 这类社区占位名不会被写进标签；
 - **目录专辑先验**：`周杰伦 -七里香 DSD DFF` 这种目录名会被解析出专辑名「七里香」，命中候选直接加分 —— 否则整批曲目会被 MusicBrainz 分散匹配到演唱会版、精选集、重发版；
 - **专辑一致性收敛**：同一目录的曲目在写入前按多数投票统一专辑名与年份，避免「一张专辑十个年份」；
-- **文件名拆解**：`歌手 - 02.歌名` 会拆成 歌手 / 轨号 / 歌名 三段，而不是把轨号并进歌名拖低检索准确率。
+- **文件名拆解**：`歌手 - 02.歌名` 会拆成 歌手 / 轨号 / 歌名 三段，而不是把轨号并进歌名拖低检索准确率；
+- **占位符标签按文件名回填**：抓轨软件不读曲目表时会写入 `Track 01` 这类空壳标题（SACD ISO 分轨极常见），真实歌名只剩在文件名里。扫描时就把这类占位符（`Track NN` / 纯序号 / `Unknown` / `未命名`）按文件名补全到「当前标签」，`原始标签` 保留原值可随时还原。实测 `D:\02.音乐` 705 个文件里有 **236 个（33%）** 属于这种情况。单曲编辑对话框也提供「按文件名补全」按钮做人工兜底。
 
 ## 网络健壮性
 
@@ -554,6 +569,25 @@ Root-cause fixes for "albums with no official SACD release being judged genuine 
 - **DSD inside WavPack** — 1-bit/352.8 kHz `.wv` files use the DSD criteria instead of PCM;
 - **Minimum analysis duration 3 s → 2 s** — 2–3 second test clips (dragon.aif, raw TrueHD) are now analysed.
 
+### V1.4.2 highlights
+
+Fixes for "song title and file name disagree" (verified on the Fish Leong Collection
+SACD ISO folder):
+
+- **Placeholder titles back-filled from the file name** — SACD ISO splitters write
+  `Track 01`…`Track 15` as the title, leaving the real song name only in the file name.
+  Placeholders (`Track NN` / bare numbers / `Unknown` / `未命名`) are detected at scan time
+  and replaced in the *working* tags, while the *original* tags keep the file's values
+  (so you can always revert);
+- **The tag editor now shows the file name (read-only) plus a "Fill from file name" button**
+  that only fills empty/placeholder fields, never overwriting real values;
+- **New context-menu action "Rename this folder from tags"** — renames the whole folder
+  containing the selection with the current template, after a preview. Naming consistency
+  is usually an album-level concern, so per-track renaming is both slow and error-prone;
+- **More template field aliases** — `{曲目号}` / `{轨号}` / `{序号}` / `{tracknumber}` were
+  previously unrecognised and got **silently replaced with nothing**, leaving a gap in the
+  file name. They are now aliases, and unknown fields are reported before previewing.
+
 ### V1.4.0 highlights
 
 - Starfield background removed; the UI now uses a flat theme background;
@@ -632,8 +666,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.4.1-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.4.1-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.4.2-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.4.2-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.

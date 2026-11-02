@@ -437,6 +437,34 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
     track.original = tags
     track.working = tags.copy()
 
+    # ---- 占位符标签按文件名补全 ----
+    #
+    # 抓轨软件不读曲目表时会写入 ``Track 01`` 这类空壳标题，真实歌名只剩在
+    # 文件名里（实测 D:\02.音乐\梁静茹- Fish Leong Collection SACD ISO 15 首
+    # 全部如此：文件名 "01 - Fish Leong - 无条件为你.dsf"、title 却是 Track 01）。
+    #
+    # 只改 ``working``，``original`` 保留文件里的原值 —— 列表里直接显示正确
+    # 歌名，保存前用户能看出差异，事后也能「还原原始标签」。
+    _filled: list[str] = []
+    if is_placeholder_title(track.working.title) or is_placeholder_artist(track.working.artist):
+        _guessed = guess_from_filename(path)
+        if (
+            is_placeholder_title(track.working.title)
+            and not is_placeholder_title(_guessed.title)
+            and _guessed.title
+            and _guessed.title != track.working.title
+        ):
+            _filled.append(f"歌名「{track.working.title or '空'}」→「{_guessed.title}」")
+            track.working.title = _guessed.title
+            # 文件名里带的曲目号也顺手补上，否则列表按曲目号排序会乱
+            if not (track.working.track or "").strip() and _guessed.track:
+                track.working.track = _guessed.track
+        if is_placeholder_artist(track.working.artist) and _guessed.artist:
+            _filled.append(f"歌手「{track.working.artist or '空'}」→「{_guessed.artist}」")
+            track.working.artist = _guessed.artist
+    if _filled:
+        track.note("占位符标签已按文件名补全：" + "、".join(_filled))
+
     if with_cue:
         cue_path = find_cue_for(path)
         if cue_path is not None:
@@ -529,6 +557,48 @@ def iter_fast_meta(paths: list[Path]) -> list[Track]:
 
 #: 曲目号前缀：``01.`` / ``1、`` / ``03)`` / ``07 -``
 _TRACK_PREFIX = re.compile(r"^(\d{1,4})\s*[\.、\)\]]\s*(.+)$")
+
+#: 「占位符歌名」—— 抓轨软件（sacd_extract / EZ CDDA Extractor / XLD 等）
+#: 不读曲目表时，会直接写 ``Track 01`` 这类空壳标题。它不带任何信息，
+#: 却会让列表里的「歌名」列跟「文件名」列打架，还会让联网检索拿它当检索词。
+#:
+#: 只认这些确定无信息的形式，宁可漏判也不能误删真实歌名：
+#:   Track 01 / Track_01 / track-1 / TRACK 001 / Track No.01
+#:   01 / 1（纯序号）
+#:   Unknown / Untitled / 未知 / 未命名 / 无题 / 未知歌名
+_PLACEHOLDER_TITLE_RE = re.compile(
+    r"^\s*(?:track|trk)(?:\s*no\.?)?\s*[-_.#]?\s*0*\d{1,3}\s*$",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_BARE_NUM_RE = re.compile(r"^\s*0*\d{1,3}\s*$")
+_PLACEHOLDER_TITLES = {
+    "unknown", "unknown title", "untitled", "no title", "n/a", "-",
+    "未知", "未知歌名", "未命名", "无题", "未知曲目",
+}
+#: 占位符歌手：``Unknown Artist`` / ``未知歌手`` 之类。
+#: 注意 **不包含** Various / VA / 群星 / 合辑 —— 那些是合辑的真实语义，
+#: 不能拿文件名里的单曲歌手覆盖掉（专辑艺术家另有字段承载）。
+_PLACEHOLDER_ARTISTS = {
+    "unknown", "unknown artist", "未知", "未知歌手", "佚名", "n/a", "-",
+}
+
+
+def is_placeholder_title(value: str | None) -> bool:
+    """标题是不是「无信息的占位符」（Track 01 / 纯序号 / Unknown…）。"""
+    text = (value or "").strip()
+    if not text:
+        return True
+    if text.casefold() in _PLACEHOLDER_TITLES:
+        return True
+    if _PLACEHOLDER_TITLE_RE.match(text):
+        return True
+    return bool(_PLACEHOLDER_BARE_NUM_RE.match(text))
+
+
+def is_placeholder_artist(value: str | None) -> bool:
+    """歌手是不是占位符（Unknown Artist / 未知歌手…），空值也算。"""
+    text = (value or "").strip()
+    return not text or text.casefold() in _PLACEHOLDER_ARTISTS
 
 #: 歌手与歌名之间的分隔符，长分隔符优先匹配
 _NAME_SEPARATORS = (" - ", " – ", " — ", "－", "—", "–")

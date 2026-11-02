@@ -370,6 +370,24 @@ class TestRename(unittest.TestCase):
             "陈奕迅/认了吧/02. 富士山下.flac",
         )
 
+    def test_track_alias_variants(self) -> None:
+        """`{曲目号}`/`{轨号}`/`{序号}` 等写法都要认（旧别名表只认 `{曲目}`）。"""
+        track = Track(path=Path("D:/m/01.flac"))
+        track.working = Tags(title="富士山下", artist="陈奕迅", track="2")
+        for token in ("{曲目}", "{曲目号}", "{轨号}", "{音轨号}", "{序号}", "{track}"):
+            self.assertEqual(
+                rename.render_name(f"{token} - {{歌名}}", track), "2 - 富士山下.flac", token
+            )
+
+    def test_unknown_fields_reported(self) -> None:
+        """未知字段要被挑出来（否则会被静默替换成空，文件名缺段）。"""
+        self.assertEqual(rename.unknown_fields("{歌手} - {歌名}"), [])
+        self.assertEqual(rename.unknown_fields("{曲目号} - {歌手}"), [])
+        self.assertEqual(rename.unknown_fields("{曲目名} - {歌名}"), ["曲目名"])
+        self.assertEqual(
+            rename.unknown_fields("{歌手} - {歌名} - {码率}"), ["码率"]
+        )
+
     def test_illegal_chars(self) -> None:
         track = Track(path=Path("D:/m/x.mp3"))
         track.working = Tags(title='A/B:C*D?"E"<F>|G', artist="X")
@@ -419,6 +437,80 @@ class TestLyrics(unittest.TestCase):
         text = lyrics_mod.build_lrc("歌名", "歌手", "专辑", "第一行\n第二行")
         self.assertIn("[ti:歌名]", text)
         self.assertIn("第一行", text)
+
+
+class TestPlaceholderTags(unittest.TestCase):
+    """占位符标签（Track 01）按文件名补全。
+
+    真实形态：SACD ISO 用 sacd_extract 分轨后，title 一律写成 "Track 01"，
+    真实歌名只剩在文件名里（实测梁静茹 Fish Leong Collection 15 首全如此），
+    列表里「歌名」跟「文件名」两列完全对不上。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_ph_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_placeholder_title_detection(self) -> None:
+        from seqaudio.core.probe import is_placeholder_title
+
+        for value in ("Track 01", "Track_01", "track-1", "TRACK 001",
+                      "Track No.01", "01", "15", "Unknown", "未命名", "未知歌名", ""):
+            self.assertTrue(is_placeholder_title(value), value)
+        # 真实歌名不能误判：4 位数字更像年份/曲名，带文字的更不用说
+        for value in ("1973", "1984", "Seven Days", "无条件为你", "Fly Away",
+                      "Track of My Tears", "01 Love"):
+            self.assertFalse(is_placeholder_title(value), value)
+
+    def test_placeholder_artist_detection(self) -> None:
+        from seqaudio.core.probe import is_placeholder_artist
+
+        for value in ("Unknown Artist", "未知歌手", "佚名", ""):
+            self.assertTrue(is_placeholder_artist(value), value)
+        # Various / 群星 是合辑的真实语义，不能当成占位符覆盖掉
+        for value in ("Various Artists", "群星", "Fish Leong"):
+            self.assertFalse(is_placeholder_artist(value), value)
+
+    def test_track_number_title_filled_from_filename(self) -> None:
+        """title='Track 01' + 文件名带歌名 → working 补全，original 保留原值。"""
+        path = make_samples.make_wav(self.tmp / "01 - 陈奕迅 - 富士山下.wav")
+        track = probe.probe(path, with_cue=False)
+        writer.safe_write(
+            track, tags=Tags(title="Track 01"), backup=False, mirror_backup=False
+        )
+
+        track = probe.probe(path, with_cue=False)
+        self.assertEqual(track.working.title, "富士山下")
+        self.assertEqual(track.working.artist, "陈奕迅")
+        # 原始标签保持文件里的原值，用户可「还原原始标签」
+        self.assertEqual(track.original.title, "Track 01")
+        self.assertEqual(track.working.track, "1")
+        self.assertTrue(any("占位符" in n for n in track.notes))
+
+    def test_real_title_is_kept(self) -> None:
+        """真实歌名不能被文件名覆盖。"""
+        path = make_samples.make_wav(self.tmp / "01 - 陈奕迅 - 富士山下.wav")
+        track = probe.probe(path, with_cue=False)
+        writer.safe_write(
+            track, tags=Tags(title="富士山下（Live）"), backup=False, mirror_backup=False
+        )
+
+        track = probe.probe(path, with_cue=False)
+        self.assertEqual(track.working.title, "富士山下（Live）")
+        self.assertEqual(track.original.title, "富士山下（Live）")
+
+    def test_filename_without_title_kept(self) -> None:
+        """文件名本身也是占位符（01.wav）时，不要瞎补。"""
+        path = make_samples.make_wav(self.tmp / "01.wav")
+        track = probe.probe(path, with_cue=False)
+        writer.safe_write(
+            track, tags=Tags(title="Track 01"), backup=False, mirror_backup=False
+        )
+
+        track = probe.probe(path, with_cue=False)
+        self.assertEqual(track.working.title, "Track 01")
 
 
 class TestWriteRoundtrip(unittest.TestCase):
