@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.1-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,22 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。界面字体 Noto Sans SC / JetBrains Mono 为 SIL OFL 1.1，随包分发。
+
+### V1.4.1 更新摘要
+
+针对「没有官方 SACD 发行的专辑被判成真 DSD」做了一轮溯源修复（赵雷、Taylor Swift、
+张国荣三批实测样本）：
+
+- **「算不出来」不再等同于「有谐波」**：频谱平坦度在频点不足时返回"无法计算"，此前返回
+  0.0（语义是"能量高度集中"），导致 44.1k 源转 DSD 的整批文件被误放行；
+- **同批推定改按 PCM 网格统计**，并加两条护栏：「整批都判假就不许改真」、「网格命中阈值
+  65%→60%」，修复 96k 源转 DSD128 整批被判真、以及 44.1k/48k 混装批救不回来的问题；
+- **边界跌落保护**：边界处必须实际跌落 ≥20dB 才算内容截止，避免把高频平缓的真 SACD
+  老录音误判成转制；
+- **「边界之上有谐波」保护加下限**：只在边界 ≥21.5kHz（CD 带宽）时生效——edge 连 CD
+  都不到（如 18kHz，正是 192kbps MP3 的低通位置）时没有辩护资格；
+- **单音测试信号阈值 0.9 → 0.97**：真实音乐集中度实测 0.31~0.92，原阈值会把普通歌曲
+  误当测试信号直接判真。
 
 ### V1.4.0 更新摘要
 
@@ -186,8 +202,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.4.0-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.4.0-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.4.1-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.4.1-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -280,7 +296,9 @@ V1.2.6 起用两条**互相正交**的判据 —— 只看电平台阶不够，�
 4. **噪声整形斜率**（50→100kHz，dB/oct）—— 确认比特流本身是真的
    （PCM 改后缀的假 DSD 在超声区是平坦的）；
 5. **超声基底**（辅助）—— 真 DSD 在 30~40kHz 已有 -29 ~ -46dB 的能量；
-6. **边界可靠性保护**（V1.4.0）—— 边界之上若仍有谐波内容（能量 > -80dB 且频谱平坦度 < 0.5），说明这是扫频/窄带信号造成的假边界，直接跳过边界判据，避免把扫频测试信号或高频稀疏的真实录音误判成 PCM 转制。
+6. **边界可靠性保护**（V1.4.0，V1.4.1 加下限）—— 边界之上若仍有谐波内容（能量 > -80dB 且频谱平坦度 < 0.5），说明这是扫频/窄带信号造成的假边界，直接跳过边界判据，避免把扫频测试信号或高频稀疏的真实录音误判成 PCM 转制。**但该保护只在边界 ≥21.5kHz 时生效**：低于 CD 带宽（如 18kHz，正是 192kbps MP3 的低通位置）说明内容必来自有损源，没有辩护资格；而且边界越低、之上可测带宽越宽，越容易被误判成"有谐波"（实测张国荣某目录 13 首里 edge 20~26k 的 11 首都判假，唯独 edge=18k 的 2 首被判真）；
+7. **边界跌落保护**（V1.4.1）—— 边界处必须实际跌落 ≥20dB 才算「内容截止」。真 SACD 老录音的高频内容本身就平缓，穿过 22kHz 只掉几个 dB（实测某首仅 −7.4dB），帧间波动统计照样会塌陷；而 PCM 转制在源码 Nyquist 之上会掉到调制器噪声底（实测 −41 ~ −71dB）。
+8. **同批推定的两条护栏**（V1.4.1）—— ①「整批都判假就不许改真」：老录音做成 SACD 时只有少数几首会被边界判据误伤，整批判假说明这批本身就是转制（实测 Taylor Swift 5 首 DSD128 全是 96k 源转制，边界又漂在 46/50/52kHz，被旧逻辑整批放行）；② 网格命中阈值降到 60%，因为真 SACD 的边界根本不在 22.05k/24k/48k/96k 这四档上（实测活出生命、Eagles 命中率 0%，林忆莲 50% 为最高）。
 
 基带截止只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
 
@@ -295,6 +313,11 @@ V1.2.6 起用两条**互相正交**的判据 —— 只看电平台阶不够，�
 
 也就是说：**282 首里 249 首（88%）是 PCM 转制**，其中 34 首甚至是有损文件转的。
 这个比例与发烧圈「市面 DSD 九成是假的」的经验吻合。
+
+> V1.4.1 在当前代码上重跑同一批 282 首：**判真 27 首（9.6%）**，判假 255 首。判真的
+> 集中在甄妮（13 首，模拟母带转录，斜率 6.0~6.6 全库独一份）、郑中基（6 首）、
+> beyonce（4 首，官方 5.1 mix SACD）、刘若英（4 首）；Adele、周杰伦、张国荣、王菲、
+> 赵雷、梅艳芳、蔡琴、邓紫棋、陈慧琳、皇后乐队、李健、汪峰、Beyond 等全部判假。
 
 几个具体样本：
 
@@ -336,15 +359,22 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 **V1.2.10 起同批推定改为「边界集中度」双向判定**。上一版只看「已确认转制过半 →
 把真改假」，会漏掉反向的误判：**老模拟录音做成的真 SACD**，每首歌高频本就稀疏、
 边界随内容自然滚降（16~36kHz 分散），信号边界判据会把边界落在 22k/24k 网格附近
-的那些歌误判成 PCM 转制，导致同一张真 SACD 里真假混杂。而真 PCM 转制的源码采样率
-统一，边界**高度集中**在 22k/24k（实测王菲 15/16、林子祥 15/20 首都在 22k）。
+的那些歌误判成 PCM 转制，导致同一张真 SACD 里真假混杂。
 
-所以判据改为看两个物理信号：**斜率一致 + 边界集中（众数 ≥65%）→ PCM 转制，整批
-判假；斜率一致 + 边界分散（众数 ≤45%）→ 真 SACD 老录音，把无 PCM 断崖强证据的
-「假」改判真**。斜率容差自适应（新录音 ±0.09，老录音超声弱、测量波动 ±1.5dB）。
+**V1.4.1 把集中度改成「边界落在 PCM 网格的比例」，并加了两条护栏**（实测踩了三轮坑）：
 
-华语 03 库 1105 首实测：真 DSD 从 257 提到 **624**（+367 个被误判的老录音 SACD
-纠正回来），同时王菲/林子祥/周杰伦等真 PCM 转制仍全判假、无回归。
+| 版本 | 实现 | 踩的坑 |
+|---|---|---|
+| V1.2.10 | 精确边界值的众数 ≥65% → 整批判假 | 同一批里 44.1k 源（22k）与 48k 源（24k）混装时，众数只有 30~40%，反而落进「分散 → 假改真」被整批放行（赵雷 18 首） |
+| 中间试验 | 网格容差放大到 10%，或用含 32k 的 PCM 网格 | 真 SACD 的 26k 边界被 24k 吞掉、32k 又正好是老录音边界常见落点 → 张学友《活出生命》24 首、Eagles 9 首**全部误判成假** |
+| V1.4.1 定版 | 网格只取 22.05k / 24k / 48k / 96k，容差 1kHz；命中率 ≥60% → 整批判假；≤45% → 救回少数误伤，但**整批过半判假时不许改真** | —— |
+
+最后那条护栏是关键：老录音做成 SACD 时只有**少数**几首会被边界判据误伤，整批都判假
+说明这批本身就是转制（Taylor Swift 5 首 DSD128 全是 96k 源，边界漂在 46/50/52kHz，
+精确值众数只有 20%，被旧逻辑整批放行）。
+
+华语 03 库 1105 首实测（V1.4.1）：**457 真 / 648 假**。相比「整批假改真」的宽松版本
+（624 真）收紧，因为那里面混着大量「单首判假率 90%+、边界落在 PCM 网格」的转制批。
 
 **PCM 部分的实测样本**（真实音乐，非合成）：
 
@@ -366,8 +396,17 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - **样本截断/解码不完整**（如 1MB partial 测试文件）直接给「无法判定」，不再用残缺频谱判假；
 - **证据优先级**：SBR copy-up 先于带宽判断；MP3 频谱空洞 / sfb21 凹陷先于「平滑滚降」；绝对带宽 <14kHz 且 <65% 时最高只给「疑似」；
 - **无损格式识别按 codec 而不是扩展名**：Ogg-FLAC、WMA Lossless 正确标为无损，AIFF 里的 IMA ADPCM 正确标为有损；
-- **DSD 单音测试信号**：基带能量集中在极少数频点时，帧间波动边界判据不适用，改按噪声整形确认比特流；
+- **DSD 单音测试信号**：基带能量集中在极少数频点时，帧间波动边界判据不适用，改按噪声整形确认比特流（集中度阈值 0.97，且「边界之上有谐波」的辩护要求边界 ≥21.5kHz）；
 - **DSD 边界可靠性保护**：边界之上仍有谐波（且不是编码器噪声）时跳过边界判据 —— 修复扫频/窄带信号被误判为 PCM 转制的问题。
+
+**V1.4.1 判定修订**（赵雷 18 首被误判为真的回归修复）：
+
+- **「算不出来」不再等同于「有谐波」**：平坦度在频点不足（不足 32 个）时返回"无法计算"，调用方按"不构成证据"处理。此前返回 0.0，而 0.0 的语义是"能量高度集中"——44.1k 源转 DSD 的边界在 22kHz，到 24kHz 只剩约 23 个频点，于是整批被误认为"边界之上仍有谐波"、跳过边界判据判真；
+- **同批推定的边界集中度改按 PCM 网格统计**：统计"有多少首的边界落在任一 PCM 采样率 Nyquist 上"，而不是某个精确边界值的占比。同一批里 44.1k 源（22kHz）与 48k 源（24kHz）混装很常见，按精确值分组会把证据拆成两组（各 30~40%），反而落进"边界分散 → 假改真"分支把整批判真；
+- **边界跌落保护**：边界处必须实际跌落 ≥20dB 才算内容截止。真 SACD 老录音的高频平缓延续（实测只跌 −7.4dB）不再被判成 PCM 转制，与上一条配合后可做到「赵雷式转制全判假、真 SACD 零回归」；
+- **同批推定加两条护栏**：①「整批都判假就不许改真」—— 老录音做成 SACD 时只有少数几首会被边界判据误伤，整批判假说明这批本身就是转制（实测 Taylor Swift 5 首 DSD128 全是 96k 源转制，边界漂在 46/50/52kHz，精确值众数只有 20%，被旧逻辑整批放行判真）；② 网格命中阈值 65% → 60%，因为真 SACD 的边界不在 22.05k/24k/48k/96k 这四档上（实测活出生命、Eagles 命中率 0%，林忆莲 50% 已是最高），而赵雷那批 44.1k/48k 混装是 61%；
+- **单音测试信号阈值 0.9 → 0.97**：集中度算的是基带前 5 个频点占比，真实音乐实测 0.31~0.92（流行乐低频本就集中），0.9 会把普通歌曲误当测试信号直接判真（实测 Taylor Swift「I Think He Knows」0.915 被放行）；纯音才会到 0.98 以上；
+- **「边界之上有谐波」保护加下限**：只在边界 ≥21.5kHz（CD 带宽）时才允许辩护。低于这个位置说明内容连 CD 都不如（128k/192k 低通就在 16~19kHz），必是有损源；而且边界越低、之上可测带宽越宽，越容易被误判成"有谐波"，逻辑是反的（实测张国荣某目录 13 首里 edge 20~26k 的 11 首都判假，唯独 edge=18k 那 2 首被判真）。
 
 **已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
 判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
@@ -485,6 +524,23 @@ Advanced capabilities:
 
 > License: **GNU General Public License v3.0**. The bundled fonts Noto Sans SC / JetBrains Mono are SIL OFL 1.1.
 
+### V1.4.1 highlights
+
+Root-cause fixes for "albums with no official SACD release being judged genuine DSD"
+(verified against three real batches: Zhao Lei, Taylor Swift, Leslie Cheung):
+
+- **"Cannot compute" no longer means "has harmonics"** — spectral flatness now returns
+  "undetermined" when there are too few bins (previously 0.0, whose meaning is "energy
+  highly concentrated"), which let whole batches of 44.1k-source DSD through;
+- **Batch inference counts edges on the PCM grid**, plus two guard rails: "a batch where
+  everything is fake cannot be reversed to genuine" and "grid hit threshold 65% → 60%";
+- **Edge-drop guard**: a boundary only counts as a content cut-off if the level actually
+  drops ≥20 dB — genuine old SACD masters fall only a few dB through 22 kHz;
+- **The "harmonics above the edge" defence now requires edge ≥21.5 kHz** (CD bandwidth);
+  at 18 kHz — the 192 kbps MP3 low-pass — the content is lossy by definition;
+- **Test-tone threshold 0.9 → 0.97** — real music measures 0.31–0.92 across the library,
+  so the old threshold judged ordinary songs as pure tones and passed them.
+
 ### V1.4.0 highlights
 
 - Starfield background removed; the UI now uses a flat theme background;
@@ -563,8 +619,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.4.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.4.0-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.4.1-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.4.1-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -637,7 +693,8 @@ Since v1.2.6 two **orthogonal** criteria are used, because level steps alone are
 3. **Sub-CD bandwidth** — an edge below 21.5 kHz is flagged outright: that is exactly where 128k / 192k / 320k MP3 apply their low-pass;
 4. **Noise-shaping slope** (50→100 kHz, dB/oct) — confirms the bitstream itself is real (a PCM file renamed to .dsf/.dff is flat in the ultrasonic region);
 5. **Ultrasonic base** (supporting) — genuine DSD already carries −29 to −46 dB across 30–40 kHz;
-6. **Edge reliability guard** (V1.4.0) — if harmonic content still exists above the edge (energy > −80 dB and spectral flatness < 0.5), the edge was produced by a sweep/narrowband signal rather than a real content boundary; the edge criteria are skipped, preventing sweeps and high-frequency-sparse masters from being flagged as PCM conversions.
+6. **Edge reliability guard** (V1.4.0, floor added in V1.4.1) — if harmonic content still exists above the edge (energy > −80 dB and spectral flatness < 0.5), the edge was produced by a sweep/narrowband signal rather than a real content boundary; the edge criteria are skipped, preventing sweeps and high-frequency-sparse masters from being flagged as PCM conversions. **The defence only applies when the edge is ≥21.5 kHz**: below CD bandwidth (18 kHz is the 192 kbps MP3 low-pass) the content is lossy by definition — and the lower the edge, the wider the measurable band above it, so the guard is easier to trigger the less plausible it becomes (measured: in one Leslie Cheung folder, 11 files with edges of 20–26 kHz were flagged, while the two at 18 kHz slipped through);
+7. **Edge-drop guard** (V1.4.1) — a boundary only counts as a content cut-off if the level actually drops ≥20 dB. Genuine SACD masters roll off gently through 22 kHz (one measured −7.4 dB), while PCM conversions fall to the modulator noise floor (−41 to −71 dB).
 
 The baseband cutoff is scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall.
 
@@ -679,6 +736,18 @@ No hardware modulator flattens 18 different recordings to a spread of 0.09. Acro
 The fingerprint exposes something larger: **six different artists (Faye Wong, Li Jian, G.E.M., Leslie Cheung, Kelly Chen, Queen) all show exactly 12.6 dB/oct (±0.1)** — six different labels' hardware modulators cannot agree to that precision; one software converter can.
 
 With this rule the 282-file result becomes **269 fake (95%)**, leaving only 13 Jenny Tseng files genuine (slope 6.0–6.5 dB/oct, unique in the library — consistent with an analogue-master transfer).
+
+> Re-run of the same 282 files on V1.4.1: **27 genuine (9.6%)**, 255 fake. The survivors are
+> Jenny Tseng (13), Ronald Cheng (6), Beyoncé (4 — her official 5.1 mix SACD), Rene Liu (4).
+> Adele, Jay Chou, Leslie Cheung, Faye Wong, Zhao Lei, Anita Mui, Tsai Chin, G.E.M.,
+> Kelly Chen, Queen, Li Jian, Wang Feng and Beyond are all judged fake.
+
+**V1.4.1 batch inference** counts edges falling on the PCM grid (22.05k / 24k / 48k / 96k,
+±1 kHz) rather than the mode of exact values — a batch mixing 44.1k-source files (22 kHz)
+and 48k-source files (24 kHz) would otherwise split its evidence into two minorities. Two
+guard rails: ≥60% on-grid → whole batch fake; ≤45% → rescue the few misjudged files, but
+**never when more than half the batch is already fake** (that is a converted batch, not a
+case of a few false positives).
 
 **PCM samples** (real music, not synthetic):
 

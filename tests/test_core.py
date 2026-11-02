@@ -1379,10 +1379,27 @@ class TestDsdJudgement(unittest.TestCase):
 
         verdict, _, reasons = _judge_dsd(
             22.0, -10.0, 0.0, 0.0, 0.0,
-            edge_hz=18000.0, edge_above_db=-43.0, edge_above_flat=0.17,
+            edge_hz=22000.0, edge_above_db=-43.0, edge_above_flat=0.17,
         )
         self.assertEqual(verdict, "真 DSD", reasons)
         self.assertTrue(any("不是真实截止" in r for r in reasons))
+
+    def test_edge_guard_not_applied_below_cd_bandwidth(self) -> None:
+        """边界连 CD 带宽都不到（edge=18k）→ 没有「之上有谐波」的辩护资格。
+
+        回归（张国荣某目录）：13 首里 edge 20~26k 的 11 首都判假，唯独
+        edge=18kHz 那 2 首因为「之上还有谐波」被放行判真。18kHz 正是
+        192kbps MP3 的低通位置，必是有损源；而且 edge 越低、之上可测带宽
+        越宽，越容易被误判成"有谐波"，逻辑是反的。
+        """
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            22.0, -10.0, 0.0, 0.0, 0.0,
+            edge_hz=18000.0, edge_above_db=-43.0, edge_above_flat=0.17,
+        )
+        self.assertEqual(verdict, "疑似假 DSD", reasons)
+        self.assertTrue(any("22.05kHz" in r for r in reasons))
 
     def test_edge_guard_keeps_noise_above_fake(self) -> None:
         """边界之上是平坦噪声（编码器特征）→ 边界判据仍然有效。"""
@@ -1391,6 +1408,33 @@ class TestDsdJudgement(unittest.TestCase):
         verdict, _, _ = _judge_dsd(
             22.0, -10.0, 22050.0, 5.0, -45.0,
             edge_hz=22000.0, edge_above_db=-45.0, edge_above_flat=0.9,
+        )
+        self.assertEqual(verdict, "疑似假 DSD")
+
+    def test_edge_guard_skips_shallow_drop(self) -> None:
+        """边界处只跌落 7dB → 高频是平缓延续，不是内容截止。
+
+        回归（梅艳芳 BRASIL 89 某首）：真 SACD 老录音的高频内容本身平稳，
+        穿过 22kHz 只掉几个 dB，帧间波动统计照样会「塌陷」。而 PCM 转制在
+        源码 Nyquist 之上会掉到调制器噪声底（实测 −41 ~ −71dB）。要求至少
+        跌落 20dB，才不会把高频平缓的老录音误判成转制。
+        """
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            22.0, -10.0, 24000.0, 5.0, -7.4,
+            edge_hz=22000.0, edge_above_db=-120.0, edge_above_flat=1.0,
+        )
+        self.assertEqual(verdict, "真 DSD", reasons)
+        self.assertTrue(any("只跌落" in r for r in reasons))
+
+    def test_edge_requires_drop_for_fake(self) -> None:
+        """边界处跌了 60dB（真切断）→ 边界判据照常生效。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, _ = _judge_dsd(
+            22.0, -10.0, 22050.0, 5.0, -60.0,
+            edge_hz=22000.0, edge_above_db=-120.0, edge_above_flat=1.0,
         )
         self.assertEqual(verdict, "疑似假 DSD")
 
@@ -1752,6 +1796,59 @@ class TestAuthenticityV13(unittest.TestCase):
         self.assertLess(_spectral_roughness(freqs, smooth), 0.5)
         self.assertGreater(_spectral_roughness(freqs, jagged), 2.0)
 
+    def test_flatness_returns_none_when_band_too_narrow(self) -> None:
+        """频点不足时返回 None 而不是 0.0。
+
+        回归：V1.4.0 的 DSD 边界保护把 `flat < 0.5` 当作「边界之上有谐波」，
+        而 0.0 同时是"算不出来"的哨兵值。赵雷那批 44.1k 转 DSD 的文件边界
+        在 22kHz，到 24kHz 只剩 1kHz（176.4kHz/8192 点 FFT 下约 23 个频点），
+        平坦度算不出来返回 0.0，于是整批被当成「之上有谐波」放行判真。
+        """
+        import numpy as np
+
+        from seqaudio.core.authenticity import _spectral_flatness
+
+        # 176.4kHz 采样率、4096 点 FFT：bin 宽约 43Hz（1kHz 只有约 23 个频点）
+        freqs = np.arange(0, 88200, 43.07)
+        db = np.full(freqs.size, -60.0)
+        self.assertIsNone(_spectral_flatness(freqs, db, 23_000, 24_000))
+        # 带宽足够（3kHz 约 70 个频点）时正常返回数值
+        self.assertIsNotNone(_spectral_flatness(freqs, db, 21_000, 24_000))
+
+    def test_on_pcm_grid_matches_nyquist(self) -> None:
+        """PCM 网格 = 22.05k / 24k / 48k / 96k，容差 ±1 档（2kHz 分档）。
+
+        32kHz **不算**：它是真 DSD 老录音边界的常见落点（实测张学友
+        《活出生命》、Eagles 的边界大量落在 30~34kHz），算作 PCM 网格会让
+        真 SACD 的网格命中率虚高而被整批判假。46/50/52kHz 也不算 ——
+        Taylor Swift 那批 DSD128 的边界漂移交给「整批判假不许改真」处理，
+        放大容差会把真 SACD 的 26kHz 一并吞进来（实测林忆莲、梅艳芳
+        《赤色风暴》因此整批误判）。
+        """
+        from seqaudio.core.authenticity import _on_pcm_grid
+
+        for edge in (22_000, 24_000, 48_000):
+            self.assertTrue(_on_pcm_grid(edge), edge)
+        for edge in (18_000, 26_000, 28_000, 32_000, 36_000, 44_000, 50_000):
+            self.assertFalse(_on_pcm_grid(edge), edge)
+
+    def test_tonal_music_not_treated_as_test_signal(self) -> None:
+        """普通歌曲的集中度（0.72~0.92）不能触发单音保护。
+
+        回归（Taylor Swift「I Think He Knows」集中度 0.915）：阈值取 0.9 时
+        这首歌被当成"单音测试信号"直接判真。实测真实音乐 0.31~0.92、
+        纯音才会到 0.98 以上。
+        """
+        from seqaudio.core.authenticity import TONE_TEST_CONCENTRATION, _judge_dsd
+
+        self.assertGreaterEqual(TONE_TEST_CONCENTRATION, 0.95)
+        verdict, _, reasons = _judge_dsd(
+            43.0, -18.0, 23900.0, 0.0, -35.0,
+            edge_hz=50000.0, test_signal=0.915,
+        )
+        self.assertNotEqual(verdict, "真 DSD", reasons)
+        self.assertFalse(any("单音" in r for r in reasons))
+
     def test_spectral_flatness_noise_vs_tonal(self) -> None:
         """频谱平坦度（谐波相干性）：平坦噪声高、离散谐波低。"""
         import numpy as np
@@ -2063,16 +2160,50 @@ class TestBatchConsensus(unittest.TestCase):
             self.assertEqual(result.verdict, "疑似假 DSD")
 
     def test_edge_spread_reverses_fake(self) -> None:
-        """斜率一致 + 边界分散 → 真 SACD 老录音，把弱证据假改判真。"""
+        """斜率一致 + 边界分散 + 判假是少数 → 真 SACD 老录音，假改判真。"""
         from seqaudio.core.authenticity import apply_batch_consensus
 
-        # 边界分散在 16k/22k/28k/32k，众数占比低
-        edges = [16_000, 22_000, 28_000, 30_000, 32_000, 34_000, 36_000]
-        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=edges[i])) for i in range(7)]
+        # 边界分散，且只有 3 首判假、5 首判真（假占 37.5% < 50% 才允许改真）
+        edges = [16_000, 28_000, 30_000, 32_000, 34_000, 36_000, 38_000, 40_000]
+        pairs = [(Path(f"/a/f{i}.dsf"), self._result("疑似假 DSD", 21.3, edge_hz=e))
+                 for i, e in enumerate(edges[:3])]
+        pairs += [(Path(f"/a/t{i}.dsf"), self._result("真 DSD", 21.3, edge_hz=e))
+                  for i, e in enumerate(edges[3:])]
+        changed = apply_batch_consensus(pairs)
+        self.assertEqual(len(changed), 3)
+        for _, result in changed:
+            self.assertEqual(result.verdict, "真 DSD")
+
+    def test_all_fake_batch_not_reversed(self) -> None:
+        """整批都判假 → 不是「少数被误伤」，不许改真。
+
+        回归（Taylor Swift 5 首 DSD128）：96k 源转制，单首全判假，边界漂在
+        46/50/52kHz（精确值众数只有 20%），旧的「边界分散 → 假改真」逻辑
+        把整批放行判真。真正被误伤的老录音只会是少数，整批判假说明这批
+        本身就是转制。
+        """
+        from seqaudio.core.authenticity import apply_batch_consensus
+
+        edges = [46_000, 48_000, 50_000, 50_000, 52_000]
+        pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 43.6, edge_hz=e))
+                 for i, e in enumerate(edges)]
+        self.assertEqual(apply_batch_consensus(pairs), [])
+
+    def test_mixed_pcm_grids_still_concentrated(self) -> None:
+        """44.1k 源（22k）与 48k 源（24k）混在一批 → 仍算集中，整批判假。
+
+        回归（赵雷 18 首）：同一批转制里两种源采样率混装时，按精确边界值
+        统计会把 22k 和 24k 拆成各 39%/33%，都不到 65%，反而落进「分散 →
+        假改真」分支把整批放行。两者都是 PCM Nyquist，必须合并计数。
+        """
+        from seqaudio.core.authenticity import apply_batch_consensus
+
+        edges = [22_000, 24_000, 22_000, 24_000, 22_000, 24_000, 22_000]
+        pairs = [(Path(f"/a/t{i}.dsf"), self._result("真 DSD", 21.3, edge_hz=edges[i])) for i in range(7)]
         changed = apply_batch_consensus(pairs)
         self.assertEqual(len(changed), 7)
         for _, result in changed:
-            self.assertEqual(result.verdict, "真 DSD")
+            self.assertEqual(result.verdict, "疑似假 DSD")
 
     def test_strong_cliff_not_reversed(self) -> None:
         """有 PCM 断崖强证据的假，即使边界分散也不改判真。"""

@@ -105,6 +105,10 @@ PCM_UPSAMPLE_STEP_DB = 18.0
 #: 的真实 hi-res（人声/民谣的超声区可能以本底噪声为主）。
 EXTENDED_FLATNESS_NOISE = 0.7
 
+#: 频谱平坦度的最少频点数。低于这个数（例如 176.4kHz 采样率、8192 点 FFT
+#: 下 1kHz 只有约 46 个频点）几何/算术均值比没有统计意义，函数返回 None。
+MIN_FLATNESS_BINS = 32
+
 #: SBR copy-up 去趋势相关性阈值（0~1）。HE-AAC 的 SBR 把低频子带精确复制
 #: 到高频（频率平移），去趋势后高频仍是低频的镜像（实测 ≈0.97）；普通音乐
 #: 高低频去趋势后各自独立（实测真 CD 抓轨 0.19~0.46）。0.6 位于两者之间。
@@ -128,6 +132,17 @@ DSD_EDGE_GRID = (22_050.0, 24_000.0, 48_000.0, 96_000.0)
 #: 实测库里 34 个文件边界落在 16/18/20kHz —— 正好是 MP3 128k/192k/320k
 #: 的低通位置，属于「有损转 DSD」，比 CD 转 DSD 更离谱。
 DSD_SUB_CD_EDGE_HZ = 21_500.0
+#: 边界处必须有的最小电平跌落（dB）。信号边界判据看的是「帧间波动塌陷」，
+#: 但波动塌陷不一定是**内容**截止 —— 真 SACD 老录音的高频内容本身就平稳，
+#: 穿过 22kHz 时电平只掉几个 dB（实测梅艳芳 BRASIL 89 某首仅 -7.4dB），
+#: 帧间波动统计照样判成「边界」。而真 PCM 转制在源码 Nyquist 之上会掉到
+#: 调制器噪声底，实测 -41 ~ -71dB。要求至少掉 20dB，才不会把
+#: 「高频平缓的老录音」误判成 PCM 转制。
+DSD_EDGE_MIN_DROP_DB = 20.0
+#: 「单音测试信号」的基带能量集中度阈值（前 5 个频点占总能量的比例）。
+#: 只有纯音/扫频才会达到 0.97 以上；真实音乐实测 0.31~0.92（流行乐低频能量
+#: 本就集中），阈值定低了会把普通歌曲误当测试信号放行。
+TONE_TEST_CONCENTRATION = 0.97
 
 # ---------------------------------------------------------------- PCM 判据
 # 参考 2026 年开源实现的共识（lossless-checker / Lossless Audio Checker /
@@ -207,6 +222,7 @@ class AuthenticityResult:
     spectral_roughness: float = 0.0    # 4~16kHz 相邻频点幅度差 RMS（有损编码"锯齿"度）
     extended_flatness: float = 0.0     # 扩展带频谱平坦度（噪声填充型升频的兜底证据）
     sbr_copyup_score: float = 0.0      # SBR copy-up 去趋势相关性（HE-AAC 转码特征）
+    tone_concentration: float = 0.0    # 基带前 5 个频点的能量占比（单音测试信号特征）
     high_band_energy_db: float = 0.0   # 20kHz 以上相对能量
     noise_shaping_slope: float = 0.0   # DSD 噪声整形斜率（dB/oct，真 DSD 为正）
     ultrasonic_ratio: float = 0.0      # 50kHz 以上相对能量（dB）
@@ -644,7 +660,9 @@ def _spectral_roughness(freqs: np.ndarray, db: np.ndarray) -> float:
     return float(np.sqrt(np.mean(diff * diff)))
 
 
-def _spectral_flatness(freqs: np.ndarray, db: np.ndarray, low: float, high: float) -> float:
+def _spectral_flatness(
+    freqs: np.ndarray, db: np.ndarray, low: float, high: float
+) -> Optional[float]:
     """某频段的频谱平坦度（几何均值 / 算术均值），0~1。
 
     这是「谐波相干性」的核心度量：真实乐器内容在频域是**离散的谐波峰**
@@ -655,17 +673,23 @@ def _spectral_flatness(freqs: np.ndarray, db: np.ndarray, low: float, high: floa
     怀疑是升频时，用平坦度区分「真实超声内容」与「噪声填充」—— 这是
     :func:`_pcm_upsample_cliff`（看台阶）之外的第二道防线：有些工具把
     dither 加到与音乐同水平，台阶被填平，但填充物的"噪声本质"藏不住。
+
+    **频点不足时返回 ``None``（无法计算），而不是 0.0。** 这一点很关键：
+    0.0 的语义是「能量高度集中 = 全是谐波」，若把它当作"算不出来"的哨兵，
+    就会把一条窄带（例如 22kHz 边界之上只剩 1kHz、只有 23 个频点）误读成
+    「边界之上仍有谐波」，进而错误地跳过 DSD 的边界判据 —— 赵雷那批 44.1k
+    转 DSD 的文件就是这样被放行的。调用方必须显式处理 ``None``。
     """
     mask = (freqs >= low) & (freqs <= high)
-    if np.count_nonzero(mask) < 32:
-        return 0.0
+    if np.count_nonzero(mask) < MIN_FLATNESS_BINS:
+        return None
     linear = 10.0 ** (db[mask] / 10.0)
     if linear.size == 0 or np.any(linear <= 0):
-        return 0.0
+        return None
     geo = np.exp(np.mean(np.log(linear + 1e-12)))
     arith = float(np.mean(linear))
     if arith <= 0:
-        return 0.0
+        return None
     return float(np.clip(geo / arith, 0.0, 1.0))
 
 
@@ -826,6 +850,27 @@ def _variation_edge(
         if std <= threshold and all(s <= threshold for _, s in bands[index:]):
             return freq, std, floor
     return 0.0, 0.0, floor
+
+
+def _on_pcm_grid(edge_hz: float) -> bool:
+    """信号边界是否恰好落在某个 PCM 采样率的 Nyquist 上。
+
+    网格用 :data:`DSD_EDGE_GRID`（22.05k / 24k / 48k / 96k），**不用**
+    ``PCM_NYQUISTS`` —— 后者含 32kHz，而 32k 恰是真 DSD 老录音边界的常见
+    落点，把它算作 PCM 网格会让真 SACD 的边界命中率虚高、被整批判假。
+
+    容差取 ``max(1kHz, 2%)``：边界统计按 2kHz 分档，量化误差 ±1kHz，所以
+    22.0kHz 要能命中 22.05k、24.0kHz 要能命中 24k。**不能再放宽** ——
+    10% 容差会把真 SACD 老录音的 26kHz 也吞进 24k 网格（实测林忆莲、梅艳芳
+    《赤色风暴》等目录的网格命中率因此虚高，整批被误判成转制）。
+    边界漂移（46/48/50/52kHz 其实同属 96k 源）交给
+    :func:`apply_batch_consensus` 的「整批都判假就不许改真」来兜底，
+    不用放大容差解决 —— 放大容差会连带把真 SACD 误判成转制。
+    """
+    for boundary in DSD_EDGE_GRID:
+        if abs(edge_hz - boundary) <= max(1_000.0, boundary * 0.02):
+            return True
+    return False
 
 
 def _match_edge_grid(edge_hz: float) -> float:
@@ -1059,7 +1104,14 @@ def _judge_dsd(
         return VERDICT_FAKE_DSD, 0.3, reasons
 
     # ---- 3. 单音测试信号：边界判据不适用，只确认比特流 ----
-    if test_signal >= 0.9:
+    #
+    # 阈值必须很高：``_tone_concentration`` 算的是基带前 5 个频点的能量占比，
+    # 而真实流行乐/人声的低频能量本来就集中 —— 实测 Taylor Swift 那批
+    # 0.72~0.92、张学友真 SACD 0.55~0.72、测试碟里的器乐 0.31~0.83，全都在
+    # 0.9 附近徘徊。原来取 0.9 会把普通歌曲当成"单音测试信号"直接判真
+    # （实测 I Think He Knows 集中度 0.915 就被放行）。纯音/扫频信号的频谱
+    # 只有一两个峰，集中度 0.98 以上，用 0.97 才能分开。
+    if test_signal >= TONE_TEST_CONCENTRATION:
         reasons.append(
             f"基带能量高度集中在少数频点（集中度 {test_signal:.2f}），"
             "属于单音/测试信号；帧间波动边界判据对恒定电平信号无效"
@@ -1076,20 +1128,42 @@ def _judge_dsd(
     # 与上一条的区别：上一条要求「断崖之上是数字静音」，这一条只要求
     # 「之上没有内容了」—— 噪声抬得再高也逃不掉。
     #
-    # 误伤保护：扫频、窄带测试信号或高频稀疏的真实录音，会让「帧间波动」
+    # 误伤保护 A：扫频、窄带测试信号或高频稀疏的真实录音，会让「帧间波动」
     # 在某个频率提前塌下来，但边界之上其实还有谐波内容。此时 edge 不是
     # 真实的内容边界，不能据此判假。用「边界之上的能量 + 平坦度」识别：
     # 仍有谐波（平坦度低）且能量不低 → 跳过边界判据；若是编码器噪声
     # （平坦度高）则照常判假。
-    edge_unreliable = bool(
-        edge_hz >= 12_000.0
+    #
+    # 前提：edge 必须达到 CD 带宽（21.5kHz）。低于这个位置说明内容连 CD 都
+    # 不如（128k/192k 有损编码的低通就在 16~19kHz），这种情形必是有损源，
+    # 没有「之上有谐波」的辩护资格 —— 而且 edge 越低、之上可测带宽越宽，
+    # 越容易被误判成"有谐波"，逻辑是反的（实测张国荣某目录 11 首 edge 20~26k
+    # 都判假，唯独 2 首 edge=18k 反而被判真）。
+    harmonic_above = bool(
+        edge_hz >= DSD_SUB_CD_EDGE_HZ
         and edge_above_db > -80.0
         and edge_above_flat < 0.5
     )
-    if edge_unreliable:
+    # 误伤保护 B：边界处必须有明显电平跌落才叫「内容截止」。真 SACD 老录音
+    # 的高频内容本身就平稳，穿过 22kHz 只掉几个 dB，帧间波动照样会塌陷；
+    # 而 PCM 转制在源码 Nyquist 之上会掉到调制器噪声底（实测 -41~-71dB）。
+    # ``base_silence == 0.0`` 表示没测到，此时不启用该保护（保守判假）。
+    shallow_edge = bool(
+        edge_hz >= 12_000.0
+        and base_silence < 0.0
+        and base_silence > -DSD_EDGE_MIN_DROP_DB
+    )
+    edge_unreliable = harmonic_above or shallow_edge
+    if harmonic_above:
         reasons.append(
             f"边界 {edge_hz / 1000:.1f}kHz 之上仍有谐波内容"
             f"（{edge_above_db:.0f}dB，平坦度 {edge_above_flat:.2f}），"
+            "该边界不是真实截止，跳过边界判据"
+        )
+    elif shallow_edge:
+        reasons.append(
+            f"边界 {edge_hz / 1000:.1f}kHz 处电平只跌落 {abs(base_silence):.1f}dB"
+            "（不足 20dB），高频内容其实是平缓延续而非整齐切断，"
             "该边界不是真实截止，跳过边界判据"
         )
     if edge_hz >= 12_000.0 and not edge_unreliable:
@@ -1644,12 +1718,18 @@ def analyze(
             edge_hz, edge_std, edge_floor = _variation_edge(
                 rows, row_freqs, float(edge_rate) / 2.0
             )
-            # 边界之上的基带内容：判断这个「边界」是不是真的内容截止
-            low = min(edge_hz + 1000.0, 24_000.0)
+            # 边界之上的基带内容：判断这个「边界」是不是真的内容截止。
+            # 起点用 +500Hz 而不是 +1kHz：44.1k 源转 DSD 的边界在 22kHz，
+            # 到 24kHz 只剩 1kHz，在 176.4kHz/8192 点 FFT 下只有约 23 个频点，
+            # 平坦度算不出来（旧版返回 0.0，被误读成「之上仍有谐波」，于是
+            # 整批 44.1k 转制的文件都被跳过边界判据放行）。
+            low = min(edge_hz + 500.0, 24_000.0)
             high = min(24_000.0, nyq)
             if low < high:
                 edge_above_db = _band_energy(freqs, db, low, high)
-                edge_above_flat = _spectral_flatness(freqs, db, low, high)
+                flat = _spectral_flatness(freqs, db, low, high)
+                # 算不出来就不构成「之上有谐波」的证据，退回 1.0（不触发保护）
+                edge_above_flat = 1.0 if flat is None else flat
         result.noise_shaping_slope = slope
         result.ultrasonic_ratio = ultra
         result.baseband_cutoff = int(base_cutoff)
@@ -1701,7 +1781,9 @@ def analyze(
     # 只对声明 hi-res、且扩展带确实有能量（cutoff 明显低于 Nyquist）时才有意义。
     extended_flat = 0.0
     if not is_dsd and nyq >= 23000 and 0 < cutoff < nyq * 0.95:
-        extended_flat = _spectral_flatness(freqs, db, cutoff, nyq)
+        flat = _spectral_flatness(freqs, db, cutoff, nyq)
+        # 频点不足算不出来时保持 0.0：不能凭"算不出来"就判噪声填充
+        extended_flat = 0.0 if flat is None else flat
     # SBR copy-up 相关性：HE-AAC 的高频是低频的平移复制（去趋势后仍高度相关）
     sbr_score = 0.0
     if not is_dsd and nyq >= 22050:
@@ -1724,6 +1806,7 @@ def analyze(
     result.spectral_roughness = roughness
     result.extended_flatness = extended_flat
     result.sbr_copyup_score = sbr_score
+    result.tone_concentration = test_signal
 
     verdict, score, reasons = _judge(
         info,
@@ -1915,8 +1998,12 @@ BATCH_SLOPE_TOLERANCE = 0.8
 #: 林子祥 15/20 首 edge 都在 22k）；真 SACD 老录音每首歌高频内容不同，
 #: edge 自然分散（实测梅艳芳 16~32k、李宗盛 20~36k 各档都有）。
 #: 众数占比 ≥ 0.65 → PCM 转制；≤ 0.45 → 真 SACD；中间保持原判。
-BATCH_EDGE_MAJORITY = 0.65
+BATCH_EDGE_MAJORITY = 0.60
 BATCH_EDGE_SPREAD = 0.45
+#: 「假改真」允许的最高判假比例。老录音做成 SACD 时只有少数几首会被边界
+#: 判据误伤，整批判真的仍是多数；一旦过半都是假，就说明这批本身就是转制
+#: （实测 Taylor Swift 5/5 全判假，被「边界分散」逻辑整批放行）。
+BATCH_REVERSE_MAX_FAKE = 0.5
 
 
 def apply_batch_consensus(
@@ -1927,16 +2014,17 @@ def apply_batch_consensus(
     现实中「同一文件夹里一首假、其余真」几乎不会发生 —— 同一批资源的来源
     只有一次。但信号边界判据对「老模拟录音转 SACD」会系统性误判：老录音的
     高频本就稀疏，每首歌的边界随内容自然滚降（16~36kHz 分散）；而 PCM 转制
-    的源码采样率统一，边界**高度集中**在 22k/24k（实测王菲 15/16、林子祥
-    15/20 首都在 22k）。
+    的边界会**成批落在 PCM 采样率的 Nyquist 上**（22.05k / 24k / 32k…）。
 
     所以判据不是看「当前判定里假占多少」（那会继承误判），而是看**调制器
-    指纹 + 边界集中度**这两个物理信号：
+    指纹 + 边界是否落在 PCM 网格**这两个物理信号：
 
-    * **斜率一致 + 边界集中（众数 ≥65%）** → 源码采样率统一，是 PCM 转制，
-      把漏判的「真 DSD」改判假；
-    * **斜率一致 + 边界分散（众数 ≤45%）** → 每首歌高频不同，是真 SACD 老
-      录音的自然滚降，把「边界偏低被误判」的假改判真（只改无 PCM 断崖强
+    * **斜率一致 + 落在 PCM 网格的边界 ≥65%** → 源码带宽统一，是 PCM 转制，
+      把漏判的「真 DSD」改判假。注意统计的是**网格命中率**而不是某个精确
+      边界值的占比 —— 同一批里 44.1k 源（22kHz）和 48k 源（24kHz）混装很
+      常见，按精确值分组会把证据拆散。
+    * **斜率一致 + 落在 PCM 网格的边界 ≤45%** → 每首歌高频不同，是真 SACD
+      老录音的自然滚降，把「边界偏低被误判」的假改判真（只改无 PCM 断崖强
       证据的弱证据假）。
 
     只在 DSD 上生效：PCM 侧的「同目录」可能真的是不同来源拼的合辑。
@@ -1975,14 +2063,25 @@ def apply_batch_consensus(
         if len(core) < 3:
             continue
 
-        # 边界众数集中度
+        # 边界集中度：统计落在 **PCM Nyquist 网格**上的比例，而不是某个
+        # 精确边界值的占比。
+        #
+        # 为什么：同一批转制的源码采样率不一定统一 —— 44.1k 源落在 22kHz、
+        # 48k 源落在 24kHz，都可能混在一批里。按精确值统计会把 22kHz 和
+        # 24kHz 拆成两组（各 30~40%），落进下面的「分散 → 假改真」分支，
+        # 把本该判假的整批放行（赵雷 18 首就是这样被误判成真的）。
+        # 两者都落在 PCM 网格上，本质是同一个证据，必须合并计数。
         edge_counts: dict[int, int] = {}
+        grid_hits = 0
         for _, r in core:
             if r.signal_edge_hz > 0:
-                edge_counts[int(r.signal_edge_hz)] = edge_counts.get(int(r.signal_edge_hz), 0) + 1
+                edge = int(r.signal_edge_hz)
+                edge_counts[edge] = edge_counts.get(edge, 0) + 1
+                if _on_pcm_grid(r.signal_edge_hz):
+                    grid_hits += 1
         if not edge_counts:
             continue
-        majority_ratio = max(edge_counts.values()) / len(core)
+        majority_ratio = grid_hits / len(core)
         majority_edge = max(edge_counts, key=edge_counts.get)
 
         if majority_ratio >= BATCH_EDGE_MAJORITY:
@@ -1994,13 +2093,25 @@ def apply_batch_consensus(
                 result.score = 0.3
                 result.reasons = [
                     f"同目录 {len(core)} 首调制器指纹一致（斜率 {reference:.1f}±{BATCH_SLOPE_TOLERANCE}），"
-                    f"且信号边界集中在 {majority_edge / 1000:.0f}kHz（{majority_ratio:.0%}），"
-                    "符合 PCM 源码统一带宽的特征",
-                    "同一批资源出处只有一次：真 SACD 每首歌高频不同，边界不会如此整齐",
+                    f"且 {majority_ratio:.0%} 的曲目信号边界落在 PCM 采样率 Nyquist 上"
+                    f"（最集中的是 {majority_edge / 1000:.0f}kHz），符合 PCM 源码带宽统一"
+                    "被调制器抬成 DSD 的特征",
+                    "同一批资源出处只有一次：真 SACD 每首歌高频不同，边界不会成批落在 PCM 网格上",
                 ] + result.reasons[:1]
                 changed.append((path, result))
         elif majority_ratio <= BATCH_EDGE_SPREAD:
-            # 边界分散 → 每首歌高频不同 → 真 SACD 老录音，弱证据的假改真
+            # 边界分散 → 每首歌高频不同 → 真 SACD 老录音，弱证据的假改真。
+            #
+            # 但前提是「少数被误伤」：老录音做成 SACD 时，只有高频特别稀疏的
+            # 那几首会被边界判据误判，整批里判真的仍是多数。若这一批里过半
+            # 都判假，那不是误伤，而是这批本身就是转制 —— 实测 Taylor Swift
+            # 那批 DSD128（96k 源）5/5 全判假，边界又漂在 46/48/50/52kHz
+            # （精确值众数只有 20%），按旧的「分散 → 假改真」逻辑被整批放行。
+            fake_ratio = sum(
+                1 for _, r in core if r.verdict == VERDICT_FAKE_DSD
+            ) / len(core)
+            if fake_ratio > BATCH_REVERSE_MAX_FAKE:
+                continue
             for path, result in core:
                 if result.verdict != VERDICT_FAKE_DSD or result.pcm_cliff_source > 0:
                     continue
