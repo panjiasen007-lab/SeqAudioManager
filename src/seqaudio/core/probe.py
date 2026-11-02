@@ -70,7 +70,8 @@ def describe_audio(obj: mutagen.FileType, path: Path) -> AudioInfo:
         info.duration = _safe_float(getattr(raw_info, "length", None))
         info.bitrate = _safe_int(getattr(raw_info, "bitrate", None))
 
-    # ALAC / AAC 的 m4a 需靠 codec 判定
+    desc = str(getattr(raw_info, "codec_description", "") or "").lower()
+    # ALAC / AAC / MPEG-4 ALS 的 m4a/mp4 需靠 codec 判定
     if mod == "mp4":
         codec = str(getattr(raw_info, "codec", "") or "").lower()
         if "alac" in codec:
@@ -79,6 +80,9 @@ def describe_audio(obj: mutagen.FileType, path: Path) -> AudioInfo:
         elif "aac" in codec:
             info.lossless = False
             info.fmt = "AAC"
+        elif "als" in codec or "als" in desc:
+            info.lossless = True
+            info.fmt = "ALS"
 
     # DSD 速率标注。注意不要清掉 bit_depth —— DSD 是 1-bit 采样，
     # 报表里「1 bit / 2822400 Hz」正是它和 PCM 的本质区别，抹掉反而丢信息
@@ -104,6 +108,7 @@ def _format_name(obj: mutagen.FileType, ext: str) -> str:
         "monkeysaudio": "APE",
         "wavpack": "WV",
         "trueaudio": "TTA",
+        "tak": "TAK",
         "dsf": "DSF",
         "dsdiff": "DFF",
         "oggvorbis": "OGG",
@@ -170,13 +175,14 @@ def _is_lossless(obj: mutagen.FileType, ext: str, path: Path | None = None) -> b
     codec = str(
         getattr(raw, "codec", "") or getattr(raw, "codec_name", "") or ""
     ).lower()
+    codec_desc = str(getattr(raw, "codec_description", "") or "").lower()
 
     # 原生无损容器/编码
-    if mod in ("flac", "wavpack", "trueaudio", "monkeysaudio", "dsf", "dsdiff", "oggflac"):
+    if mod in ("flac", "wavpack", "trueaudio", "monkeysaudio", "dsf", "dsdiff", "oggflac", "tak"):
         return True
-    # MP4 家族：ALAC 无损，AAC 有损
+    # MP4 家族：ALAC 无损，AAC 有损，MPEG-4 ALS 也是无损
     if mod == "mp4":
-        return "alac" in codec
+        return ("alac" in codec) or ("als" in codec) or ("als" in codec_desc)
     # ASF/WMA：只有 wmalossless 编解码器是无损
     if mod == "asf":
         return ("wmalossless" in codec) or ("lossless" in codec)
@@ -244,6 +250,144 @@ def find_cue_for(audio_path: Path) -> Optional[Path]:
     return cues[0] if len(cues) == 1 else None
 
 
+def _codec_is_lossless(codec: str) -> bool:
+    c = codec.lower()
+    if c.startswith("pcm_"):
+        return c not in ("pcm_mulaw", "pcm_alaw", "pcm_mulaw_planar", "pcm_alaw_planar")
+    if c.startswith("dsd_"):
+        return True
+    return c in {
+        "flac", "alac", "ape", "wavpack", "tta", "shorten", "tak",
+        "mlp", "truehd", "mp4als", "als", "wmalossless", "dst",
+        "osq", "rka", "ralf",
+    }
+
+
+_CODEC_FMT = {
+    "flac": "FLAC",
+    "alac": "ALAC",
+    "ape": "APE",
+    "wavpack": "WV",
+    "tta": "TTA",
+    "shorten": "SHN",
+    "tak": "TAK",
+    "mlp": "MLP",
+    "truehd": "TrueHD",
+    "mp4als": "ALS",
+    "als": "ALS",
+    "wmalossless": "WMA Lossless",
+    "dst": "DFF",
+    "osq": "OSQ",
+    "rka": "RKA",
+    "ralf": "RMVB",
+}
+_CONTAINER_FMT = {
+    ".w64": "W64", ".rf64": "RF64", ".caf": "CAF", ".au": "AU",
+    ".aob": "AOB", ".mp4": "MP4", ".rmvb": "RMVB", ".thd": "TrueHD",
+    ".mlp": "MLP", ".shn": "SHN", ".tak": "TAK", ".ofr": "OFR",
+    ".osq": "OSQ", ".rka": "RKA", ".la": "LA", ".mka": "MKA", ".302": "302",
+}
+#: 这些容器优先显示容器名（例如 MKA 里装 FLAC 仍标 MKA，AOB 里装 MLP 仍标 AOB）
+_CONTAINER_FIRST = {".mka", ".aob", ".w64", ".rf64", ".caf", ".au", ".302"}
+
+
+def _ffmpeg_probe(path: Path) -> Optional[AudioInfo]:
+    """mutagen 不支持的容器：用 ffmpeg -i 的输出兜底解析技术参数。
+
+    覆盖 W64/RF64/CAF/AU/AOB/TrueHD/MP4-ALS/SHN/TAK/OSQ/RKA 等。
+    ffmpeg 也解不了的容器（如 OptimFROG .ofr、Lossless Audio .la）返回 None。
+    """
+    import subprocess
+
+    from .authenticity import find_ffmpeg
+
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", str(path)],
+            capture_output=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    text = (proc.stderr or b"").decode("utf-8", "replace")
+    if "Audio:" not in text:
+        return None
+
+    duration = 0.0
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if m:
+        duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    if duration <= 0:
+        # 裸流/无索引容器（TrueHD、AOB/MLP）没有 Duration 行，解码一遍取实际时长
+        try:
+            dec = subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "info", "-i", str(path),
+                 "-map", "0:a:0", "-f", "null", "-"],
+                capture_output=True, timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            stamps = re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", (dec.stderr or b"").decode("utf-8", "replace"))
+            if stamps:
+                hh, mm, ss = stamps[-1]
+                duration = int(hh) * 3600 + int(mm) * 60 + float(ss)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    line = next((ln for ln in text.splitlines() if "Audio:" in ln), "")
+    cm = re.search(r"Audio:\s*([A-Za-z0-9_]+)", line)
+    if not cm:
+        return None
+    codec = cm.group(1).lower()
+    sr_m = re.search(r"(\d+)\s*Hz", line)
+    sample_rate = int(sr_m.group(1)) if sr_m else None
+    ch_m = re.search(r"\b(mono|stereo)\b|(\d+)\s*channels|\b(5\.1|7\.1)\b", line)
+    channels = None
+    if ch_m:
+        if ch_m.group(1):
+            channels = 1 if ch_m.group(1) == "mono" else 2
+        elif ch_m.group(2):
+            channels = int(ch_m.group(2))
+        elif ch_m.group(3):
+            channels = 6 if ch_m.group(3) == "5.1" else 8
+
+    bits = None
+    bd_m = re.search(r"\b([su])(\d+)\b(?:\s*\(([\d.]+)\s*bit\))?", line)
+    if bd_m:
+        bits = int(float(bd_m.group(3))) if bd_m.group(3) else int(bd_m.group(2))
+    if codec.startswith(("dsd_", "dst")):
+        bits = 1
+
+    br_m = re.search(r"bitrate:\s*(\d+)\s*kb/s", text) or re.search(r"(\d+)\s*kb/s", line)
+    bitrate = int(br_m.group(1)) * 1000 if br_m else None
+
+    ext = path.suffix.lower()
+    container = _CONTAINER_FMT.get(ext)
+    fmt = (
+        container
+        if ext in _CONTAINER_FIRST
+        else (_CODEC_FMT.get(codec) or container or ext.lstrip(".").upper())
+    )
+    info = AudioInfo(
+        file_size=_safe_size(path),
+        fmt=fmt,
+        lossless=_codec_is_lossless(codec),
+        sample_rate=sample_rate,
+        channels=channels,
+        bit_depth=bits,
+        duration=duration or None,
+        bitrate=bitrate,
+    )
+    if codec.startswith(("dsd_", "dst")) and sample_rate in (352_800, 705_600, 1_411_200, 2_822_400):
+        info.dsd_rate = {
+            352_800: "DSD64", 705_600: "DSD128",
+            1_411_200: "DSD256", 2_822_400: "DSD512",
+        }[sample_rate]
+    return info
+
+
 def probe(path: Path | str, *, with_cue: bool = True) -> Track:
     """读取单个音频文件，返回可直接进列表的 Track。"""
     path = Path(path)
@@ -260,16 +404,35 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
 
     obj = open_audio(path)
     if obj is None:
-        track.status = TrackStatus.FAILED
-        track.note("无法解析：格式不支持或文件损坏")
-        return track
-
-    track.info = describe_audio(obj, path)
-    try:
-        tags = read_tags(path, obj)
-    except Exception as exc:  # noqa: BLE001
-        tags = Tags()
-        track.note(f"标签读取异常：{exc}")
+        # mutagen 不支持的容器（W64/RF64/AOB/TrueHD/SHN/TAK…）退回 ffmpeg 解析
+        info = _ffmpeg_probe(path)
+        if info is None:
+            track.status = TrackStatus.FAILED
+            track.note("无法解析：格式不支持或文件损坏")
+            return track
+        track.info = info
+        tags = guess_from_filename(path)
+        track.note("mutagen 不支持该容器，已用 ffmpeg 解析技术参数")
+    else:
+        track.info = describe_audio(obj, path)
+        # AIFF-C 压缩格式（如 IMA ADPCM）mutagen 的 length/时长不可靠，
+        # 用 ffmpeg 补正技术参数；无损判定也跟着 ffmpeg 的 codec 走。
+        if path.suffix.lower() in (".aif", ".aiff"):
+            comp = _aiff_compression(path).upper()
+            if comp and comp not in ("NONE", "SOWT", "TWOS", "FL32", "FL64", "IN24", "IN32"):
+                fixed = _ffmpeg_probe(path)
+                if fixed is not None:
+                    track.info.duration = fixed.duration or track.info.duration
+                    track.info.sample_rate = fixed.sample_rate or track.info.sample_rate
+                    track.info.channels = fixed.channels or track.info.channels
+                    track.info.bit_depth = fixed.bit_depth or track.info.bit_depth
+                    track.info.bitrate = fixed.bitrate or track.info.bitrate
+                    track.info.lossless = fixed.lossless
+        try:
+            tags = read_tags(path, obj)
+        except Exception as exc:  # noqa: BLE001
+            tags = Tags()
+            track.note(f"标签读取异常：{exc}")
 
     track.original = tags
     track.working = tags.copy()

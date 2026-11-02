@@ -50,6 +50,14 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
   都不到（如 18kHz，正是 192kbps MP3 的低通位置）时没有辩护资格；
 - **单音测试信号阈值 0.9 → 0.97**：真实音乐集中度实测 0.31~0.92，原阈值会把普通歌曲
   误当测试信号直接判真。
+- **逐帧集中度识别扫频**：扫频的整段平均频谱集中度仅 0.20（像普通音乐），但每帧仍是
+  纯音（逐帧中位数 1.00）；并入判据后 D64/D128 扫频恢复真 DSD，真实电子乐 0.80~0.84
+  不受影响；
+- **跨格式解析兜底**：mutagen 不支持的 W64/RF64/CAF/AU/MKA/AOB/TrueHD/MP4-ALS/
+  SHN/TAK/OSQ/RKA 改用 ffmpeg 解析；MP4-ALS、WMA Lossless、TAK 正确标为无损，
+  MP3/AAC/Vorbis/µ-law/AIFF-ADPCM 等有损格式不再输出「真无损」结论；
+- **WavPack 封装 DSD**：1bit/352.8kHz 的 `.wv` 按 DSD 判据鉴定，不再当 PCM；
+- **最短分析时长 3s → 2s**：2~3 秒的测试片段（dragon.aif、TrueHD 裸流等）也能鉴定。
 
 ### V1.4.0 更新摘要
 
@@ -406,7 +414,8 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - **边界跌落保护**：边界处必须实际跌落 ≥20dB 才算内容截止。真 SACD 老录音的高频平缓延续（实测只跌 −7.4dB）不再被判成 PCM 转制，与上一条配合后可做到「赵雷式转制全判假、真 SACD 零回归」；
 - **同批推定加两条护栏**：①「整批都判假就不许改真」—— 老录音做成 SACD 时只有少数几首会被边界判据误伤，整批判假说明这批本身就是转制（实测 Taylor Swift 5 首 DSD128 全是 96k 源转制，边界漂在 46/50/52kHz，精确值众数只有 20%，被旧逻辑整批放行判真）；② 网格命中阈值 65% → 60%，因为真 SACD 的边界不在 22.05k/24k/48k/96k 这四档上（实测活出生命、Eagles 命中率 0%，林忆莲 50% 已是最高），而赵雷那批 44.1k/48k 混装是 61%；
 - **单音测试信号阈值 0.9 → 0.97**：集中度算的是基带前 5 个频点占比，真实音乐实测 0.31~0.92（流行乐低频本就集中），0.9 会把普通歌曲误当测试信号直接判真（实测 Taylor Swift「I Think He Knows」0.915 被放行）；纯音才会到 0.98 以上；
-- **「边界之上有谐波」保护加下限**：只在边界 ≥21.5kHz（CD 带宽）时才允许辩护。低于这个位置说明内容连 CD 都不如（128k/192k 低通就在 16~19kHz），必是有损源；而且边界越低、之上可测带宽越宽，越容易被误判成"有谐波"，逻辑是反的（实测张国荣某目录 13 首里 edge 20~26k 的 11 首都判假，唯独 edge=18k 那 2 首被判真）。
+- **「边界之上有谐波」保护加下限**：只在边界 ≥21.5kHz（CD 带宽）时才允许辩护。低于这个位置说明内容连 CD 都不如（128k/192k 低通就在 16~19kHz），必是有损源；而且边界越低、之上可测带宽越宽，越容易被误判成"有谐波"，逻辑是反的（实测张国荣某目录 13 首里 edge 20~26k 的 11 首都判假，唯独 edge=18k 那 2 首被判真）；
+- **逐帧集中度识别扫频**：整段平均频谱下，扫频的能量会摊到整条频率轴（实测集中度仅 0.20），看起来像普通音乐；但扫频在每一帧内仍是纯音（逐帧集中度中位数 1.00）。把逐帧集中度并入单音判据后，D64/D128 扫频测试信号恢复「真 DSD」，真实电子乐（0.80~0.84）不受影响。
 
 **已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
 判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
@@ -539,7 +548,11 @@ Root-cause fixes for "albums with no official SACD release being judged genuine 
 - **The "harmonics above the edge" defence now requires edge ≥21.5 kHz** (CD bandwidth);
   at 18 kHz — the 192 kbps MP3 low-pass — the content is lossy by definition;
 - **Test-tone threshold 0.9 → 0.97** — real music measures 0.31–0.92 across the library,
-  so the old threshold judged ordinary songs as pure tones and passed them.
+  so the old threshold judged ordinary songs as pure tones and passed them;
+- **Per-frame tone concentration** — a sweep's whole-segment concentration is only 0.20 (music-like), but every frame is a pure tone (median 1.00); D64/D128 sweeps return to genuine DSD while real electronic music (0.80–0.84) is unaffected;
+- **Cross-format probing fallback** — W64/RF64/CAF/AU/MKA/AOB/TrueHD/MP4-ALS/SHN/TAK/OSQ/RKA are parsed through ffmpeg when mutagen cannot open them; MP4-ALS, WMA Lossless and TAK are marked lossless, while MP3/AAC/Vorbis/µ-law/AIFF-ADPCM no longer receive a "genuine lossless" verdict;
+- **DSD inside WavPack** — 1-bit/352.8 kHz `.wv` files use the DSD criteria instead of PCM;
+- **Minimum analysis duration 3 s → 2 s** — 2–3 second test clips (dragon.aif, raw TrueHD) are now analysed.
 
 ### V1.4.0 highlights
 

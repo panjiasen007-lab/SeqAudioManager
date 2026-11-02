@@ -24,7 +24,17 @@ LOSSLESS_EXTS: frozenset[str] = frozenset(
 #: 有损格式（兼容兜底）
 LOSSY_EXTS: frozenset[str] = frozenset({".mp3", ".aac", ".ogg", ".oga", ".opus", ".mpc", ".wma"})
 
-SUPPORTED_EXTS: frozenset[str] = LOSSLESS_EXTS | LOSSY_EXTS
+#: 需要 ffmpeg 兜底探测的扩展名（mutagen 不支持这些容器/编码）
+EXTRA_EXTS: frozenset[str] = frozenset(
+    {
+        ".shn", ".tak", ".ofr", ".osq", ".rka", ".la",   # 无损编码
+        ".caf", ".au", ".w64", ".rf64", ".mp4",          # PCM/ALAC/ALS 容器
+        ".aob", ".thd", ".mlp", ".rmvb",                 # DVD-Audio / TrueHD / RealMedia
+        ".mka", ".302", ".raw",                          # Matroska / SMPTE 302M / 裸流
+    }
+)
+
+SUPPORTED_EXTS: frozenset[str] = LOSSLESS_EXTS | LOSSY_EXTS | EXTRA_EXTS
 
 #: 加密格式：明确不支持、不解密，导入时直接跳过并提示
 ENCRYPTED_EXTS: frozenset[str] = frozenset(

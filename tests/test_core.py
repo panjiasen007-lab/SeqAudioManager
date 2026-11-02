@@ -753,10 +753,62 @@ class TestAuthenticity(unittest.TestCase):
         self.assertEqual(_effective_bit_depth(samples), 16)
 
     def test_mp3_file_can_be_decoded(self) -> None:
-        """MP3 本身也应能解码分析（虽然它不需要"真假无损"结论）。"""
+        """有损格式不做「真假无损」鉴定，直接给出有损说明。"""
         result = self._verdict(self.fake_mp3)
-        self.assertNotEqual(result.verdict, "无法判定", result.error)
-        self.assertLess(result.cutoff_hz, 18000)
+        self.assertEqual(result.verdict, "无法判定")
+        self.assertIn("有损格式", result.error)
+
+
+class TestFormatSupport(unittest.TestCase):
+    """跨格式识别：扩展名覆盖、codec 无损判定、ffmpeg 兜底探测。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_fmt_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_extra_extensions_supported(self) -> None:
+        from seqaudio.core.model import SUPPORTED_EXTS
+
+        for ext in (".w64", ".rf64", ".caf", ".au", ".mp4", ".mka", ".302",
+                    ".aob", ".thd", ".mlp", ".shn", ".tak", ".osq", ".rka"):
+            self.assertIn(ext, SUPPORTED_EXTS)
+
+    def test_codec_lossless_classification(self) -> None:
+        from seqaudio.core.probe import _codec_is_lossless
+
+        for codec in ("flac", "alac", "ape", "wavpack", "tta", "tak", "shorten",
+                      "truehd", "mlp", "mp4als", "wmalossless", "dst"):
+            self.assertTrue(_codec_is_lossless(codec), codec)
+        for codec in ("pcm_s16le", "pcm_s24le", "pcm_f32le"):
+            self.assertTrue(_codec_is_lossless(codec), codec)
+        for codec in ("pcm_mulaw", "pcm_alaw", "aac", "mp3", "vorbis", "opus", "wmav2"):
+            self.assertFalse(_codec_is_lossless(codec), codec)
+
+    @unittest.skipUnless(
+        __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
+        "需要 ffmpeg",
+    )
+    def test_ffmpeg_fallback_probe_w64(self) -> None:
+        """mutagen 不支持的 W64 要能通过 ffmpeg 兜底解析。"""
+        import subprocess
+
+        from seqaudio.core.authenticity import find_ffmpeg
+        from seqaudio.core.probe import probe
+
+        src = make_samples.make_wav(self.tmp / "src.wav", seconds=2.0)
+        w64 = self.tmp / "src.w64"
+        subprocess.run(
+            [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(src), "-c:a", "pcm_s16le", str(w64)],
+            check=True, timeout=60,
+        )
+        track = probe(w64, with_cue=False)
+        self.assertEqual(track.info.fmt, "W64")
+        self.assertTrue(track.info.lossless)
+        self.assertAlmostEqual(track.info.duration or 0.0, 2.0, places=1)
+        self.assertTrue(track.notes and "ffmpeg" in track.notes[0])
 
 
 class TestMerge(unittest.TestCase):
@@ -2109,6 +2161,25 @@ class TestDsdSignalEdge(unittest.TestCase):
         )
         self.assertEqual(verdict, "疑似假 DSD", reasons)
         self.assertTrue(any("有损编码器" in r for r in reasons), reasons)
+
+    def test_frame_tone_concentration_separates_sweep(self) -> None:
+        """逐帧集中度：扫频每帧是纯音（≈1），噪声/音乐远低于阈值。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _frame_tone_concentration
+
+        freqs = np.arange(0, 24_000, 43.0)
+        rows = []
+        for peak in (50, 200, 400):
+            row = np.full(freqs.size, -100.0)
+            row[peak] = 0.0
+            rows.append(row)
+        tone = _frame_tone_concentration(np.stack(rows), freqs)
+        self.assertGreater(tone, 0.95)
+
+        rng = np.random.default_rng(1)
+        noise = rng.uniform(-100.0, -30.0, size=(5, freqs.size))
+        self.assertLess(_frame_tone_concentration(noise, freqs), 0.5)
 
     def test_judge_keeps_genuine_when_edge_off_grid(self) -> None:
         """边界落在网格之外（自然滚降）→ 仍然判真 DSD。"""

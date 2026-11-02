@@ -1047,6 +1047,31 @@ def _tone_concentration(freqs: np.ndarray, db: np.ndarray, max_hz: float = 24_00
     return float(top.sum() / total)
 
 
+def _frame_tone_concentration(
+    rows: np.ndarray, freqs: np.ndarray, max_hz: float = 24_000.0
+) -> float:
+    """逐帧计算「前 5 个频点能量占比」并取中位数。
+
+    ``_tone_concentration`` 用整段平均频谱，扫频信号的能量会摊到整条频率轴，
+    平均后看起来像普通音乐（实测 sweep 只有 0.20）。但扫频在**每一帧**
+    内仍是一个纯音，逐帧集中度接近 1.0。真实音乐即使是电子乐也只有
+    0.80~0.84，因此用逐帧中位数可以把扫频/纯音与音乐可靠分开。
+    """
+    mask = freqs <= max_hz
+    if rows.size == 0 or not np.any(mask):
+        return 0.0
+    vals: list[float] = []
+    for row in rows:
+        power = np.power(10.0, row[mask] / 10.0)
+        total = float(power.sum())
+        if total <= 0:
+            continue
+        vals.append(float(np.sort(power)[-5:].sum() / total))
+    if not vals:
+        return 0.0
+    return float(np.median(vals))
+
+
 def _judge_dsd(
     slope: float,
     ultra: float,
@@ -1276,7 +1301,11 @@ def _judge(
     reasons: list[str] = []
     sample_rate = info.sample_rate or 44100
     nyquist = sample_rate / 2.0
-    is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
+    is_dsd = (
+        info.fmt in ("DSF", "DFF")
+        or bool(info.dsd_rate)
+        or (info.bit_depth == 1 and (info.sample_rate or 0) >= 352_800)
+    )
     ratio = ratio or ((cutoff / nyquist) if nyquist else 0.0)
 
     if is_dsd:
@@ -1471,7 +1500,7 @@ def _judge(
         if cutoff < 17000:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steep_oct:.0f}dB/oct），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（近截止 {steepness:.0f}dB/kHz），"
                     "符合老录音/模拟母带的高频自然衰减，不是编码器低通"
                 )
                 return VERDICT_TRUE, 0.7, reasons
@@ -1483,7 +1512,7 @@ def _judge(
         if cutoff < 19500:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steep_oct:.0f}dB/oct），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（近截止 {steepness:.0f}dB/kHz），"
                     "符合老录音/模拟母带的高频自然衰减，非有损转码"
                 )
                 return VERDICT_TRUE, 0.7, reasons
@@ -1498,7 +1527,7 @@ def _judge(
         if cutoff < 20500:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steepness:.0f}dB/kHz），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（近截止 {steepness:.0f}dB/kHz），"
                     "符合老录音高频自然衰减，非高码率转码"
                 )
                 return VERDICT_TRUE, 0.72, reasons
@@ -1585,8 +1614,13 @@ def analyze(
     result.nyquist_hz = sample_rate // 2
 
     duration = info.duration or _probe_duration(ffmpeg, path)
-    if not duration or duration < 3:
+    if not duration or duration < 2:
         result.error = "时长过短，无法分析"
+        return result
+    # 有损格式（MP3/AAC/Vorbis/µ-law/AIFF-ADPCM…）没有「真假无损」可谈：
+    # 它们本身就是有损的，再判「真无损」会给出完全错误的结论。
+    if not info.lossless:
+        result.error = f"有损格式（{info.fmt or '未知'}），不做无损鉴定"
         return result
 
     spectra: list[tuple[np.ndarray, np.ndarray]] = []
@@ -1594,7 +1628,11 @@ def analyze(
     analyzed = 0.0
     above_16 = False
     peak_dbfs = -200.0
-    is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
+    is_dsd = (
+        info.fmt in ("DSF", "DFF")
+        or bool(info.dsd_rate)
+        or (info.bit_depth == 1 and (info.sample_rate or 0) >= 352_800)
+    )
     # DSD 的「信号边界」判据要保留整段样本做分帧统计，取能量最大的一段
     # （前奏/淡出段内容少，波动曲线会失真）
     edge_samples: Optional[np.ndarray] = None
@@ -1635,7 +1673,9 @@ def analyze(
                 edge_samples, edge_rate, edge_peak = samples, sample_rate, seg_peak
 
     if not spectra:
-        if fail_count:
+        if info.fmt == "WMA Lossless":
+            result.error = "当前 ffmpeg 不支持 WMA Lossless 解码，无法做频谱鉴定（容器本身是无损）"
+        elif fail_count:
             result.error = "解码不完整（文件可能被截断或损坏）"
         else:
             result.error = "解码失败：ffmpeg 无法解析该文件"
@@ -1694,6 +1734,7 @@ def analyze(
     edge_floor = 0.0
     edge_above_db = -120.0
     edge_above_flat = 1.0
+    frame_tone = 0.0
     if is_dsd:
         nyq = float(result.nyquist_hz or 352800)
         # 噪声整形斜率（确认是不是真的 DSD 比特流）
@@ -1730,6 +1771,8 @@ def analyze(
                 flat = _spectral_flatness(freqs, db, low, high)
                 # 算不出来就不构成「之上有谐波」的证据，退回 1.0（不触发保护）
                 edge_above_flat = 1.0 if flat is None else flat
+            # 逐帧集中度：扫频每帧都是纯音，平均频谱却看不出来
+            frame_tone = _frame_tone_concentration(rows, row_freqs)
         result.noise_shaping_slope = slope
         result.ultrasonic_ratio = ultra
         result.baseband_cutoff = int(base_cutoff)
@@ -1790,6 +1833,7 @@ def analyze(
         sbr_score = _sbr_copyup_score(freqs, db, nyq)
     # 单音测试信号：基带能量集中在极少数频点，DSD 的帧间波动边界判据不适用
     test_signal = _tone_concentration(freqs, db) if is_dsd else 0.0
+    test_signal = max(test_signal, frame_tone)
     # 位深注水：声明 24bit，但 s24 解码后低 8 位全部为零 —— 说明源是 16bit
     # 左移得到的。这是纯时域事实，比「峰值有没有越过 16bit 上限」可靠：
     # 很多真 24bit 录音的峰值本来就在 -12dBFS，碰不到 16bit 满刻度。
@@ -1876,7 +1920,11 @@ def full_spectrum(
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
     if max_seconds:
         cmd += ["-t", f"{max_seconds:.1f}"]
-    is_dsd = info.fmt in ("DSF", "DFF") or bool(info.dsd_rate)
+    is_dsd = (
+        info.fmt in ("DSF", "DFF")
+        or bool(info.dsd_rate)
+        or (info.bit_depth == 1 and (info.sample_rate or 0) >= 352_800)
+    )
     cmd += [
         "-i", str(path),
         "-map", "0:a:0",
