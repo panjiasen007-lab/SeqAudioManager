@@ -58,7 +58,9 @@ def describe_audio(obj: mutagen.FileType, path: Path) -> AudioInfo:
     ext = path.suffix.lower()
 
     info.fmt = _format_name(obj, ext)
-    info.lossless = _is_lossless(obj, ext)
+    info.lossless = _is_lossless(obj, ext, path)
+    if info.fmt == "WMA" and info.lossless:
+        info.fmt = "WMA Lossless"
 
     raw_info = getattr(obj, "info", None)
     if raw_info is not None:
@@ -105,6 +107,7 @@ def _format_name(obj: mutagen.FileType, ext: str) -> str:
         "dsf": "DSF",
         "dsdiff": "DFF",
         "oggvorbis": "OGG",
+        "oggflac": "Ogg-FLAC",
         "oggopus": "OPUS",
         "aac": "AAC",
         "musepack": "MPC",
@@ -114,14 +117,83 @@ def _format_name(obj: mutagen.FileType, ext: str) -> str:
     return names.get(mod, ext.lstrip(".").upper() or "?")
 
 
-def _is_lossless(obj: mutagen.FileType, ext: str) -> bool:
-    if ext in (".flac", ".ape", ".wav", ".wave", ".wv", ".tta", ".dsf", ".dff", ".aif", ".aiff"):
+def _aiff_compression(path: Path) -> str:
+    """从 AIFF/AIFF-C 头读压缩类型（'NONE' 表示未压缩 PCM）。"""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(12)
+            if len(head) < 12 or head[:4] != b"FORM":
+                return ""
+            form = head[8:12]
+            if form == b"AIFF":
+                return "NONE"
+            pos = 12
+            while pos < 4096:
+                fh.seek(pos)
+                chunk = fh.read(8)
+                if len(chunk) < 8:
+                    break
+                cid, size = chunk[:4], int.from_bytes(chunk[4:], "big")
+                if cid == b"COMM":
+                    data = fh.read(min(size, 64))
+                    # AIFC 的 COMM 在采样率(10B)之后还有 4 字节压缩类型
+                    if form == b"AIFC" and len(data) >= 22:
+                        return data[18:22].decode("latin-1").strip()
+                    return "NONE"
+                pos += 8 + size + (size & 1)
+    except OSError:
+        return ""
+    return ""
+
+
+def _wav_format_tag(path: Path) -> int:
+    """从 WAV 的 fmt 块读 audioFormat（1=PCM，3=float，0x11=IMA ADPCM…）。"""
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(64)
+        idx = data.find(b"fmt ")
+        if idx >= 0 and len(data) >= idx + 10:
+            return int.from_bytes(data[idx + 8 : idx + 10], "little")
+    except OSError:
+        return -1
+    return -1
+
+
+def _is_lossless(obj: mutagen.FileType, ext: str, path: Path | None = None) -> bool:
+    """按 mutagen 类与编解码器判定是否无损，而不是只看扩展名。
+
+    扩展名会骗人：`.ogg/.oga` 既可能是 Vorbis（有损）也可能是 Ogg-FLAC（无损），
+    `.wma` 既可能是 WMA Pro 也可能包含 WMA Lossless，`.aif` 还可能是 IMA ADPCM。
+    """
+    mod = type(obj).__module__.rsplit(".", 1)[-1]
+    raw = getattr(obj, "info", None)
+    codec = str(
+        getattr(raw, "codec", "") or getattr(raw, "codec_name", "") or ""
+    ).lower()
+
+    # 原生无损容器/编码
+    if mod in ("flac", "wavpack", "trueaudio", "monkeysaudio", "dsf", "dsdiff", "oggflac"):
         return True
-    if ext == ".m4a":
-        mod = type(obj).__module__.rsplit(".", 1)[-1]
-        if mod == "mp4":
-            codec = str(getattr(getattr(obj, "info", None), "codec", "") or "").lower()
-            return "alac" in codec
+    # MP4 家族：ALAC 无损，AAC 有损
+    if mod == "mp4":
+        return "alac" in codec
+    # ASF/WMA：只有 wmalossless 编解码器是无损
+    if mod == "asf":
+        return ("wmalossless" in codec) or ("lossless" in codec)
+    # WAV：fmt 块里的 audioFormat 1/3 是 PCM/浮点；ADPCM/µ-law/A-law 有损
+    if mod == "wave" and path is not None:
+        tag = _wav_format_tag(path)
+        if tag >= 0:
+            return tag in (1, 3, 0xFFFE)
+    # AIFF/AIFF-C：compression type 'NONE' 或 PCM 系为无损；'ima4'/MACE 有损
+    if mod == "aiff" and path is not None:
+        comp = _aiff_compression(path).upper()
+        if comp:
+            return comp in ("NONE", "SOWT", "TWOS", "FL32", "FL64", "IN24", "IN32")
+    # 兜底：按扩展名（保持对未知 mutagen 类的兼容）
+    if ext in (".flac", ".ape", ".wv", ".tta", ".dsf", ".dff"):
+        return True
+    if ext in (".aif", ".aiff", ".wav", ".wave", ".caf"):
         return True
     return False
 
@@ -208,6 +280,9 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
             try:
                 sheet = cue_mod.parse_cue(cue_path)
                 track.cue = sheet
+                # 用整轨时长补齐最后一轨的结束时间；否则最后一轨 duration=0，
+                # 分轨导出会只切出 0.1 秒。
+                cue_mod.fill_durations(sheet, track.info.duration or 0.0)
                 if sheet.title:
                     track.note(f"已关联 CUE（{sheet.encoding_used}）：{sheet.title}")
                 track.note(f"CUE 含 {len(sheet.tracks)} 个曲目")
@@ -234,6 +309,7 @@ def expand_cue_tracks(tracks: list[Track]) -> list[Track]:
         if cue is None or len(cue.tracks) <= 1:
             out.append(track)
             continue
+        cue_mod.fill_durations(cue, track.info.duration or 0.0)
         total = len(cue.tracks)
         for index, entry in enumerate(cue.tracks):
             title = entry.title or f"Track {entry.number:02d}"

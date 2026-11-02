@@ -267,6 +267,7 @@ class CueTrack:
     performer: str = ""
     start_ms: int = 0
     end_ms: int = 0
+    pregap_ms: int = 0          # INDEX 00：本轨预间隙起点（上一轨的结束边界）
 
     @property
     def duration(self) -> float:

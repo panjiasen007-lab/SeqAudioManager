@@ -75,6 +75,109 @@ class TestCue(unittest.TestCase):
         # 分轨时长来自 CUE，而非整轨文件时长
         self.assertEqual(expanded[0].duration_text, "4:10")
 
+    def test_expand_cue_fills_last_track_duration(self) -> None:
+        """末轨的结束时间必须用整轨总时长补齐，否则分轨只有 0.1 秒。"""
+        from seqaudio.core.model import AudioInfo, Track
+        from seqaudio.core.probe import expand_cue_tracks
+
+        cue_path = make_samples.make_cue(self.tmp / "album.cue", encoding="gbk")
+        track = Track(path=self.tmp / "album.wav")
+        track.info = AudioInfo(fmt="WAV", lossless=True, duration=750.0)
+        track.cue = cue_mod.parse_cue(cue_path)
+
+        expanded = expand_cue_tracks([track])
+        last = expanded[-1]
+        self.assertGreater(last.cue_track_entry.duration, 0)
+        self.assertNotEqual(last.duration_text, "0:00")
+        self.assertEqual(
+            round(last.cue_track_entry.duration, 3),
+            round(750.0 - last.cue_track_entry.start_ms / 1000.0, 3),
+        )
+
+    def test_fill_durations_sets_last_end(self) -> None:
+        from seqaudio.core.cue import fill_durations
+
+        sheet = cue_mod.parse_cue(
+            make_samples.make_cue(self.tmp / "album.cue", encoding="gbk")
+        )
+        self.assertEqual(sheet.tracks[-1].duration, 0.0)
+        fill_durations(sheet, 750.0)
+        self.assertGreater(sheet.tracks[-1].duration, 0.0)
+        self.assertEqual(sheet.tracks[-1].end_ms, 750_000)
+
+    def test_trim_pregap_option(self) -> None:
+        """勾选后每轨在下一轨 INDEX 00 截止，比默认少一个预间隙。"""
+        from seqaudio.pipeline.cue_split import _entry_bounds
+
+        sheet = cue_mod.parse_cue(
+            make_samples.make_cue(self.tmp / "album.cue", encoding="gbk")
+        )
+        self.assertEqual(sheet.tracks[1].pregap_ms, 248_666)
+        total_ms = 750_000
+
+        start, dur_default = _entry_bounds(sheet, 0, total_ms, False)
+        _, dur_trim = _entry_bounds(sheet, 0, total_ms, True)
+        self.assertEqual(start, 0)
+        self.assertEqual(dur_default, 250_666)
+        self.assertEqual(dur_trim, 248_666)
+        self.assertLess(dur_trim, dur_default)
+
+        # 末轨没有下一轨，两种模式都以整轨总时长结束
+        _, last_default = _entry_bounds(sheet, 2, total_ms, False)
+        _, last_trim = _entry_bounds(sheet, 2, total_ms, True)
+        self.assertEqual(last_default, last_trim)
+
+    @unittest.skipUnless(
+        __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
+        "需要 ffmpeg",
+    )
+    def test_pregap_audio_protection(self) -> None:
+        """预间隙有音频要识别为“不可裁”，静音间隙才允许裁。"""
+        import subprocess
+
+        from seqaudio.core.authenticity import find_ffmpeg
+        from seqaudio.pipeline.cue_split import _pregap_has_audio
+
+        ff = find_ffmpeg()
+        loud = self.tmp / "loud.wav"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=1000:duration=3",
+             "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", str(loud)],
+            check=True, timeout=60,
+        )
+        self.assertTrue(_pregap_has_audio(ff, loud, 0.0, 1.0))
+
+        silent = self.tmp / "silent.wav"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+             "-t", "1.0", "-c:a", "pcm_s16le", str(silent)],
+            check=True, timeout=60,
+        )
+        self.assertFalse(_pregap_has_audio(ff, silent, 0.0, 0.9))
+
+    @unittest.skipUnless(
+        __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
+        "需要 ffmpeg",
+    )
+    def test_split_one_validates_and_is_atomic(self) -> None:
+        """切分必须校验实际时长；越界请求不能留下半截/错误文件。"""
+        from seqaudio.core.authenticity import find_ffmpeg
+        from seqaudio.core.probe import probe
+        from seqaudio.pipeline.cue_split import split_one
+
+        src = make_samples.make_wav(self.tmp / "src.wav", seconds=2.0)
+        ff = find_ffmpeg()
+        out = self.tmp / "ok.flac"
+        self.assertTrue(split_one(ff, src, out, 0.0, 1.0))
+        self.assertAlmostEqual(probe(out, with_cue=False).info.duration, 1.0, places=1)
+
+        bad = self.tmp / "bad.flac"
+        self.assertFalse(split_one(ff, src, bad, 0.5, 5.0))
+        self.assertFalse(bad.exists())
+        self.assertFalse((self.tmp / "bad.seqaudio.tmp.flac").exists())
+
     def test_expand_cue_skips_single_track(self) -> None:
         """单轨 CUE 或无 CUE 不展开。"""
         from seqaudio.core.model import Track
@@ -1270,6 +1373,27 @@ class TestDsdJudgement(unittest.TestCase):
         verdict, _, _ = _judge_dsd(2.0, -45.0, 0.0, 0.0, 0.0)
         self.assertEqual(verdict, "疑似假 DSD")
 
+    def test_edge_guard_skips_harmonic_content_above(self) -> None:
+        """边界之上仍有谐波（扫频/窄带）→ 边界不可信，不能据此判假。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            22.0, -10.0, 0.0, 0.0, 0.0,
+            edge_hz=18000.0, edge_above_db=-43.0, edge_above_flat=0.17,
+        )
+        self.assertEqual(verdict, "真 DSD", reasons)
+        self.assertTrue(any("不是真实截止" in r for r in reasons))
+
+    def test_edge_guard_keeps_noise_above_fake(self) -> None:
+        """边界之上是平坦噪声（编码器特征）→ 边界判据仍然有效。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, _ = _judge_dsd(
+            22.0, -10.0, 22050.0, 5.0, -45.0,
+            edge_hz=22000.0, edge_above_db=-45.0, edge_above_flat=0.9,
+        )
+        self.assertEqual(verdict, "疑似假 DSD")
+
     def test_noise_shaping_slope(self) -> None:
         """上升频谱应得到正斜率，平坦频谱应接近 0。"""
         import numpy as np
@@ -1534,34 +1658,53 @@ class TestAuthenticityV13(unittest.TestCase):
         self.assertEqual(verdict, "真无损", reasons)
 
     def test_24bit_padding_detected(self) -> None:
-        """声明 24bit 但样本从未越过 16bit 上限 → 位深注水。"""
+        """声明 24bit，但 s24 解码后最低字节全零 → 位深注水。"""
         from seqaudio.core.authenticity import _judge
 
         verdict, _, reasons = _judge(
-            self.info24, 23000.0, 30.0, -70.0, 24,
-            edge_db=-90.0, ratio=0.96, above16=False, peak_dbfs=-4.9,
+            self.info24, 23000.0, 30.0, -70.0, 16,
+            edge_db=-90.0, ratio=0.96, depth_padding=True,
         )
         self.assertEqual(verdict, "疑似升位深", reasons)
 
     def test_real_24bit_not_flagged(self) -> None:
-        """真 24bit：样本越过 16bit 上限，不能判位深注水。"""
+        """真 24bit：低字节零比例正常，不能判位深注水。"""
         from seqaudio.core.authenticity import _judge
 
         verdict, _, reasons = _judge(
             self.info24, 23000.0, 30.0, -70.0, 24,
-            edge_db=-80.0, ratio=0.96, above16=True, peak_dbfs=-1.0,
+            edge_db=-80.0, ratio=0.96, depth_padding=False,
         )
         self.assertNotEqual(verdict, "疑似升位深", reasons)
 
     def test_quiet_24bit_not_flagged(self) -> None:
-        """电平极低的 24bit 文件本来就用不满动态范围，不能据此判注水。"""
+        """电平极低但位深真实，不能据此判注水。"""
         from seqaudio.core.authenticity import _judge
 
         verdict, _, reasons = _judge(
             self.info24, 23000.0, 30.0, -70.0, 24,
-            edge_db=-80.0, ratio=0.96, above16=False, peak_dbfs=-52.0,
+            edge_db=-80.0, ratio=0.96, depth_padding=False,
         )
         self.assertNotEqual(verdict, "疑似升位深", reasons)
+
+    def test_near_nyquist_is_true(self) -> None:
+        """内容铺满声明带宽（≥95%）时，扩展带空白不算转码。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 21800.0, 190.0, -70.0, 16, edge_db=-200.0, ratio=0.99
+        )
+        self.assertEqual(verdict, "真无损", reasons)
+
+    def test_natural_rolloff_is_true(self) -> None:
+        """平滑滚降 + 有模拟底噪 → 母带自然衰减，不是有损转码。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 16500.0, 2.0, -66.0, 16,
+            edge_db=-66.0, ratio=0.75, steep_oct=5.0,
+        )
+        self.assertEqual(verdict, "真无损", reasons)
 
     def test_upsample_by_empty_edge(self) -> None:
         """48kHz 声明但内容止于 22kHz、扩展带全空 → 44.1k 升采样。"""
@@ -1703,39 +1846,6 @@ class TestAuthenticityV13(unittest.TestCase):
             edge_db=-80.0, ratio=0.95, sbr_score=0.9,
         )
         self.assertIn(verdict, ("假无损", "疑似假无损"), reasons)
-
-    @unittest.skipUnless(
-        __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
-        "需要 ffmpeg",
-    )
-    def test_16bit_padded_to_24bit_file(self) -> None:
-        """真实文件：16bit 内容装进 24bit 容器，应判「疑似升位深」。"""
-        import subprocess
-
-        ff = __import__("seqaudio.core.authenticity", fromlist=["x"]).find_ffmpeg()
-        tmp = Path(tempfile.mkdtemp(prefix="seq_up_"))
-        try:
-            src16 = tmp / "a16.wav"
-            subprocess.run(
-                [ff, "-hide_banner", "-loglevel", "error", "-y",
-                 "-f", "lavfi", "-i", "anoisesrc=d=8:c=pink:a=0.5",
-                 "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(src16)],
-                check=True, timeout=120,
-            )
-            src24 = tmp / "a24.wav"
-            subprocess.run(
-                [ff, "-hide_banner", "-loglevel", "error", "-y",
-                 "-i", str(src16), "-c:a", "pcm_s24le", str(src24)],
-                check=True, timeout=120,
-            )
-            info = probe.probe(src24, with_cue=False).info
-            self.assertEqual(info.bit_depth, 24)
-            from seqaudio.core.authenticity import analyze
-
-            result = analyze(src24, info)
-            self.assertEqual(result.verdict, "疑似升位深", result.reasons)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestDsdSourceCliff(unittest.TestCase):

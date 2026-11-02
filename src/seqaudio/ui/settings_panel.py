@@ -29,8 +29,6 @@ from .widgets import Card
 class SettingsPanel(QWidget):
     settingsChanged = Signal()   # 有未保存的修改（不再自动落盘，仅标记脏）
     saved = Signal()             # 「保存参数」成功后发出，主窗口据此刷新依赖设置的状态
-    #: 星空背景开关需要即时预览（不只是存进配置），单独发信号
-    spaceToggled = Signal(bool)
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -261,17 +259,19 @@ class SettingsPanel(QWidget):
         )
         self.min_duration_spin.valueChanged.connect(self._notify)
         card.add_form([("最短时长", self.min_duration_spin)])
+
+        self.trim_pregap_check = QCheckBox("分轨在下一轨 INDEX 00 处截止")
+        self.trim_pregap_check.setToolTip(
+            "勾选：每轨输出到下一轨预间隙起点（INDEX 00），去掉轨尾约 2 秒的静音预间隙；\n"
+            "若预间隙里检测到真实音频（隐藏曲/尾奏），会自动保留，不会裁掉内容。\n"
+            "取消：按 EAC/CUE 习惯，把预间隙归入前一轨（默认）"
+        )
+        self.trim_pregap_check.toggled.connect(self._notify)
+        card.add_widget(self.trim_pregap_check)
         return card
 
     def _build_ui_card(self) -> Card:
         card = Card("界面与清理", "", theme.PURPLE)
-
-        self.space_check = QCheckBox("动态星空背景")
-        self.space_check.setToolTip(
-            "窗口背景在宇宙中持续穿行，每 24 秒切换一个星区\n关闭后为纯深色，笔记本上更省电"
-        )
-        self.space_check.toggled.connect(self._on_space_toggled)
-        card.add_widget(self.space_check)
 
         self.suspect_check = QCheckBox("清理时包含「疑似」项")
         self.suspect_check.setToolTip(
@@ -294,10 +294,6 @@ class SettingsPanel(QWidget):
         hint.setWordWrap(True)
         card.add_widget(hint)
         return card
-
-    def _on_space_toggled(self, checked: bool) -> None:
-        self.spaceToggled.emit(checked)
-        self._notify()
 
     def _build_save_bar(self) -> QWidget:
         """底部保存条：修改参数后必须点「保存」才生效，未保存时高亮提示。"""
@@ -435,7 +431,7 @@ class SettingsPanel(QWidget):
 
             self.recursive_check.setChecked(settings.recursive_scan)
             self.min_duration_spin.setValue(int(settings.min_duration_sec))
-            self.space_check.setChecked(settings.space_background)
+            self.trim_pregap_check.setChecked(settings.cue_split_trim_pregap)
             self.suspect_check.setChecked(settings.cleanup_include_suspect)
             self.cover_check.setChecked(settings.ensure_folder_cover)
         finally:
@@ -481,8 +477,8 @@ class SettingsPanel(QWidget):
 
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.min_duration_sec = float(self.min_duration_spin.value())
+        settings.cue_split_trim_pregap = self.trim_pregap_check.isChecked()
 
-        settings.space_background = self.space_check.isChecked()
         settings.cleanup_include_suspect = self.suspect_check.isChecked()
         settings.ensure_folder_cover = self.cover_check.isChecked()
         return settings

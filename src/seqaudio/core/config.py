@@ -76,12 +76,12 @@ class Settings:
     # ---- 扫描与过滤 ----
     recursive_scan: bool = True
     min_duration_sec: float = 30.0         # 过滤短视频 BGM / 广告音频
+    cue_split_trim_pregap: bool = False    # CUE 分轨在下一轨 INDEX 00 处截止（去掉轨尾预间隙）
     skip_encrypted: bool = True
 
     # ---- 界面 ----
     theme: str = "深空"                     # 主题名（见 ui/theme.THEMES）
     language: str = "zh_CN"                 # 界面语言（见 ui/i18n.LOCALES）
-    space_background: bool = True          # 星空动态背景
     cleanup_include_suspect: bool = True   # 清理时是否包含「疑似」项
 
     # ---- 文件夹封面 ----

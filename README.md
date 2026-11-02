@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.3.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -32,9 +32,17 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **真假无损鉴定** —— 频谱分析判断「无损」是真无损还是 MP3 转码伪装的（含 DSD 专门判据）；
 - **一键清理假无损** —— 判定可疑的文件移入回收站或软件隔离区，随时可还原，附频谱图可自行复核；
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
-- **星空动态背景** —— 界面在宇宙中持续穿行，每 24 秒切换星区，可一键关闭省电。
 
 > 授权：**GNU General Public License v3.0**。界面字体 Noto Sans SC / JetBrains Mono 为 SIL OFL 1.1，随包分发。
+
+### V1.4.0 更新摘要
+
+- 移除星空动态背景，界面改为纯主题底色；
+- 「文件名」列默认显示，新增采样率/位深/DSD 规格筛选与右键「复制完整路径」；
+- 真假无损判定重构：不再用带宽百分比单独判假，升位深改用 s24 最低字节零比例，截断文件判「无法判定」；
+- DSD 边界判据增加可靠性保护，修复扫频/窄带测试信号误伤；
+- 无损格式识别按 codec 判定：Ogg-FLAC、WMA Lossless 正确标为无损，AIFF 内 IMA ADPCM 标为有损；
+- CUE 分轨修复末轨只有 0.1 秒的问题，新增「在下一轨 INDEX 00 截止」选项，并自动保护含隐藏音频的预间隙。
 
 ---
 
@@ -106,7 +114,6 @@ src/seqaudio/
 │   └── processor.py        单首流程 + 批量调度 + 失败隔离
 └── ui/
     ├── main_window.py      主窗口：表格、工具栏、日志、右键菜单、拖拽
-    ├── space.py            星空背景：三层视差飞行 + 星区渐变切换
     ├── track_model.py      表格模型 + 筛选代理（无损 / 问题 / 鉴定结论）
     ├── delegate.py         自绘状态胶囊、等宽数字、选中高亮条
     ├── settings_panel.py   参数面板
@@ -179,8 +186,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.3.0-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.3.0-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.4.0-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.4.0-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -224,7 +231,7 @@ Visual Studio Build Tools。
 | 带宽 + 扩展带能量 | 升采样后原 Nyquist 之上只剩插值残余（-100dB 以下），真母带仍有 -60~-80dB 内容 | 升采样 |
 | **源码带宽台阶** | 44.1k→48k 升采样后 22.05kHz 处有 ≥18dB 台阶；有些工具加 dither 把台阶填成噪声伪装成内容，但台阶本身仍在 | 升采样（噪声填充型） |
 | **谐波相干性（扩展带平坦度）** | 真实乐器的超声内容是离散谐波峰（平坦度→0），dither 填充是平坦白噪声（→1）；dither 加到把台阶填平（<18dB）时台阶判据失效，但"噪声本质"藏不住 | 升采样（噪声填充型兜底） |
-| 样本是否越过 16bit 上限 | 16bit 内容零填充成 24bit 后，样本绝对值永远 ≤ 32767 | 升位深 |
+| **最低字节零比例** | 16bit 内容零填充成 24bit 后，s24 解码的最低 8 位恒为零；真 24bit 只有约 0.4% 的样本恰为零 | 升位深 |
 | 截止之上是否数字静音 | 编码器砍完高频留下数字空白（-100dB）；磁带/母带总有模拟底噪（-70~-85dB） | 转码 |
 | 截止位置 + 陡度 | 128k≈16kHz、192k≈18.5kHz、320k≈20kHz、CD≈22.05kHz | 转码分档 |
 | 陡度（dB/oct） | 编码器 >60dB/oct，话筒/磁带更平缓 | 辅助 |
@@ -272,7 +279,8 @@ V1.2.6 起用两条**互相正交**的判据 —— 只看电平台阶不够，�
    的低通位置；
 4. **噪声整形斜率**（50→100kHz，dB/oct）—— 确认比特流本身是真的
    （PCM 改后缀的假 DSD 在超声区是平坦的）；
-5. **超声基底**（辅助）—— 真 DSD 在 30~40kHz 已有 -29 ~ -46dB 的能量。
+5. **超声基底**（辅助）—— 真 DSD 在 30~40kHz 已有 -29 ~ -46dB 的能量；
+6. **边界可靠性保护**（V1.4.0）—— 边界之上若仍有谐波内容（能量 > -80dB 且频谱平坦度 < 0.5），说明这是扫频/窄带信号造成的假边界，直接跳过边界判据，避免把扫频测试信号或高频稀疏的真实录音误判成 PCM 转制。
 
 基带截止只扫 ≤24kHz，避免把 DXD 工作流的 176kHz 缺口误当 CD 墙。
 
@@ -350,6 +358,17 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 
 速度约 0.3~3 秒/首（DSD 文件更大，解码更久），一千首约 10~30 分钟。
 
+**V1.4.0 判定修订**（对照 63 个真实/测试样本逐条复核后落地）：
+
+- **不再用带宽百分比单独判假**：截止之上有模拟底噪（> −95dB）且滚降平缓（dB/kHz 与 dB/oct 任一侧满足自然衰减）→ 判为母带自然滚降，给「真无损」；
+- **Nyquist 保护**：内容到达声明 Nyquist 的 95% 以上时，不再把 Nyquist 附近的必然空白误判成编码器低通（22.05kHz 采样测试文件、满带宽 96k 母带因此纠正）；
+- **升位深改用 s24 最低字节零比例 + 有效位深**，不再依赖「峰值是否越过 16bit 上限」——峰值 −12dBFS 的真 24bit 录音不再被误判；20bit 源会注明「源精度 20bit」而不是判假；
+- **样本截断/解码不完整**（如 1MB partial 测试文件）直接给「无法判定」，不再用残缺频谱判假；
+- **证据优先级**：SBR copy-up 先于带宽判断；MP3 频谱空洞 / sfb21 凹陷先于「平滑滚降」；绝对带宽 <14kHz 且 <65% 时最高只给「疑似」；
+- **无损格式识别按 codec 而不是扩展名**：Ogg-FLAC、WMA Lossless 正确标为无损，AIFF 里的 IMA ADPCM 正确标为有损；
+- **DSD 单音测试信号**：基带能量集中在极少数频点时，帧间波动边界判据不适用，改按噪声整形确认比特流；
+- **DSD 边界可靠性保护**：边界之上仍有谐波（且不是编码器噪声）时跳过边界判据 —— 修复扫频/窄带信号被误判为 PCM 转制的问题。
+
 **已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
 判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
 边界落在 28~38kHz 的文件会保留为「真 DSD」—— 那既可能是模拟母带转录的真实 DSD，
@@ -412,7 +431,6 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - 一键清理假无损 ✅（回收站 / 隔离区 / 彻底删除三级，隔离区可还原）
 - 频谱查看器 ✅（整首完整瀑布图 + 平均曲线双视图、截止标记、判定依据）
 - 按鉴定结论筛选 ✅ / 鉴定结果进 CSV 报表 ✅
-- 星空动态背景 ✅（5 星区循环、视差飞行、可关闭）
 
 **P1（部分已实现）**
 - 多源聚合置信度评分 ✅
@@ -421,7 +439,7 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - FLAC 结构校验 ✅（深度 MD5 需系统装 flac.exe）
 - 预设方案 ✅ / CSV 报表 ✅
 - AcoustID 音频指纹 ⬜（接口已预留 `acoustid_key`）
-- CUE 分轨导出（模式 2）✅（切分 + CUE 标签 + 歌词匹配）
+- CUE 分轨导出（模式 2）✅（切分 + CUE 标签 + 歌词匹配；可选「在下一轨 INDEX 00 截止」，并自动保护含隐藏音频的预间隙）
 
 **P2（未实现）**
 - 音频人声水印降噪、转码、任务断点续处理
@@ -464,9 +482,17 @@ Advanced capabilities:
 - **Fake-lossless detection** — spectrum analysis tells whether a "lossless" file is genuine or a disguised MP3 transcode (with dedicated DSD criteria);
 - **One-click cleanup** — suspicious files go to the Recycle Bin or the app's quarantine (recoverable), with a spectrum chart you can verify yourself;
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
-- **Starfield dynamic background** — the UI drifts through space, switching star regions every 24 s (can be disabled to save power).
 
 > License: **GNU General Public License v3.0**. The bundled fonts Noto Sans SC / JetBrains Mono are SIL OFL 1.1.
+
+### V1.4.0 highlights
+
+- Starfield background removed; the UI now uses a flat theme background;
+- The filename column is shown by default; added sample-rate/bit-depth/DSD filters and a "copy full path" action;
+- Lossless detection reworked: bandwidth alone no longer condemns a file, bit-depth padding uses the s24 low-byte zero ratio, and truncated files return "undetermined";
+- DSD edge criteria gained a reliability guard, fixing false positives on sweeps/narrowband test signals;
+- Lossless formats are detected by codec: Ogg-FLAC and WMA Lossless are marked lossless, IMA ADPCM inside AIFF is marked lossy;
+- CUE splitting now fills the last track duration (previously 0.1 s), adds an "end at next INDEX 00" option, and preserves pregaps that contain hidden audio.
 
 ---
 
@@ -537,8 +563,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.3.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.3.0-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.4.0-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.4.0-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -575,7 +601,7 @@ be forged*.
 | Bandwidth + edge energy | After upsampling, above the original Nyquist there is only interpolation residue (below −100 dB); a real master still carries −60 to −80 dB | Upsampling |
 | **Source-bandwidth step** | A 44.1k→48k upsample leaves a ≥18 dB step at 22.05 kHz; some tools add dither to fill the step with noise and fake content, but the step itself remains | Noise-filled upsampling |
 | **Harmonic coherence (extended-band flatness)** | A real instrument's ultrasonic content is discrete harmonic peaks (flatness→0), dither fill is flat white noise (→1); when dither fills the step below 18 dB the step check fails, but the "noise nature" of the fill is exposed | Noise-filled upsampling fallback |
-| Samples crossing the 16-bit ceiling | 16-bit content zero-padded to 24-bit can never exceed ±32767 | Bit-depth padding |
+| **Low-byte zero ratio** | 16-bit content zero-padded to 24-bit has its lowest 8 bits always zero in an s24 decode; genuine 24-bit content is zero only ~0.4% of the time | Bit-depth padding |
 | Digital silence above cutoff | An encoder leaves digital blankness (below −100 dB); tape and masters always keep analogue noise floor (−70 to −85 dB) | Transcoding |
 | Cutoff position + steepness | 128k≈16 kHz, 192k≈18.5 kHz, 320k≈20 kHz, CD≈22.05 kHz | Transcode grading |
 | Steepness (dB/oct) | Encoders exceed 60 dB/oct; microphones and tape roll off far more gently | Supporting |
@@ -610,7 +636,8 @@ Since v1.2.6 two **orthogonal** criteria are used, because level steps alone are
 2. **Signal edge** (v1.2.6, primary) — measures **frame-to-frame level variation** per band: music follows the phrases (5–12 dB standard deviation measured), while modulator noise does not (0.6–1.5 dB). Where the variation drops back to the noise level is the source's bandwidth boundary. This criterion **never looks at absolute level**, so no amount of noise can hide it — the DSD128 conversions whose step vanished still collapse at 48 kHz in the variation curve;
 3. **Sub-CD bandwidth** — an edge below 21.5 kHz is flagged outright: that is exactly where 128k / 192k / 320k MP3 apply their low-pass;
 4. **Noise-shaping slope** (50→100 kHz, dB/oct) — confirms the bitstream itself is real (a PCM file renamed to .dsf/.dff is flat in the ultrasonic region);
-5. **Ultrasonic base** (supporting) — genuine DSD already carries −29 to −46 dB across 30–40 kHz.
+5. **Ultrasonic base** (supporting) — genuine DSD already carries −29 to −46 dB across 30–40 kHz;
+6. **Edge reliability guard** (V1.4.0) — if harmonic content still exists above the edge (energy > −80 dB and spectral flatness < 0.5), the edge was produced by a sweep/narrowband signal rather than a real content boundary; the edge criteria are skipped, preventing sweeps and high-frequency-sparse masters from being flagged as PCM conversions.
 
 The baseband cutoff is scanned only up to 24 kHz, so a DXD workflow's 176 kHz corner is never mistaken for a CD wall.
 
@@ -664,6 +691,17 @@ same, downsampled to 44.1 kHz/24-bit   → genuine lossless  bandwidth 99%
 ```
 
 About 0.3–1 s per track (4 parallel decodes), ~5 minutes for a thousand tracks.
+
+**V1.4.0 criteria revision** (validated against 63 real/synthetic samples):
+
+- **Bandwidth percentage is no longer a verdict on its own**: if the edge band still carries analogue noise (> −95 dB) and the roll-off is gentle, the file is treated as a naturally rolled-off master (genuine);
+- **Nyquist protection**: when content reaches ≥95% of the declared Nyquist, the inevitable empty band near Nyquist is no longer mistaken for an encoder low-pass;
+- **Bit-depth padding now uses the s24 low-byte zero ratio + effective depth**, not the 16-bit peak ceiling — a genuine 24-bit recording peaking at −12 dBFS is no longer flagged; 20-bit sources are annotated instead of condemned;
+- **Truncated files / incomplete decodes** (e.g. 1 MB partial test files) return "undetermined" instead of a verdict based on a partial spectrum;
+- **Evidence order**: SBR copy-up before bandwidth; MP3 spectral holes / sfb21 notch before "smooth roll-off"; absolute bandwidth below 14 kHz and 65% caps the verdict at "suspect";
+- **Lossless detection follows the codec, not the extension**: Ogg-FLAC and WMA Lossless are marked lossless; IMA ADPCM inside AIFF is marked lossy;
+- **DSD pure-tone test signals**: when baseband energy concentrates in a few bins, the frame-variation edge criterion is skipped and the bitstream is confirmed by noise shaping;
+- **DSD edge reliability guard**: when harmonic content still exists above the edge (and it is not encoder noise), the edge criteria are skipped — this fixes sweeps/narrowband signals being flagged as PCM conversions.
 
 **Known blind spots**: Opus and transparent bitrates (Vorbis q8+) apply no low-pass wall at
 all, so no spectral method can flag them; catching those requires Derrien's quantization-lattice

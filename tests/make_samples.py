@@ -84,10 +84,12 @@ def make_cue(path: Path, encoding: str = "gbk") -> Path:
         '  TRACK 02 AUDIO\n'
         '    TITLE "富士山下"\n'
         '    PERFORMER "陈奕迅"\n'
+        '    INDEX 00 04:08:50\n'
         '    INDEX 01 04:10:50\n'
         '  TRACK 03 AUDIO\n'
         '    TITLE "爱情转移"\n'
         '    PERFORMER "陈奕迅"\n'
+        '    INDEX 00 08:23:12\n'
         '    INDEX 01 08:25:12\n'
     )
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -121,7 +121,10 @@ def parse_cue(path: Path | str) -> CueSheet:
                 index_no = int(parts[0])
             except ValueError:
                 continue
-            if index_no == 1:
+            if index_no == 0:
+                # INDEX 00 是预间隙起点，也是上一轨的结束边界
+                current.pregap_ms = _frame_to_ms(parts[1])
+            elif index_no == 1:
                 current.start_ms = _frame_to_ms(parts[1])
 
     # 结束时间串联

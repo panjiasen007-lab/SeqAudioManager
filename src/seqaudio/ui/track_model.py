@@ -29,10 +29,9 @@ COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
     ("说明", lambda t: " | ".join(t.notes), 180),
 ]
 
-#: 默认折叠的次要列：年份 / 时长 / 无损 / 来源 / 文件名 / 说明。
-#: 1080px 窗口（1366 笔记本）下铺满 14 列必然横向滚动；这几列的信息
-#: 在 tooltip 里都有，需要时可从表头右键随时展开。
-HIDDEN_BY_DEFAULT = {4, 7, 8, 11, 12, 13}
+#: 默认折叠的次要列：年份 / 时长 / 无损 / 来源 / 说明。
+#: 文件名是用户定位文件的主要依据，默认展开。
+HIDDEN_BY_DEFAULT = {4, 7, 8, 11, 13}
 
 #: 歌名随窗口伸缩，其余列固定宽度
 STRETCH_COLUMN = 1
@@ -207,6 +206,7 @@ class TrackFilterProxy(QSortFilterProxyModel):
         self._lossless_only = False
         self._problems_only = False
         self._verdict_group = "all"
+        self._spec_filter = "all"
         self.setSortRole(Qt.DisplayRole)
 
     def set_verdict_group(self, group: str) -> None:
@@ -216,6 +216,11 @@ class TrackFilterProxy(QSortFilterProxyModel):
 
     def set_text(self, text: str) -> None:
         self._text = (text or "").strip().lower()
+        self.invalidateFilter()
+
+    def set_spec_filter(self, key: str) -> None:
+        """按采样率 / 位深 / DSD 规格筛选（全部 / 44.1k / 48k / 96k / 176.4k+ / DSD / 位深）。"""
+        self._spec_filter = key or "all"
         self.invalidateFilter()
 
     def set_lossless_only(self, enabled: bool) -> None:
@@ -235,6 +240,38 @@ class TrackFilterProxy(QSortFilterProxyModel):
             return False
         if self._lossless_only and not track.info.lossless:
             return False
+        if self._spec_filter != "all":
+            info = track.info
+            sr = info.sample_rate or 0
+            bits = info.bit_depth or 0
+            is_dsd = bool(info.dsd_rate) or info.fmt in ("DSF", "DFF") or (
+                bits == 1 and sr >= 352800
+            )
+            key = self._spec_filter
+            if key == "dsd":
+                if not is_dsd:
+                    return False
+            elif key == "sr44100":
+                if sr != 44100:
+                    return False
+            elif key == "sr48000":
+                if sr != 48000:
+                    return False
+            elif key == "sr96000":
+                if sr != 96000:
+                    return False
+            elif key == "sr_hi":
+                if sr < 176400:
+                    return False
+            elif key == "bit16":
+                if is_dsd or bits != 16:
+                    return False
+            elif key == "bit24":
+                if is_dsd or bits != 24:
+                    return False
+            elif key == "bit32":
+                if is_dsd or bits < 32:
+                    return False
         if self._verdict_group != "all":
             from ..core.authenticity import group_of
 

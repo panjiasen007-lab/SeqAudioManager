@@ -327,6 +327,7 @@ def _decode_segment(
     start: float,
     seconds: float,
     sample_rate: Optional[int] = None,
+    sample_rate_hint: int = 0,
 ) -> Optional[tuple[np.ndarray, int]]:
     """解码一段音频为单声道 float32。
 
@@ -370,8 +371,13 @@ def _decode_segment(
     # 交错立体声，取左声道即可（不做混音，保持原始整数精度）
     data = data[0::2].copy()
 
-    # 采样率从样本数反推：ffmpeg 保留原采样率，时长已知
-    effective_sr = int(round(data.size / seconds)) if seconds > 0 else 0
+    # 采样率：优先用文件头声明的值。截断/损坏文件解码出的样本数会少于
+    # 请求时长，用 data.size/seconds 反推会把 44.1kHz 误算成 33kHz，
+    # 进而让 Nyquist、带宽比例全部出错（旧版「上限 16.5kHz」就是这样来的）。
+    if sample_rate_hint > 0:
+        effective_sr = sample_rate_hint
+    else:
+        effective_sr = int(round(data.size / seconds)) if seconds > 0 else 0
     # 对齐到常见采样率，避免 ±1 的取整误差影响 Nyquist 判断
     if effective_sr:
         for candidate in (44100, 48000, 88200, 96000, 176400, 192000,
@@ -893,6 +899,62 @@ def _pcm_source_cliff(
     return best
 
 
+def _bit_depth_profile(
+    ffmpeg: str, path: Path, start: float, seconds: float
+) -> tuple[float, int]:
+    """用 s24 解码测真实位深，返回 ``(最低字节为零的比例, 有效位深)``。
+
+    为什么不用 s32 反推：不同解码器把 16/24bit 映射到 s32 的缩放方式并不统一
+    （FLAC 24bit 左移 8 位、WAV 24bit 保持原值），尾随零个数会把 24bit WAV
+    误读成 32bit。s24 才是 24bit 源的真实精度平面：
+
+    * 真 24bit 内容的低 8 位大约只有 1/256 恰为零（实测 0.4%）；
+    * 16bit 零填充成 24bit 时，低 8 位 **全部** 为零（比例 100%）；
+    * 20bit 源低 4 位为零（有效位深 20）。
+
+    返回比例失败时给 ``(0.0, 0)``，交给上层按「无法判断」处理。
+    """
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        "-ss", f"{max(0.0, start):.3f}", "-t", f"{seconds:.3f}",
+        "-i", str(path), "-map", "0:a:0", "-ac", "2",
+        "-f", "s24le", "-acodec", "pcm_s24le", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, timeout=DECODE_TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return 0.0, 0
+    if proc.returncode != 0 or not proc.stdout:
+        return 0.0, 0
+    raw = np.frombuffer(proc.stdout, dtype="<u1")
+    if raw.size < 6 * 1024:
+        return 0.0, 0
+    triples = raw[: raw.size - raw.size % 3].reshape(-1, 3)
+    left = triples[0::2]
+    vals = (
+        left[:, 0].astype(np.int64)
+        | (left[:, 1].astype(np.int64) << 8)
+        | (left[:, 2].astype(np.int64) << 16)
+    )
+    vals = np.where(vals >= (1 << 23), vals - (1 << 24), vals)
+    vals = np.abs(vals)
+    vals = vals[vals > 0]
+    if vals.size < 1024:
+        return 0.0, 0
+    low_zero = float(np.mean((vals & 0xFF) == 0))
+    tz = 24
+    for value in np.unique(vals)[:4000]:
+        trailing = (int(value) & -int(value)).bit_length() - 1
+        if trailing < tz:
+            tz = trailing
+        if tz == 0:
+            break
+    return low_zero, max(0, 24 - tz)
+
+
 def _effective_bit_depth(samples: np.ndarray) -> int:
     """从 32 位整数样本推导有效位深。
 
@@ -923,6 +985,23 @@ def _effective_bit_depth(samples: np.ndarray) -> int:
 # ---------------------------------------------------------------- 判定
 
 
+def _tone_concentration(freqs: np.ndarray, db: np.ndarray, max_hz: float = 24_000.0) -> float:
+    """基带内最强的几个频点占总能量的比例，用来识别单音测试信号。
+
+    纯音/单音测试文件的帧间电平几乎不随时间起伏，DSD 的「信号边界」判据
+    会把整段音乐误读成「内容提前结束」。这类文件只能靠噪声整形确认比特流。
+    """
+    mask = freqs <= max_hz
+    if not np.any(mask):
+        return 0.0
+    power = np.power(10.0, db[mask] / 10.0)
+    total = float(power.sum())
+    if total <= 0:
+        return 0.0
+    top = np.sort(power)[-5:]
+    return float(top.sum() / total)
+
+
 def _judge_dsd(
     slope: float,
     ultra: float,
@@ -937,6 +1016,9 @@ def _judge_dsd(
     edge_hz: float = 0.0,
     edge_std: float = 0.0,
     edge_floor: float = 0.0,
+    test_signal: float = 0.0,
+    edge_above_db: float = -120.0,
+    edge_above_flat: float = 1.0,
 ) -> tuple[str, float, list[str]]:
     """DSD 判定：先确认「是不是真 DSD 比特流」，再找源码带宽的破绽。
 
@@ -976,10 +1058,41 @@ def _judge_dsd(
         )
         return VERDICT_FAKE_DSD, 0.3, reasons
 
-    # ---- 3. 信号边界落在 PCM 网格：内容只在 PCM 带宽内存在 ----
+    # ---- 3. 单音测试信号：边界判据不适用，只确认比特流 ----
+    if test_signal >= 0.9:
+        reasons.append(
+            f"基带能量高度集中在少数频点（集中度 {test_signal:.2f}），"
+            "属于单音/测试信号；帧间波动边界判据对恒定电平信号无效"
+        )
+        if slope >= DSD_SLOPE_GENUINE:
+            reasons.append(
+                f"噪声整形斜率 {slope:+.1f}dB/oct、50kHz 以上 {ultra:.0f}dB，"
+                "比特流本身是真实 DSD"
+            )
+            return VERDICT_DSD, 0.85, reasons
+        return VERDICT_FAKE_DSD, 0.5, reasons
+
+    # ---- 3b. 信号边界落在 PCM 网格：内容只在 PCM 带宽内存在 ----
     # 与上一条的区别：上一条要求「断崖之上是数字静音」，这一条只要求
     # 「之上没有内容了」—— 噪声抬得再高也逃不掉。
-    if edge_hz >= 12_000.0:
+    #
+    # 误伤保护：扫频、窄带测试信号或高频稀疏的真实录音，会让「帧间波动」
+    # 在某个频率提前塌下来，但边界之上其实还有谐波内容。此时 edge 不是
+    # 真实的内容边界，不能据此判假。用「边界之上的能量 + 平坦度」识别：
+    # 仍有谐波（平坦度低）且能量不低 → 跳过边界判据；若是编码器噪声
+    # （平坦度高）则照常判假。
+    edge_unreliable = bool(
+        edge_hz >= 12_000.0
+        and edge_above_db > -80.0
+        and edge_above_flat < 0.5
+    )
+    if edge_unreliable:
+        reasons.append(
+            f"边界 {edge_hz / 1000:.1f}kHz 之上仍有谐波内容"
+            f"（{edge_above_db:.0f}dB，平坦度 {edge_above_flat:.2f}），"
+            "该边界不是真实截止，跳过边界判据"
+        )
+    if edge_hz >= 12_000.0 and not edge_unreliable:
         if edge_hz < DSD_SUB_CD_EDGE_HZ:
             reasons.append(
                 f"音频内容在 {edge_hz / 1000:.1f}kHz 处就不再随音乐起伏"
@@ -1008,7 +1121,7 @@ def _judge_dsd(
     digital_silence = base_silence < DSD_DIGITAL_SILENCE_DB
     hard_cliff = base_steep > DSD_BASEBAND_CLIFF_STEEP
 
-    if cd_boundary and (digital_silence or hard_cliff):
+    if cd_boundary and (digital_silence or hard_cliff) and not edge_unreliable:
         detail = []
         if digital_silence:
             detail.append(f"截止之上为数字静音（{base_silence:.0f}dB）")
@@ -1073,6 +1186,9 @@ def _judge(
     upsample_step: float = 0.0,
     extended_flat: float = 0.0,
     sbr_score: float = 0.0,
+    test_signal: float = 0.0,
+    edge_above_db: float = -120.0,
+    edge_above_flat: float = 1.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -1095,6 +1211,8 @@ def _judge(
             pcm_source=pcm_source, pcm_step=pcm_step,
             pcm_above=pcm_above, ultra_body=ultra_body,
             edge_hz=edge_hz, edge_std=edge_std, edge_floor=edge_floor,
+            test_signal=test_signal,
+            edge_above_db=edge_above_db, edge_above_flat=edge_above_flat,
         )
 
     # ---- 1. 升采样：声明高采样率，但扩展带是空的 ----
@@ -1128,7 +1246,7 @@ def _judge(
             f"声明 {sample_rate / 1000:.1f}kHz（上限 {nyquist / 1000:.1f}kHz），"
             f"但内容在 {upsample_src / 2000:.2f}kHz 处出现台阶"
             + (f"（{upsample_step:.0f}dB）" if upsample_step else "")
-            + f"，正是 {upsample_src / 1000:.1f}kHz PCM 的 Nyquist 边界"
+            + f"，正是 {upsample_src / 2000:.2f}kHz PCM 的 Nyquist 边界"
         )
         reasons.append(
             "台阶之上是被填充的噪声而非真实内容 —— 44.1kHz 升采样后加噪声"
@@ -1168,26 +1286,51 @@ def _judge(
         )
         return VERDICT_UPSAMPLED, 0.4, reasons
 
-    # ---- 2. 升位深：声明 24bit，但样本从未碰到 16bit 天花板 ----
+    # ---- 2. SBR copy-up：HE-AAC 的高频是低频的平移复制 ----
     #
-    # 16bit 素材零填充成 24bit 时，样本绝对值永远 ≤ 32767（在 s32 容器里
-    # 对应 32767<<16）。LAC 2015 靠这一条做到 100% 准确率，因为它是纯时域
-    # 事实，不依赖「音乐该长什么样」。
-    #
-    # 这里刻意不依赖「尾随零个数」推断位深：ffmpeg 把 s24le 解码成 s32 时
-    # 会经浮点中转，低位不一定保持全零（实测低 8 位零只占 9%），用尾随零
-    # 判断会漏掉填充。只看「有没有样本越过 16bit 上限」+「电平是否正常」。
-    if (
-        info.bit_depth
-        and info.bit_depth >= 24
-        and not above16
-        and peak_dbfs > -40.0
-    ):
+    # 这条证据与带宽无关：SBR 让高频「看起来有内容」，但那份内容是低频复制
+    # 出来的，不是录音。必须先于「带宽满值 → 真无损」判断。
+    if sbr_score >= SBR_COPYUP_CORR:
         reasons.append(
-            f"声明 {info.bit_depth}bit，但所有样本都未超出 16bit 动态范围"
-            f"（峰值 {peak_dbfs:.1f}dBFS），疑似低位深零填充"
+            f"高频段与低频段去趋势后频谱形状高度相关（copy-up 相关性 {sbr_score:.2f}），"
+            "高频是低频的平移复制"
         )
-        return VERDICT_UPSCALED, 0.35, reasons
+        reasons.append(
+            "这是 HE-AAC SBR 的带宽复制特征：高频不是真实录音而是低频复制出来的，"
+            "源码是有损编码，不可能是原生无损"
+        )
+        return VERDICT_SUSPECT, 0.55, reasons
+
+    # ---- 3. 升位深：声明 24bit，但 s24 解码后最低字节全零 ----
+    #
+    # 16bit 素材左移 8 位装进 24bit 时，最低 8 位恒为零；真 24bit 内容只有
+    # 约 1/256 的样本恰好为零（实测 0.4%）。这是纯时域事实，不依赖音乐内容。
+    # 旧版用「峰值有没有越过 16bit 上限」判断，会把峰值 −12dBFS 的真 24bit
+    # 录音误判成升位深 —— 现已改为低字节零比例 + 有效位深双条件。
+    if depth_padding:
+        reasons.append(
+            f"声明 {info.bit_depth}bit，但 24bit 解码后最低字节全为零"
+            f"（有效位深仅 {eff_depth}bit），是 16bit 内容零填充扩容"
+        )
+        reasons.append("位深扩容不会增加任何真实精度，属于规格注水")
+        return VERDICT_UPSCALED, 0.6, reasons
+
+    # ---- 2b. 内容已铺满声明带宽：不再把「接近 Nyquist」误判成截止 ----
+    #
+    # 22.05kHz 采样的测试文件、或母带滚降正好落在 Nyquist 附近时，截止
+    # 之上本来就没有频段可测（edge 自然是 -200dB）。只要内容到达 Nyquist
+    # 的 95% 以上，就不存在「被编码器砍高频」的空间，直接判真。
+    if ratio >= 0.95:
+        reasons.append(
+            f"内容延伸到 {cutoff / 1000:.1f}kHz，占声明 Nyquist 的 {ratio:.0%}，"
+            "没有采样率或位深注水"
+        )
+        if eff_depth and info.bit_depth and eff_depth < info.bit_depth - 2:
+            reasons.append(
+                f"源精度约 {eff_depth}bit（声明 {info.bit_depth}bit）：这是源本身的精度，"
+                "不是零填充，仍属有效无损"
+            )
+        return VERDICT_TRUE, 0.85, reasons
 
     # ---- 3. 数字静音：截止之上没有模拟底噪，是有损转码的铁证 ----
     #
@@ -1211,23 +1354,6 @@ def _judge(
             return VERDICT_FAKE, 0.85, reasons
         return VERDICT_SUSPECT, 0.5, reasons
 
-    # ---- 3b. SBR copy-up：HE-AAC 的高频是低频的平移复制 ----
-    #
-    # HE-AAC 用 SBR 把低频子带「频率平移」复制到高频，去趋势后高频段的频谱
-    # 形状仍是低频段的镜像（实测相关性 ≈0.97）；普通音乐高低频去趋势后各自
-    # 独立（真 CD 抓轨 0.19~0.46）。这是 cutoff 判据抓不到的：SBR 让高频
-    # 「看起来有内容」，但那份内容是低频复制出来的，不是录音。
-    if sbr_score >= SBR_COPYUP_CORR:
-        reasons.append(
-            f"高频段与低频段去趋势后频谱形状高度相关（copy-up 相关性 {sbr_score:.2f}），"
-            "高频是低频的平移复制"
-        )
-        reasons.append(
-            "这是 HE-AAC SBR 的带宽复制特征：高频不是真实录音而是低频复制出来的，"
-            "源码是有损编码，不可能是原生无损"
-        )
-        return VERDICT_SUSPECT, 0.55, reasons
-
     # ---- 4. 转码检测：按截止位置分档 ----
     if nyquist <= 24000:
         # CD 标准音源（44.1k / 48k）。
@@ -1235,9 +1361,12 @@ def _judge(
         # 关键：cutoff 偏低不等于假无损。1980~90 年代的老录音、模拟母带转录，
         # 高频本来就不丰富，频谱会**平滑滚降**到 16~18kHz —— 这是真 CD 的
         # 正常特征，不能按「转码砍频」判假。
-        # 区分依据是陡度：有损转码是断崖式下跌（>25dB/kHz），老录音是平缓滚降
-        # （通常 <15dB/kHz）。陡度为 0 表示无法计算，保守按转码处理。
-        smooth_rolloff = 0.5 < steepness < 25.0
+        # 区分依据是陡度：有损转码是断崖式下跌，老录音是平缓滚降。
+        # 用 dB/oct（与文献阈值可比）优先；无法计算时退回 dB/kHz。
+        smooth_rolloff = (
+            (0.0 < steepness < 25.0)
+            or (0.0 < steep_oct < STEEP_NATURAL_OCT)
+        )
 
         # 频谱空洞、sfb21 凹陷：低码率 MP3 的辅助证据，只用来加重措辞
         mp3_marks = []
@@ -1246,33 +1375,52 @@ def _judge(
         if sfb21 >= SFB21_DEPTH_DB:
             mp3_marks.append(f"16kHz 附近有 {sfb21:.0f}dB 的 sfb21 凹陷")
 
+        # 只要有 MP3 专属的频谱空洞/凹陷，就不能用「平滑滚降」放行：
+        # 这些是量化器「位不够」留下的痕迹，自然录音不会形成窄而深的缺口。
+        if cutoff < 19500 and mp3_marks:
+            reasons.append(
+                f"频谱在 {cutoff / 1000:.1f}kHz 截止，且"
+                + "、".join(mp3_marks)
+                + "，符合有损编码器的量化特征"
+            )
+            return VERDICT_FAKE, 0.85, reasons
+
+        # 绝对带宽下限：连 14kHz 都不到、带宽不足 65%，无论滚降多平滑都
+        # 不可能是正常音乐母带（多为 AC-3/低码率源或有损转码后的再处理）。
+        if cutoff < 14000 and ratio < 0.65:
+            reasons.append(
+                f"内容只到 {cutoff / 1000:.1f}kHz（带宽 {ratio:.0%}），"
+                "低于正常音乐母带的带宽下限，疑似有损源"
+            )
+            return VERDICT_SUSPECT, 0.55, reasons
+
         if cutoff < 17000:
             if smooth_rolloff:
-                # 截止过低（<17k）即使平滑也偏保守：可能是低码率转码后被平滑处理，
-                # 也可能是音质极差的老录音。判「疑似」，交给用户复核，不直接判假。
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steepness:.0f}dB/kHz），"
-                    "截止偏低，可能是音质受限的老录音，建议人工复核"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steep_oct:.0f}dB/oct），"
+                    "符合老录音/模拟母带的高频自然衰减，不是编码器低通"
                 )
-                return VERDICT_SUSPECT, 0.5, reasons
-            reasons.append(f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止，符合 128kbps 有损转码特征")
+                return VERDICT_TRUE, 0.7, reasons
+            reasons.append(f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steep_oct:.0f}dB/oct），"
+                           "符合 128kbps 有损转码特征")
             if mp3_marks:
                 reasons.append("佐证：" + "、".join(mp3_marks))
             return VERDICT_FAKE, 0.9, reasons
         if cutoff < 19500:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steepness:.0f}dB/kHz），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（陡度 {steep_oct:.0f}dB/oct），"
                     "符合老录音/模拟母带的高频自然衰减，非有损转码"
                 )
                 return VERDICT_TRUE, 0.7, reasons
             reasons.append(
-                f"频谱在 {cutoff / 1000:.1f}kHz 截止（陡度 {steepness:.0f}dB/kHz），"
+                f"频谱在 {cutoff / 1000:.1f}kHz 截止（陡度 {steep_oct:.0f}dB/oct），"
                 "符合 192kbps 有损转码特征"
             )
             if mp3_marks:
                 reasons.append("佐证：" + "、".join(mp3_marks))
-            return VERDICT_FAKE, 0.75, reasons
+                return VERDICT_FAKE, 0.75, reasons
+            return VERDICT_SUSPECT, 0.55, reasons
         if cutoff < 20500:
             if smooth_rolloff:
                 reasons.append(
@@ -1281,7 +1429,7 @@ def _judge(
                 )
                 return VERDICT_TRUE, 0.72, reasons
             reasons.append(
-                f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steepness:.0f}dB/kHz），"
+                f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steep_oct:.0f}dB/oct），"
                 "符合高码率有损转码特征（256~320kbps）"
             )
             if mp3_marks:
@@ -1296,18 +1444,36 @@ def _judge(
             return VERDICT_SUSPECT, 0.5, reasons
         if eff_depth and info.bit_depth and eff_depth < info.bit_depth - 2:
             reasons.append(
-                f"有效位深仅 {eff_depth}bit，声明 {info.bit_depth}bit，疑似低位深填充"
+                f"源精度约 {eff_depth}bit（声明 {info.bit_depth}bit）：不是零填充，仍按真无损"
             )
-            return VERDICT_SUSPECT, 0.6, reasons
         return VERDICT_TRUE, 0.85, reasons
 
     # 高采样率（88.2kHz 及以上），且扩展带不空 —— 到这里说明带宽是真的
-    if ratio < 0.70:
+    # 但内容只到一半以下、超声区仍是一片低电平，仍按升频处理
+    if sample_rate >= 88200 and ratio < 0.55 and edge_db < -95.0:
         reasons.append(
-            f"采样率 {sample_rate / 1000:.1f}kHz，但频谱只到 {cutoff / 1000:.1f}kHz"
-            f"（带宽利用率 {ratio:.0%}），疑似 44.1kHz 内容升频"
+            f"采样率 {sample_rate / 1000:.1f}kHz，但内容只到 {cutoff / 1000:.1f}kHz"
+            f"（带宽 {ratio:.0%}），超声区仅 {edge_db:.0f}dB，疑似低采样率内容升频"
         )
         return VERDICT_UPSAMPLED, 0.35, reasons
+    if ratio < 0.70:
+        near_pcm_edge = any(
+            abs(cutoff - b) <= max(400.0, b * 0.02)
+            for b in PCM_NYQUISTS
+            if b < nyquist * 0.97
+        )
+        if edge_db < -95.0 or near_pcm_edge:
+            reasons.append(
+                f"采样率 {sample_rate / 1000:.1f}kHz，但频谱只到 {cutoff / 1000:.1f}kHz"
+                f"（带宽利用率 {ratio:.0%}），扩展带 {edge_db:.0f}dB，疑似低采样率内容升频"
+            )
+            return VERDICT_UPSAMPLED, 0.35, reasons
+        reasons.append(
+            f"采样率 {sample_rate / 1000:.1f}kHz，内容到 {cutoff / 1000:.1f}kHz"
+            f"（带宽 {ratio:.0%}）；高频稀疏是母带自然滚降，扩展带仍有 {edge_db:.0f}dB "
+            "模拟底噪，不是插值空白"
+        )
+        return VERDICT_TRUE, 0.7, reasons
     reasons.append(
         f"高频延伸到 {cutoff / 1000:.1f}kHz（带宽 {ratio:.0%}、扩展带 {edge_db:.0f}dB），"
         "符合高解析音源特征"
@@ -1360,13 +1526,22 @@ def analyze(
     edge_samples: Optional[np.ndarray] = None
     edge_rate = 0
     edge_peak = 0.0
+    # PCM 的采样率用文件头声明值：截断文件解码样本数不足时，反推会算错 Nyquist
+    sr_hint = 0 if is_dsd else int(info.sample_rate or 0)
+    fail_count = 0
+    first_start: Optional[float] = None
     for position in positions:
         start = max(1.0, duration * position - segment_seconds / 2)
         if start + segment_seconds > duration:
             start = max(0.0, duration - segment_seconds)
-        decoded = _decode_segment(ffmpeg, path, start, segment_seconds)
+        decoded = _decode_segment(
+            ffmpeg, path, start, segment_seconds, sample_rate_hint=sr_hint
+        )
         if decoded is None:
+            fail_count += 1
             continue
+        if first_start is None:
+            first_start = start
         samples, effective_sr = decoded
         analyzed += segment_seconds
         if effective_sr:
@@ -1386,7 +1561,15 @@ def analyze(
                 edge_samples, edge_rate, edge_peak = samples, sample_rate, seg_peak
 
     if not spectra:
-        result.error = "解码失败：ffmpeg 无法解析该文件"
+        if fail_count:
+            result.error = "解码不完整（文件可能被截断或损坏）"
+        else:
+            result.error = "解码失败：ffmpeg 无法解析该文件"
+        return result
+    # 4 个取样点里有 2 个以上解不出来（通常是 1MB 截断样本），
+    # 频谱只覆盖了前半段，据此判真假会把「文件不完整」误判成「转码」。
+    if fail_count >= 2:
+        result.error = "解码不完整（文件可能被截断或损坏）"
         return result
 
     # 每段各算一个截止频率，用**中位数**做判定。
@@ -1435,6 +1618,8 @@ def analyze(
     edge_hz = 0.0
     edge_std = 0.0
     edge_floor = 0.0
+    edge_above_db = -120.0
+    edge_above_flat = 1.0
     if is_dsd:
         nyq = float(result.nyquist_hz or 352800)
         # 噪声整形斜率（确认是不是真的 DSD 比特流）
@@ -1459,6 +1644,12 @@ def analyze(
             edge_hz, edge_std, edge_floor = _variation_edge(
                 rows, row_freqs, float(edge_rate) / 2.0
             )
+            # 边界之上的基带内容：判断这个「边界」是不是真的内容截止
+            low = min(edge_hz + 1000.0, 24_000.0)
+            high = min(24_000.0, nyq)
+            if low < high:
+                edge_above_db = _band_energy(freqs, db, low, high)
+                edge_above_flat = _spectral_flatness(freqs, db, low, high)
         result.noise_shaping_slope = slope
         result.ultrasonic_ratio = ultra
         result.baseband_cutoff = int(base_cutoff)
@@ -1472,7 +1663,20 @@ def analyze(
     result.steepness_db = steepness
     result.steepness_oct = steep_oct
     result.high_band_energy_db = high_band
-    result.bit_depth_effective = deepest_depth
+    # 有效位深改用 s24 专属测量：s32 尾随零受解码器缩放方式影响，
+    # 会把 24bit WAV 读成 32bit，也会把 16bit 内容读成 32bit。
+    declared_depth = int(info.bit_depth or 0)
+    pad_ratio = 0.0
+    eff_depth = 0
+    if not is_dsd:
+        if 20 <= declared_depth <= 24 and first_start is not None:
+            pad_ratio, prof_depth = _bit_depth_profile(
+                ffmpeg, path, first_start, segment_seconds
+            )
+            eff_depth = prof_depth or declared_depth
+        elif declared_depth:
+            eff_depth = min(declared_depth, deepest_depth or declared_depth)
+    result.bit_depth_effective = eff_depth or deepest_depth
     result.analyzed_seconds = analyzed
 
     # ---- 三维度证据：峰值 / 扩展带 / 带宽比例 / 空洞 / 位深 ----
@@ -1502,12 +1706,13 @@ def analyze(
     sbr_score = 0.0
     if not is_dsd and nyq >= 22050:
         sbr_score = _sbr_copyup_score(freqs, db, nyq)
-    # 位深注水：声明 24bit 却从没用到 16bit 以上（且电平正常，排除近乎无声的文件）
+    # 单音测试信号：基带能量集中在极少数频点，DSD 的帧间波动边界判据不适用
+    test_signal = _tone_concentration(freqs, db) if is_dsd else 0.0
+    # 位深注水：声明 24bit，但 s24 解码后低 8 位全部为零 —— 说明源是 16bit
+    # 左移得到的。这是纯时域事实，比「峰值有没有越过 16bit 上限」可靠：
+    # 很多真 24bit 录音的峰值本来就在 -12dBFS，碰不到 16bit 满刻度。
     depth_padding = bool(
-        info.bit_depth
-        and info.bit_depth >= 24
-        and not above_16
-        and peak_dbfs > -40.0
+        declared_depth >= 24 and pad_ratio >= 0.9 and 0 < eff_depth <= 17
     )
     result.peak_db = peak
     result.edge_energy_db = edge_db
@@ -1525,7 +1730,7 @@ def analyze(
         cutoff,
         steepness,
         high_band,
-        deepest_depth,
+        eff_depth or deepest_depth,
         slope=slope,
         ultra=ultra,
         base_cutoff=base_cutoff,
@@ -1546,6 +1751,9 @@ def analyze(
         edge_hz=edge_hz,
         edge_std=edge_std,
         edge_floor=edge_floor,
+        test_signal=test_signal,
+        edge_above_db=edge_above_db,
+        edge_above_flat=edge_above_flat,
         upsample_src=upsample_src,
         upsample_step=upsample_step,
         extended_flat=extended_flat,

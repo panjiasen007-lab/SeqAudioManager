@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
-    QStackedLayout,
     QStatusBar,
     QTableView,
     QVBoxLayout,
@@ -50,7 +49,6 @@ from .track_model import (
     TrackFilterProxy,
     TrackTableModel,
 )
-from .space import SpaceView
 from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
 from .worker import (
     AuthenticityWorker,
@@ -119,25 +117,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 布局
 
     def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-
-        # 两层堆叠：底层是持续飞行的星空，上层是半透明界面。
-        # 用 QStackedLayout(StackAll) 而不是自绘 paintEvent —— 这样星场是个
-        # 真正的 widget，有自己的计时器，也不会被中央控件的背景覆盖掉。
-        stack = QStackedLayout(central)
-        stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        stack.setContentsMargins(0, 0, 0, 0)
-
-        self.space = SpaceView(star_count=760)
-        self.space.sceneChanged.connect(self._on_scene_changed)
-        self.space.set_running(self.settings.space_background)
-        stack.addWidget(self.space)
-
         surface = QWidget()
         surface.setObjectName("appSurface")
-        stack.addWidget(surface)
-        stack.setCurrentWidget(surface)
+        self.setCentralWidget(surface)
 
         root = QVBoxLayout(surface)
         root.setContentsMargins(0, 0, 0, 0)
@@ -162,7 +144,6 @@ class MainWindow(QMainWindow):
         self.settings_panel = SettingsPanel(self.settings)
         self.settings_panel.settingsChanged.connect(self._on_settings_changed)
         self.settings_panel.saved.connect(self._on_settings_saved)
-        self.settings_panel.spaceToggled.connect(self.toggle_space_background)
         QTimer.singleShot(0, lambda: self.btn_toggle_panel.setChecked(True))
         splitter.addWidget(self.settings_panel)
         splitter.setStretchFactor(0, 1)
@@ -183,10 +164,6 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
         self.status_hint = QLabel("拖入音频文件，或点击「添加文件夹」")
         status.addWidget(self.status_hint, 1)
-        self.scene_label = QLabel("")
-        self.scene_label.setStyleSheet(f"color:{theme.FG_MUTE}; font-size:11px;")
-        self.scene_label.setToolTip("当前星区（背景每 24 秒切换一次）")
-        status.addPermanentWidget(self.scene_label)
         self.mode_label = QLabel("")
         self.mode_label.setStyleSheet(f"color:{theme.FG_MUTE};")
         status.addPermanentWidget(self.mode_label)
@@ -282,18 +259,14 @@ class MainWindow(QMainWindow):
             self._theme_actions[name] = action
 
         menu.addSeparator()
-        self.action_space = menu.addAction("动态星空背景")
-        self.action_space.setCheckable(True)
-        self.action_space.setChecked(self.settings.space_background)
-        self.action_space.toggled.connect(self.toggle_space_background)
         menu.addAction("打开日志目录", self._open_log_dir)
         menu.addSeparator()
         menu.addAction("关于音序管家…", self.show_about)
         return menu
 
     def _show_more_menu(self) -> None:
-        """按钮自带的菜单在点击时弹出；这里只负责把勾选状态同步成最新值。"""
-        self.action_space.setChecked(self.settings.space_background)
+        """按钮自带的菜单在点击时弹出。"""
+        return None
 
     def toggle_settings_panel(self) -> None:
         visible = not self.settings_panel.isVisible()
@@ -374,6 +347,25 @@ class MainWindow(QMainWindow):
             self.verdict_combo.addItem(i18n.tr(label_key), key)
         self.verdict_combo.currentIndexChanged.connect(self._on_verdict_filter)
         filter_row.addWidget(self.verdict_combo)
+
+        self.spec_combo = QComboBox()
+        self.spec_combo.setFixedHeight(34)
+        self.spec_combo.setMinimumWidth(112)
+        self.spec_combo.setToolTip("按采样率 / 位深 / DSD 规格筛选列表")
+        for label, key in (
+            ("全部规格", "all"),
+            ("44.1 kHz", "sr44100"),
+            ("48 kHz", "sr48000"),
+            ("96 kHz", "sr96000"),
+            ("176.4k+", "sr_hi"),
+            ("DSD", "dsd"),
+            ("16 bit", "bit16"),
+            ("24 bit", "bit24"),
+            ("32 bit+", "bit32"),
+        ):
+            self.spec_combo.addItem(label, key)
+        self.spec_combo.currentIndexChanged.connect(self._on_spec_filter)
+        filter_row.addWidget(self.spec_combo)
         layout.addLayout(filter_row)
 
         self.table = QTableView()
@@ -878,6 +870,15 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._append_log("ERROR", f"打开目录失败：{exc}")
 
+    def copy_path(self) -> None:
+        tracks = self._selected_tracks()
+        if not tracks:
+            return
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.clipboard().setText(str(tracks[0].path))
+        self.status_hint.setText(f"已复制路径：{tracks[0].path.name}")
+
     def revert_selected(self) -> None:
         for track in self._selected_tracks():
             track.reset_working()
@@ -931,6 +932,7 @@ class MainWindow(QMainWindow):
         menu.addAction("删除歌曲…", self.delete_selected)
         menu.addSeparator()
         menu.addAction("打开所在文件夹", self.open_folder)
+        menu.addAction("复制完整路径", self.copy_path)
         menu.addAction("仅处理选中项", self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -1355,10 +1357,6 @@ class MainWindow(QMainWindow):
         qss = theme.apply_theme(name)
         QApplication.instance().setStyleSheet(qss)
         self.settings.theme = name
-        # 浅色主题无星空，深色主题按用户开关
-        light = theme.is_light(name)
-        self.space.setVisible(not light)
-        self.space.set_running(not light and self.settings.space_background)
         for theme_name, action in self._theme_actions.items():
             blocked = action.blockSignals(True)
             action.setChecked(theme_name == name)
@@ -1375,26 +1373,11 @@ class MainWindow(QMainWindow):
                 pass
         self._append_log("INFO", f"主题已切换：{name}")
 
-    # ------------------------------------------------------------ 星空背景
-
-    def toggle_space_background(self, enabled: bool) -> None:
-        # 即时预览，不持久化 —— 持久化由参数面板的「保存参数」统一完成
-        self.space.set_running(enabled)
-        self.scene_label.setVisible(enabled)
-        # 菜单项与参数面板是同一开关的两个入口，要互相同步且不能互相触发
-        for widget in (getattr(self, "action_space", None),
-                       getattr(self.settings_panel, "space_check", None)):
-            if widget is None:
-                continue
-            blocked = widget.blockSignals(True)
-            widget.setChecked(enabled)
-            widget.blockSignals(blocked)
-
-    def _on_scene_changed(self, name: str) -> None:
-        self.scene_label.setText(f"星区 · {name}")
-
     def _on_verdict_filter(self) -> None:
         self.proxy.set_verdict_group(str(self.verdict_combo.currentData()))
+
+    def _on_spec_filter(self) -> None:
+        self.proxy.set_spec_filter(str(self.spec_combo.currentData()))
 
     # ------------------------------------------------------------ 封面导出
 
@@ -1567,14 +1550,7 @@ class MainWindow(QMainWindow):
         self.status_hint.setText("参数已修改，点击右侧「保存参数」才会生效")
 
     def _on_settings_saved(self) -> None:
-        # 保存后同步依赖设置的 UI 状态（星空、菜单勾选等）
         self.status_hint.setText("参数已保存")
-        if getattr(self, "action_space", None) is not None:
-            blocked = self.action_space.blockSignals(True)
-            self.action_space.setChecked(self.settings.space_background)
-            self.action_space.blockSignals(blocked)
-        self.space.set_running(self.settings.space_background)
-        self.scene_label.setVisible(self.settings.space_background)
 
     # ------------------------------------------------------------ 日志与状态
 
