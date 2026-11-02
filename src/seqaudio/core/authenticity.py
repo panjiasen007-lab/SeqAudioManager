@@ -109,6 +109,23 @@ EXTENDED_FLATNESS_NOISE = 0.7
 #: 下 1kHz 只有约 46 个频点）几何/算术均值比没有统计意义，函数返回 None。
 MIN_FLATNESS_BINS = 32
 
+#: 高采样率 PCM 的「超声衰减」阈值（dB）：80kHz 段相对 20kHz 段的能量差。
+#: 真 192k 母带在 40kHz 以上会随频率快速衰减（80kHz 处通常已是数字静音，
+#: 相对 20kHz 衰减 -50dB 起步）；而把 44.1k/48k 升到 192k 冒充 hi-res 时
+#: 常往超声区灌宽带噪声，实测 Linkin Park 那批 24/192 只衰减 -4 ~ -33dB。
+#: 取 -35dB：填充分布（-4 ~ -33）全在阈值之上，自然衰减（-50 以下）留 15dB 余量。
+ULTRA_DECAY_MIN_DB = -35.0
+#: 超声区**内部**的衰减阈值（dB）：80kHz 段相对 40kHz 段的能量差。
+#: 这条最敏感也最本质 —— 只看 40kHz 以上的走势，不受基带内容多寡影响。
+#: 灌噪声的实测只有 -2 ~ -9dB（几乎是一条直线）；自然录音在 40kHz 以上
+#: 至少有 -20dB 以上的衰减（话筒/ADC 的超声滚降 + 空气吸收）。
+ULTRA_SLOPE_MIN_DB = -15.0
+#: 80kHz 段的绝对能量上限（相对频谱峰值）。真 192k 母带即使有超声内容，
+#: 到这个频率也已经很弱（-90dB 上下）；灌噪声的实测 -64 ~ -84dB。
+#: 取 -85：只抓「高得不正常」的那部分，给真母带留余量（主判据是相对衰减，
+#: 这条只做补充，宁可漏判也不误伤真 hi-res）。
+ULTRA_HIGH_ENERGY_DB = -85.0
+
 #: SBR copy-up 去趋势相关性阈值（0~1）。HE-AAC 的 SBR 把低频子带精确复制
 #: 到高频（频率平移），去趋势后高频仍是低频的镜像（实测 ≈0.97）；普通音乐
 #: 高低频去趋势后各自独立（实测真 CD 抓轨 0.19~0.46）。0.6 位于两者之间。
@@ -576,6 +593,43 @@ def _edge_energy(
     if not np.any(mask):
         return -200.0
     return float(np.median(db[mask]) - peak)
+
+
+def _ultrasonic_decay(
+    freqs: np.ndarray, db: np.ndarray, peak: float, nyquist: float
+) -> tuple[float, float, float]:
+    """超声区的「衰减」与「绝对能量」，用于识别假 hi-res；测不了返回 (0.0, -200.0)。
+
+    专治「把 44.1k/48k 升到 192k 后往超声区灌噪声冒充 hi-res」。
+
+    真 192k 母带的内容（哪怕只到 40kHz）在 40kHz 以上会随频率**快速**衰减：
+    话筒/ADC 的超声噪声和磁带的超声底噪都是往下走的，80kHz 处通常已是
+    数字静音（相对峰值 -120dB 以下），衰减 -50dB 起步。
+
+    而升采样冒充 hi-res 的做法是往超声区灌宽带噪声，把自然衰减抹平 ——
+    实测 Linkin Park 那批 24/192：20k=-57dB、40k=-73dB、60k=-81dB、
+    80k=-78dB，从 20k 到 80k 只掉了 20dB，几乎是一条直线；个别专辑
+    （The Hunting Party）甚至 80kHz 还有 -64dB。
+
+    返回 ``(80k段 - 20k段, 80k段 - 40k段, 80k段绝对能量)``，均相对频谱峰值。
+    第二项只看超声区**内部**的衰减，不受基带内容多寡影响，因此最敏感：
+    实测灌噪声的 Δ(40k→80k) 只有 -2 ~ -9dB，自然衰减应在 -20dB 以下。
+    """
+    if nyquist < 90_000:
+        return 0.0, 0.0, -200.0
+
+    def band(lo: float, hi: float) -> float:
+        mask = (freqs >= lo) & (freqs <= hi)
+        if not np.any(mask):
+            return -200.0
+        return float(np.median(db[mask]) - peak)
+
+    low = band(19_000.0, 22_000.0)
+    mid = band(40_000.0, 50_000.0)
+    high = band(78_000.0, 92_000.0)
+    if low <= -200.0 or high <= -200.0:
+        return 0.0, 0.0, high
+    return high - low, high - mid, high
 
 
 def _spectral_holes(freqs: np.ndarray, db: np.ndarray) -> float:
@@ -1288,6 +1342,9 @@ def _judge(
     test_signal: float = 0.0,
     edge_above_db: float = -120.0,
     edge_above_flat: float = 1.0,
+    ultra_decay: float = 0.0,
+    ultra_high: float = -200.0,
+    ultra_slope: float = 0.0,
 ) -> tuple[str, float, list[str]]:
     """三维度判定：转码 / 升采样 / 升位深，各自独立成立。
 
@@ -1550,6 +1607,40 @@ def _judge(
                 f"源精度约 {eff_depth}bit（声明 {info.bit_depth}bit）：不是零填充，仍按真无损"
             )
         return VERDICT_TRUE, 0.85, reasons
+
+    # ---- 假 hi-res：往超声区灌噪声冒充 192k ----
+    #
+    # 只在 ≥192kHz（nyquist ≥ 90kHz）可测。真母带的超声内容随频率快速衰减
+    # （80k 相对 20k 掉 50dB 以上，通常直接走到数字静音）；灌噪声的则是一条
+    # 近乎水平的直线（实测 20k→80k 只掉 4~33dB，80k 绝对能量 -64~-84dB）。
+    #
+    # 这条必须放在带宽判断之前：有些转制把噪声灌得很满，带宽能到 77~89%，
+    # 会被「高频延伸到 xx，符合高解析特征」直接放行（The Hunting Party 那批）。
+    if nyquist >= 90_000 and (
+        ultra_decay > ULTRA_DECAY_MIN_DB
+        or ultra_slope > ULTRA_SLOPE_MIN_DB
+        or ultra_high > ULTRA_HIGH_ENERGY_DB
+    ):
+        if ultra_decay > ULTRA_DECAY_MIN_DB:
+            reasons.append(
+                f"采样率 {sample_rate / 1000:.1f}kHz，但 20kHz 以上能量几乎不衰减"
+                f"（80kHz 处仅比 20kHz 低 {abs(ultra_decay):.0f}dB）"
+            )
+        elif ultra_slope > ULTRA_SLOPE_MIN_DB:
+            reasons.append(
+                f"采样率 {sample_rate / 1000:.1f}kHz，但 40kHz 到 80kHz 之间几乎不衰减"
+                f"（仅 {abs(ultra_slope):.0f}dB）"
+            )
+        else:
+            reasons.append(
+                f"采样率 {sample_rate / 1000:.1f}kHz，但 80kHz 处仍有 {ultra_high:.0f}dB 能量"
+            )
+        reasons.append(
+            "真母带的超声内容会随频率快速衰减，40kHz 以上通常一路走到数字静音"
+            f"（-110dB 以下）；这里超声区是一条平坦的宽带噪声，内容本身只到 "
+            f"{cutoff / 1000:.1f}kHz（带宽 {ratio:.0%}），属于往高频灌噪声冒充 hi-res"
+        )
+        return VERDICT_UPSAMPLED, 0.6, reasons
 
     # 高采样率（88.2kHz 及以上），且扩展带不空 —— 到这里说明带宽是真的
     # 但内容只到一半以下、超声区仍是一片低电平，仍按升频处理
@@ -1831,6 +1922,12 @@ def analyze(
     sbr_score = 0.0
     if not is_dsd and nyq >= 22050:
         sbr_score = _sbr_copyup_score(freqs, db, nyq)
+    # 超声衰减：高采样率 PCM 的「假 hi-res」判据（往 40kHz 以上灌噪声）
+    ultra_decay = 0.0
+    ultra_slope = 0.0
+    ultra_high = -200.0
+    if not is_dsd and nyq >= 90_000:
+        ultra_decay, ultra_slope, ultra_high = _ultrasonic_decay(freqs, db, peak, nyq)
     # 单音测试信号：基带能量集中在极少数频点，DSD 的帧间波动边界判据不适用
     test_signal = _tone_concentration(freqs, db) if is_dsd else 0.0
     test_signal = max(test_signal, frame_tone)
@@ -1885,6 +1982,9 @@ def analyze(
         upsample_step=upsample_step,
         extended_flat=extended_flat,
         sbr_score=sbr_score,
+        ultra_decay=ultra_decay,
+        ultra_high=ultra_high,
+        ultra_slope=ultra_slope,
     )
     result.verdict = verdict
     result.score = score

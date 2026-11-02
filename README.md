@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.2-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.3-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,24 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。界面字体 Noto Sans SC / JetBrains Mono 为 SIL OFL 1.1，随包分发。
+
+### V1.4.3 更新摘要
+
+修复「假 hi-res」：把 44.1k/48k 升到 192k 后往超声区灌噪声，冒充 24bit/192kHz。
+
+实测样本 Linkin Park 全 7 张专辑 68 首（该乐队从未发行过 24/192）：
+
+- **超声区衰减判据**：真母带的内容在 40kHz 以上会随频率**快速衰减**（80kHz 处通常已是
+  数字静音）；灌噪声的把自然衰减抹平。实测那批 20k→80k 只掉 4~33dB、40k→80k 只掉
+  2~9dB，是一条近乎水平的直线；
+- **判据必须放在带宽判断之前**：有些转制噪声灌得满，带宽能到 77~89%，会被
+  「高频延伸 XX、符合高解析特征」直接放行（The Hunting Party 整张如此）；
+- 判定阈值：20k→80k 衰减 > -35dB **或** 40k→80k 衰减 > -15dB **或** 80kHz 绝对能量
+  > -85dB，任一成立即判「疑似升频」。三条都是「宁可漏判也不误伤真 hi-res」的方向，
+  自然录音的对应值是 -50dB / -20dB / -110dB 以下。
+
+修复后该目录 76/79 首（≥176.4kHz 的文件）判疑似升频，剩下的是 14 秒的前奏与过渡段
+（内容太少判不出）。DSD 判定完全不受影响（张学友《活出生命》24 首、Eagles 9 首仍判真）。
 
 ### V1.4.2 更新摘要
 
@@ -224,8 +242,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.4.2-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.4.2-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.4.3-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.4.3-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -276,6 +294,7 @@ Visual Studio Build Tools。
 | 频谱空洞 / sfb21 凹陷 | 低码率编码器「位不够」留下的窄凹，MP3 在 16kHz 有特征凹陷 | 辅助证据 |
 | **SBR copy-up（高低频去趋势相关）** | HE-AAC 用 SBR 把低频子带平移复制到高频，去趋势后高频仍是低频镜像（≈0.97）；普通音乐去趋势后各自独立（0.19~0.46） | HE-AAC 转码 |
 | 频谱粗糙度（相邻频点差 RMS） | 有损量化把频谱打成锯齿，相邻频点幅度跳变大（真 CD 抓轨实测 0.05~0.12dB，128k 转码 0.13dB 以上） | 诊断指标 |
+| **超声区衰减（40k→80k）** | 真 192k 母带在 40kHz 以上随频率快速衰减（80kHz 处通常已是数字静音）；往超声区灌噪声冒充 hi-res 会把衰减抹平到 2~9dB，近乎一条直线 | 假 hi-res |
 
 **「噪声填充型升采样」是 V1.2.8 新抓的一类**。44.1kHz 升到 48kHz 时，正经的重采样器
 会在 22.05kHz 以上留下数字静音（-100dB 以下）；但有些工具故意加 dither 把上面填成
@@ -569,6 +588,30 @@ Root-cause fixes for "albums with no official SACD release being judged genuine 
 - **DSD inside WavPack** — 1-bit/352.8 kHz `.wv` files use the DSD criteria instead of PCM;
 - **Minimum analysis duration 3 s → 2 s** — 2–3 second test clips (dragon.aif, raw TrueHD) are now analysed.
 
+### V1.4.3 highlights
+
+Fixes fake hi-res: 44.1k/48k content upsampled to 192k with broadband noise poured into
+the ultrasonic band to pass as "24bit/192kHz".
+
+Verified on all 68 tracks of Linkin Park's seven albums (the band never released a 24/192
+version of anything):
+
+- **Ultrasonic-decay criterion**: genuine masters roll off *fast* above 40 kHz (by 80 kHz
+  they are usually at digital silence); noise filling flattens that roll-off. The measured
+  batch dropped only 4–33 dB from 20k to 80k and 2–9 dB from 40k to 80k — essentially a
+  horizontal line;
+- **The criterion must run before the bandwidth check**: some conversions pour in enough
+  noise to reach 77–89% bandwidth, which used to pass as "content extends to XX kHz,
+  consistent with high-resolution" (the whole *The Hunting Party* album);
+- Thresholds: 20k→80k decay > −35 dB **or** 40k→80k decay > −15 dB **or** 80 kHz absolute
+  energy > −85 dB — any one triggers "suspect upsample". All three err on the side of
+  missing a fake rather than flagging a genuine master (natural values are below −50 dB /
+  −20 dB / −110 dB).
+
+After the fix, 76 of the 79 files at ≥176.4 kHz are flagged; the rest are 14-second
+intros/transitions with too little content to judge. DSD verdicts are untouched
+(Jacky Cheung *Live* 24 tracks and Eagles 9 tracks still genuine).
+
 ### V1.4.2 highlights
 
 Fixes for "song title and file name disagree" (verified on the Fish Leong Collection
@@ -666,8 +709,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.4.2-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.4.2-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.4.3-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.4.3-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
@@ -711,6 +754,7 @@ be forged*.
 | Spectral holes / sfb21 notch | Narrow gaps left where a low-bitrate encoder ran out of bits; MP3 has a characteristic notch at 16 kHz | Supporting |
 | **SBR copy-up (detrended low/high correlation)** | HE-AAC's SBR shifts low sub-bands up to the highs; after detrending the highs remain a mirror of the lows (≈0.97), while normal music is independent (0.19–0.46) | HE-AAC transcode |
 | Spectral roughness (adjacent-bin RMS) | Lossy quantisation turns the spectrum jagged; adjacent-bin level jumps grow (real CD rips measure 0.05–0.12 dB, 128k transcodes 0.13 dB+) | Diagnostic |
+| **Ultrasonic decay (40k→80k)** | Genuine 192k masters roll off fast above 40 kHz (digital silence by 80 kHz); pouring broadband noise to fake hi-res flattens it to 2–9 dB of decay | Fake hi-res |
 
 **"Noise-filled upsampling" is newly caught in v1.2.8.** A proper resampler leaves digital silence above 22.05 kHz; some tools deliberately add dither to fill it to −50 to −70 dB and fake ultrasonic content — edge energy alone would then read it as genuine. The tell is the step itself: a natural roll-off never drops 18 dB exactly on a sample-rate boundary. Two Avril Lavigne tracks (Nobody's Home, Who Knows) show a 21–28 dB step at 22.05 kHz with flat noise above it, and are now caught.
 

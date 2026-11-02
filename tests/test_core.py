@@ -1865,6 +1865,68 @@ class TestAuthenticityV13(unittest.TestCase):
         )
         self.assertNotEqual(verdict, "疑似升位深", reasons)
 
+    # ---------------------------------------------------------- 假 hi-res
+    def _info192(self):
+        from seqaudio.core.model import AudioInfo
+
+        return AudioInfo(
+            fmt="FLAC", lossless=True, sample_rate=192000, bit_depth=24,
+            channels=2, duration=200.0,
+        )
+
+    def test_ultrasonic_decay_fill_vs_natural(self) -> None:
+        """超声区判据：灌噪声=平坦，自然录音=快速衰减。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import _ultrasonic_decay
+
+        freqs = np.arange(0, 96000, 23.4)
+        peak = 0.0
+        # 灌噪声：20k/40k/80k 几乎一样高（实测 Linkin Park 那批）
+        filled = np.full(freqs.size, -60.0)
+        d1, s1, h1 = _ultrasonic_decay(freqs, filled, peak, 96000.0)
+        self.assertGreater(d1, -35.0)
+        self.assertGreater(s1, -15.0)
+        # 自然录音：20k 之后快速衰减，52k 以上走到数字静音
+        natural = np.where(freqs < 22000, -50.0,
+                           np.where(freqs < 52000, -85.0, -130.0))
+        d2, s2, h2 = _ultrasonic_decay(freqs, natural, peak, 96000.0)
+        self.assertLess(d2, -35.0)
+        self.assertLess(s2, -15.0)
+        self.assertLess(h2, -100.0)
+
+    def test_fake_hires_ultrasonic_fill_detected(self) -> None:
+        """192k 但超声区是平坦噪声 → 判升频（不是「符合高解析特征」）。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self._info192(), 30000.0, 30.0, -50.0, 24,
+            edge_db=-80.0, ratio=0.31, ultra_decay=-8.0, ultra_slope=-5.0,
+        )
+        self.assertEqual(verdict, "疑似升频", reasons)
+        self.assertTrue(any("灌噪声" in r for r in reasons))
+
+    def test_fake_hires_full_bandwidth_still_detected(self) -> None:
+        """带宽能到 89%（噪声灌得满）也要抓，不能走「符合高解析特征」。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self._info192(), 85000.0, 30.0, -50.0, 24,
+            edge_db=-70.0, ratio=0.89, ultra_decay=-7.0, ultra_slope=-6.0,
+        )
+        self.assertEqual(verdict, "疑似升频", reasons)
+
+    def test_natural_ultrasonic_decay_kept_genuine(self) -> None:
+        """真 192k：超声区快速衰减 → 不能被误判成升频。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self._info192(), 45000.0, 30.0, -50.0, 24,
+            edge_db=-95.0, ratio=0.47, ultra_decay=-52.0, ultra_slope=-38.0,
+            ultra_high=-118.0,
+        )
+        self.assertNotEqual(verdict, "疑似升频", reasons)
+
     def test_quiet_24bit_not_flagged(self) -> None:
         """电平极低但位深真实，不能据此判注水。"""
         from seqaudio.core.authenticity import _judge
