@@ -1722,6 +1722,10 @@ def analyze(
     if not path.exists():
         result.error = "文件不存在"
         return result
+    # SACD ISO 是光盘镜像：ffmpeg 无法解码，先分轨成 DSF/DFF 再鉴定
+    if path.suffix.lower() == ".iso":
+        result.error = "SACD ISO 为光盘镜像，需先分轨为 DSF/DFF 后鉴定"
+        return result
 
     if info is None:
         from .probe import probe

@@ -19,6 +19,7 @@ from seqaudio.core import lyrics as lyrics_mod  # noqa: E402
 from seqaudio.core import probe, rename, tags as tags_mod, watermark, writer  # noqa: E402
 from seqaudio.core import clean as clean_mod  # noqa: E402
 from seqaudio.core import quarantine, uninstall  # noqa: E402
+from seqaudio.core import sacd as sacd_mod  # noqa: E402
 from seqaudio.core.model import Tags, Track, ConflictMode  # noqa: E402
 
 
@@ -2765,6 +2766,205 @@ class TestAuthenticityOldCD(unittest.TestCase):
     def test_full_band_is_true(self) -> None:
         result = self._analyze("full", knee_hz=22000, slope_db_per_khz=300)
         self.assertEqual(result.verdict, "真无损")
+
+
+#: 真实 SACD 样本（本机没有时跳过，绝不修改样本目录）
+REAL_SACD = Path(
+    r"F:\musicM\样本\赵鹏与惊堂木乐队 低音炮 3套车 SACD iso"
+    r"\赵鹏与惊堂木乐队 低音炮 3套车 SACD.iso"
+)
+
+#: 样本 `sacd_extract -P` 的 12 轨时间码
+_SACD_PRINT_TRACKS = [
+    ("00:02:00", "04:19:58"),
+    ("04:23:57", "04:18:36"),
+    ("08:44:17", "04:46:66"),
+    ("13:33:07", "04:11:17"),
+    ("17:46:23", "04:27:69"),
+    ("22:16:16", "03:57:47"),
+    ("26:15:62", "03:47:44"),
+    ("30:05:30", "05:16:45"),
+    ("35:23:74", "03:57:69"),
+    ("39:23:67", "04:13:54"),
+    ("43:39:45", "03:58:54"),
+    ("47:40:23", "04:45:35"),
+]
+
+
+class TestSacdIso(unittest.TestCase):
+    """SACD ISO 解析：-P 曲目表、SACDText、同目录文本曲目。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_sacd_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_parse_timecode(self) -> None:
+        self.assertEqual(sacd_mod.parse_timecode("00:02:00"), 2_000)
+        self.assertEqual(sacd_mod.parse_timecode("04:19:58"), 259_773)
+        self.assertEqual(sacd_mod.parse_timecode("52:25:58"), 3_145_773)
+
+    def test_parse_print_output(self) -> None:
+        text = [
+            "Area count: 2",
+            "\tArea Information [0]:",
+            "\t\tArea Description: Multi",
+            "\t\tTrack Count: 2",
+            "\t\tTotal play time: 00:10:00 [mins:secs:frames]",
+            "\t\tSpeaker config: 5.1 Channel",
+            "\t\tTrack list [0]:",
+            "\t\t\tTrack_Start_Time_Code: 00:02:00 [mins:secs:frames]",
+            "\t\t\tDuration: 00:04:00 [mins:secs:frames]",
+            "\t\t\tTrack_Start_Time_Code: 00:06:00 [mins:secs:frames]",
+            "\t\t\tDuration: 00:04:00 [mins:secs:frames]",
+            "\tArea Information [1]:",
+            "\t\tArea Description: Stereo",
+            "\t\tTrack Count: 12",
+            "\t\tTotal play time: 52:25:58 [mins:secs:frames]",
+            "\t\tSpeaker config: 2 Channel",
+            "\t\tTrack list [1]:",
+        ]
+        for start, duration in _SACD_PRINT_TRACKS:
+            text.append(f"\t\t\tTrack_Start_Time_Code: {start} [mins:secs:frames]")
+            text.append(f"\t\t\tDuration: {duration} [mins:secs:frames]")
+        areas = sacd_mod.parse_print_output("\n".join(text))
+        self.assertEqual(len(areas), 2)
+        stereo = sacd_mod.select_stereo_area(areas)
+        assert stereo is not None
+        self.assertEqual(stereo.channels, 2)
+        self.assertEqual(stereo.track_count, 12)
+        self.assertEqual(stereo.total_ms, 3_145_773)
+        self.assertEqual(stereo.starts[0], 2_000)
+        self.assertEqual(stereo.durations[0], 259_773)
+
+    def test_read_sacd_text(self) -> None:
+        import struct
+
+        title = "赵鹏与惊堂木乐队 低音炮 3套车 SACD"
+        artist = "赵鹏"
+        title_raw = title.encode("gbk")
+        artist_raw = artist.encode("gbk")
+        block = bytearray(2048)
+        block[:8] = b"SACDText"
+        album_off = 0x40
+        artist_off = album_off + len(title_raw) + 1
+        disc_off = artist_off + len(artist_raw) + 1
+        disc_artist_off = disc_off + len(title_raw) + 1
+        struct.pack_into(">H", block, 0x10, album_off)
+        struct.pack_into(">H", block, 0x12, artist_off)
+        struct.pack_into(">H", block, 0x20, disc_off)
+        struct.pack_into(">H", block, 0x22, disc_artist_off)
+        block[album_off : album_off + len(title_raw)] = title_raw
+        block[artist_off : artist_off + len(artist_raw)] = artist_raw
+        block[disc_off : disc_off + len(title_raw)] = title_raw
+        block[disc_artist_off : disc_artist_off + len(artist_raw)] = artist_raw
+
+        iso = self.tmp / "fake.iso"
+        with iso.open("wb") as handle:
+            handle.seek(511 * 2048)
+            handle.write(block)
+        self.assertEqual(sacd_mod.read_sacd_text(iso), (title, artist))
+
+    def test_read_folder_track_titles(self) -> None:
+        text = (
+            "专辑名称：测试专辑\n"
+            "专辑歌手：测试歌手\n"
+            "发行时间：2023年5月\n\n"
+            "专辑曲目：\n"
+            "01. 第一首\n"
+            "02 第二首\n"
+            "０３ 第三首\n"
+            "4、第四首\n"
+            "05 越界曲目\n"
+            "01 重复曲名\n\n"
+            "出版公司：测试公司\n"
+        )
+        (self.tmp / "专辑简介.txt").write_text(text, encoding="utf-8")
+        iso = self.tmp / "album.iso"
+        titles = sacd_mod.read_folder_track_titles(iso, 4)
+        self.assertEqual(
+            titles,
+            {1: "第一首", 2: "第二首", 3: "第三首", 4: "第四首"},
+        )
+        self.assertEqual(sacd_mod.read_folder_release_date(iso), "2023-05")
+
+    @unittest.skipUnless(REAL_SACD.exists(), "需要本机真实 SACD 样本")
+    def test_probe_real_sample(self) -> None:
+        if sacd_mod.find_sacd_extract() is None:
+            self.skipTest("未找到 sacd_extract")
+        track = probe.probe(REAL_SACD)
+        self.assertEqual(track.status.value, "待处理")
+        self.assertEqual(track.info.fmt, "SACD ISO")
+        self.assertEqual(track.info.channels, 2)
+        self.assertEqual(track.info.dsd_rate, "DSD64")
+        self.assertAlmostEqual(track.info.duration or 0, 3_145.773, places=2)
+        assert track.cue is not None
+        self.assertTrue(track.cue.sacd)
+        self.assertEqual(track.cue.album, "赵鹏与惊堂木乐队 低音炮 3套车 SACD")
+        self.assertEqual(track.cue.performer, "赵鹏")
+        self.assertEqual(track.cue.date, "2023-05")
+        self.assertEqual(len(track.cue.tracks), 12)
+        self.assertEqual(
+            [entry.title for entry in track.cue.tracks],
+            ["三套车", "卜奎大街", "在那东山顶上", "花房姑娘", "那一天", "海恋",
+             "春光好", "三百六十五里路", "知否", "春天里", "多少柔情多少泪", "踏浪"],
+        )
+        self.assertAlmostEqual(track.cue.tracks[0].duration, 259.773, places=2)
+
+    @unittest.skipUnless(REAL_SACD.exists(), "需要本机真实 SACD 样本")
+    def test_probe_from_chinese_cwd(self) -> None:
+        """回归：中文工作目录下 sacd_extract 会丢字符，导入必须仍成功。"""
+        if sacd_mod.find_sacd_extract() is None:
+            self.skipTest("未找到 sacd_extract")
+        chinese_dir = self.tmp / "音序管家-v1.5.1-x86-x64"
+        chinese_dir.mkdir()
+        previous = os.getcwd()
+        os.chdir(chinese_dir)
+        try:
+            track = probe.probe(REAL_SACD)
+        finally:
+            os.chdir(previous)
+        assert track.cue is not None
+        self.assertEqual(len(track.cue.tracks), 12)
+        self.assertEqual(track.cue.tracks[0].title, "三套车")
+        self.assertTrue(all(ord(ch) < 128 for ch in sacd_mod.tool_cwd()))
+
+    def test_expand_sacd_tracks(self) -> None:
+        from seqaudio.core.model import AudioInfo, CueSheet, CueTrack
+        from seqaudio.core.probe import expand_cue_tracks
+
+        sheet = CueSheet(
+            cue_path=self.tmp / "fake.iso",
+            audio_file=self.tmp / "fake.iso",
+            title="测试专辑",
+            album="测试专辑",
+            performer="测试歌手",
+            sacd=True,
+            tracks=[
+                CueTrack(number=1, title="第一首", start_ms=2_000, end_ms=261_773),
+                CueTrack(number=2, title="第二首", start_ms=263_457, end_ms=521_841),
+            ],
+        )
+        track = Track(path=self.tmp / "fake.iso")
+        track.info = AudioInfo(fmt="SACD ISO", lossless=True, duration=525.0)
+        track.cue = sheet
+        expanded = expand_cue_tracks([track])
+        self.assertEqual(len(expanded), 2)
+        self.assertEqual([item.title for item in expanded], ["第一首", "第二首"])
+        self.assertEqual([item.cue_track for item in expanded], [0, 1])
+        self.assertTrue(all(item.path == track.path for item in expanded))
+        self.assertEqual(expanded[0].working.track, "1/2")
+
+    def test_iso_authenticity_short_circuit(self) -> None:
+        from seqaudio.core.authenticity import analyze, ffmpeg_available
+
+        if not ffmpeg_available():
+            self.skipTest("未安装 ffmpeg")
+        iso = self.tmp / "dummy.iso"
+        iso.write_bytes(b"not a real iso")
+        result = analyze(iso)
+        self.assertIn("SACD ISO", result.error)
 
 
 if __name__ == "__main__":

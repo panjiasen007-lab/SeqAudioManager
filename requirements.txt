@@ -6,7 +6,7 @@ imageio-ffmpeg>=0.5    # 内置 ffmpeg 二进制：解码 DSD/APE/WV/FLAC 做频
 
 # 网络层使用标准库 urllib 实现，零额外依赖：
 #   - 这几个公开 API 均不支持/不需要 HTTP/2
-#   - 减少打包体积与 DLL 冲突面，Win7 兼容模式也更稳
+#   - 减少打包体积与 DLL 冲突面，兼容性也更稳
 
 # ---- 开发期工具（不进 EXE）----
 # pillow>=10            # tools/make_icon.py：源图抠透明底 + 导出多尺寸 ICO

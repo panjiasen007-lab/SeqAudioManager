@@ -18,6 +18,7 @@ from .model import (
     CUE_EXT,
     ENCRYPTED_EXTS,
     LOSSLESS_EXTS,
+    SACD_EXTS,
     SUPPORTED_EXTS,
     Tags,
     Track,
@@ -408,6 +409,12 @@ def probe(
         track.note(reason)
         return track
 
+    # SACD ISO 是光盘镜像，mutagen/ffmpeg 都读不了，走 sacd_extract 解析
+    if path.suffix.lower() in SACD_EXTS:
+        from .sacd import probe_sacd_iso
+
+        return probe_sacd_iso(path)
+
     obj = open_audio(path)
     if obj is None:
         # mutagen 不支持的容器（W64/RF64/AOB/TrueHD/SHN/TAK…）退回 ffmpeg 解析
@@ -540,15 +547,25 @@ def expand_cue_tracks(tracks: list[Track]) -> list[Track]:
 
 
 def scan_folder(
-    folder: Path | str, *, recursive: bool = True, auto_align: bool = True
+    folder: Path | str,
+    *,
+    recursive: bool = True,
+    auto_align: bool = True,
+    cancel=None,
 ) -> list[Track]:
-    """扫描目录下全部受支持音频（跳过加密格式并记录提示）。"""
+    """扫描目录下全部受支持音频（跳过加密格式并记录提示）。
+
+    ``cancel`` 是无参回调（通常是 ``QThread.isInterruptionRequested``），
+    每处理一个文件检查一次，避免大目录扫描无法被“停止”按钮中断。
+    """
     folder = Path(folder)
     tracks: list[Track] = []
     if not folder.is_dir():
         return tracks
     iterator = folder.rglob("*") if recursive else folder.glob("*")
     for entry in iterator:
+        if cancel is not None and cancel():
+            break
         try:
             if not entry.is_file():
                 continue

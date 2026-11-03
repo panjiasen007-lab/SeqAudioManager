@@ -7,8 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -42,6 +51,7 @@ from ..core.logging_setup import add_listener, remove_listener
 from ..core.model import Tags, Track, TrackStatus
 from ..pipeline.processor import BatchOptions
 from . import fonts, i18n, theme
+from .backdrop import BackdropWidget
 from .delegate import TrackDelegate
 from .dialogs import (
     BatchTagEditDialog,
@@ -80,6 +90,12 @@ LEVEL_COLORS = {
     "DEBUG": theme.FG_MUTE,
 }
 
+#: 「添加文件」对话框过滤器；SACD ISO 是光盘镜像，单列一类便于用户找到
+AUDIO_FILE_FILTER = (
+    "音频 (*.flac *.ape *.wav *.wv *.tta *.m4a *.dsf *.dff *.iso *.mp3 *.aac *.ogg *.opus);;"
+    "SACD 镜像 (*.iso);;所有文件 (*.*)"
+)
+
 
 class LogBridge(QObject):
     """把 logging 回调安全地转成 Qt 信号（回调可能来自工作线程）。"""
@@ -107,6 +123,8 @@ class MainWindow(QMainWindow):
         self.auth_worker: Optional[AuthenticityWorker] = None
         self.cover_worker: Optional[CoverWorker] = None
         self.split_worker: Optional[SplitCueWorker] = None
+        self._auth_stopped = False
+        self._split_stopped = False
         self._stat_cards: dict[str, StatCard] = {}
         self._i18n_buttons: dict[QPushButton, str] = {}
         self._i18n_stat_keys: dict[str, str] = {}
@@ -136,8 +154,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 布局
 
     def _build_ui(self) -> None:
-        surface = QWidget()
+        surface = BackdropWidget()
         surface.setObjectName("appSurface")
+        self.surface = surface
         self.setCentralWidget(surface)
 
         root = QVBoxLayout(surface)
@@ -283,8 +302,9 @@ class MainWindow(QMainWindow):
         # ---- 主题子菜单 ----
         self.theme_menu = menu.addMenu(i18n.tr("menu_theme"))
         self._theme_actions: dict[str, object] = {}
-        for name in theme.THEMES:
+        for name, palette in theme.THEMES.items():
             action = self.theme_menu.addAction(i18n.tr_theme(name))
+            action.setIcon(self._theme_swatch(palette))
             action.setCheckable(True)
             action.setChecked(name == self.settings.theme)
             action.toggled.connect(lambda checked, n=name: self.apply_theme(n) if checked else None)
@@ -300,6 +320,23 @@ class MainWindow(QMainWindow):
     def _show_more_menu(self) -> None:
         """按钮自带的菜单在点击时弹出。"""
         return None
+
+    @staticmethod
+    def _theme_swatch(palette) -> QIcon:
+        """主题菜单左侧的小色块：底/强调/辅助色的斜向渐变。"""
+        pixmap = QPixmap(18, 18)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        gradient = QLinearGradient(0, 0, 18, 18)
+        gradient.setColorAt(0.0, QColor(palette.base))
+        gradient.setColorAt(0.52, QColor(palette.accent))
+        gradient.setColorAt(1.0, QColor(palette.cyan))
+        painter.setBrush(gradient)
+        painter.setPen(QPen(QColor(palette.line), 1))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, 17, 17), 4, 4)
+        painter.end()
+        return QIcon(pixmap)
 
     def toggle_settings_panel(self) -> None:
         visible = not self.right_tabs.isVisible()
@@ -563,7 +600,7 @@ class MainWindow(QMainWindow):
             self,
             "选择音频文件",
             self.settings.last_folder or "",
-            "音频 (*.flac *.ape *.wav *.wv *.tta *.m4a *.dsf *.dff *.mp3 *.aac *.ogg *.opus);;所有文件 (*.*)",
+            AUDIO_FILE_FILTER,
         )
         if files:
             self.settings.last_folder = str(Path(files[0]).parent)
@@ -588,10 +625,47 @@ class MainWindow(QMainWindow):
             lambda n: self.status_hint.setText(f"正在扫描… 已发现 {n} 个音频")
         )
         self.scan_worker.finishedScan.connect(self._on_scan_finished)
-        self.scan_worker.failed.connect(lambda msg: self._append_log("ERROR", f"扫描失败：{msg}"))
+        self.scan_worker.failed.connect(self._on_scan_failed)
         self.scan_worker.start()
 
+    def _on_scan_failed(self, message: str) -> None:
+        """扫描线程异常：日志 + 状态栏 + 明确弹窗，避免用户只看到空列表。"""
+        self._append_log("ERROR", f"导入失败：{message}")
+        self.brand_bar.set_status("导入失败", theme.BAD)
+        self.status_hint.setText(f"导入失败：{message}")
+        QMessageBox.warning(
+            self,
+            "导入失败",
+            "文件未能导入：\n"
+            f"{message}\n\n"
+            "若为 SACD ISO，请确认 assets/tools/sacd_extract.exe 未被安全软件拦截。",
+        )
+
     def _on_scan_finished(self, tracks: list[Track]) -> None:
+        if not tracks:
+            self._append_log("WARNING", "没有找到可导入的音频文件")
+            self.status_hint.setText("没有找到可导入的音频文件")
+            self.brand_bar.set_status("就绪", theme.FG_DIM)
+            return
+        incoming = {str(t.path).lower() for t in tracks}
+        # 旧版本把 SACD ISO 记成「不支持/失败」的一行；重新导入时若只按路径去重，
+        # 12 个新分轨会被全部当成重复丢掉，列表里只剩旧失败行。
+        # 因此先替换「同路径的失败/不支持行」，以及「同路径尚未展开的整轨行」。
+        expanded_paths = {
+            str(t.path).lower() for t in tracks if t.cue is not None and t.cue_track is not None
+        }
+        stale = [
+            t for t in self.model.tracks()
+            if str(t.path).lower() in incoming
+            and (
+                t.status in (TrackStatus.FAILED, TrackStatus.UNSUPPORTED)
+                or (t.cue_track is None and str(t.path).lower() in expanded_paths)
+            )
+        ]
+        if stale:
+            self.model.remove_tracks(stale)
+            self._append_log("INFO", f"替换 {len(stale)} 条旧的失败/未展开记录")
+
         existing = {str(t.path).lower() for t in self.model.tracks()}
         fresh = [t for t in tracks if str(t.path).lower() not in existing]
         duplicates = len(tracks) - len(fresh)
@@ -884,14 +958,41 @@ class MainWindow(QMainWindow):
         )
 
     def stop(self) -> None:
+        """停止当前所有可取消的后台任务（批处理、鉴定、封面、分轨、扫描）。"""
+        stopped: list[str] = []
         if self.worker is not None and self.worker.isRunning():
             self.worker.cancel()
-            self.btn_stop.setEnabled(False)
-            self._append_log("WARNING", "已请求停止，正在结束当前文件…")
+            stopped.append("批处理")
+        if self.auth_worker is not None and self.auth_worker.isRunning():
+            self.auth_worker.cancel()
+            self._auth_stopped = True
+            stopped.append("无损鉴定")
         if self.cover_worker is not None and self.cover_worker.isRunning():
             self.cover_worker.cancel()
-            self.btn_stop.setEnabled(False)
-            self._append_log("WARNING", "已请求停止文件夹封面生成…")
+            stopped.append("文件夹封面")
+        if self.split_worker is not None and self.split_worker.isRunning():
+            self.split_worker.cancel()
+            self._split_stopped = True
+            stopped.append("分轨导出")
+        if self.scan_worker is not None and self.scan_worker.isRunning():
+            self.scan_worker.cancel()
+            stopped.append("扫描")
+        if (
+            self.revert_scan_worker is not None
+            and self.revert_scan_worker.isRunning()
+        ):
+            self.revert_scan_worker.cancel()
+            stopped.append("重读标签")
+
+        if not stopped:
+            self._append_log("INFO", "当前没有正在运行的任务")
+            return
+        self.btn_stop.setEnabled(False)
+        self.status_hint.setText("正在停止…")
+        self._append_log(
+            "WARNING",
+            f"已请求停止：{'、'.join(stopped)}；当前文件结束后退出",
+        )
 
     def _on_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
@@ -1198,7 +1299,7 @@ class MainWindow(QMainWindow):
         menu.addAction("撤销本地修改", self.revert_selected)
         menu.addSeparator()
         menu.addAction("查看频谱", self.show_spectrum)
-        menu.addAction("CUE 分轨导出…", self.run_split_cue)
+        menu.addAction("分轨导出（CUE / SACD ISO）…", self.run_split_cue)
         menu.addAction("移入隔离区", self._quarantine_selected)
         menu.addAction("删除歌曲…", self.delete_selected)
         menu.addSeparator()
@@ -1415,6 +1516,7 @@ class MainWindow(QMainWindow):
             return
 
         self._set_running(True)
+        self._auth_stopped = False
         self.progress.setMaximum(len(targets))
         self.progress.setValue(0)
         self.brand_bar.set_status("鉴定中", theme.CYAN)
@@ -1455,11 +1557,19 @@ class MainWindow(QMainWindow):
         self.model.refresh_all()
         # 扫描结束后统一刷新统计卡，把同批推定改判的结果也一并计入
         self._refresh_stats()
-        msg = f"鉴定完成：真无损 {true_count}，可疑 {suspect}，无法判定 {unknown}"
-        self._append_log("WARNING" if suspect else "INFO", msg)
+        if self._auth_stopped:
+            msg = (
+                f"鉴定已停止：已完成真无损 {true_count}，可疑 {suspect}，"
+                f"无法判定 {unknown}"
+            )
+            self._append_log("WARNING", msg)
+            self._auth_stopped = False
+        else:
+            msg = f"鉴定完成：真无损 {true_count}，可疑 {suspect}，无法判定 {unknown}"
+            self._append_log("WARNING" if suspect else "INFO", msg)
+            if suspect:
+                self._append_log("INFO", "已自动勾选「只看问题」，可从表格筛出可疑项")
         self.status_hint.setText(msg)
-        if suspect:
-            self._append_log("INFO", "已自动勾选「只看问题」，可从表格筛出可疑项")
 
     # ------------------------------------------------------------ 清理假无损
 
@@ -1631,6 +1741,7 @@ class MainWindow(QMainWindow):
         add("操作", "真假无损鉴定", "", self.run_authenticity)
         add("操作", "清理假无损", "Ctrl+Shift+D", self.run_cleanup)
         add("操作", "曲库体检", "", self.open_health)
+        add("操作", "分轨导出（CUE / SACD ISO）", "", self.run_split_cue)
         add("操作", "编辑标签", "Ctrl+E", self.edit_selected)
         add("操作", "批量编辑标签", "", self.batch_edit_selected)
         add("操作", "撤销标签编辑", "Ctrl+Z", self.undo_last_tag_edit)
@@ -1730,6 +1841,7 @@ class MainWindow(QMainWindow):
 
         qss = theme.apply_theme(name)
         QApplication.instance().setStyleSheet(qss)
+        self.surface.set_theme(name)
         self.settings.theme = name
         for theme_name, action in self._theme_actions.items():
             blocked = action.blockSignals(True)
@@ -1836,7 +1948,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ CUE 分轨导出
 
     def run_split_cue(self) -> None:
-        """CUE 分轨导出：把选中的整轨 WAV/APE/FLAC + CUE 切成独立 FLAC。"""
+        """分轨导出：把整轨 WAV/APE/FLAC + CUE 切成 FLAC，或把 SACD ISO 导出为 DSF。"""
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "请稍候", "批处理正在运行，先等它完成。")
             return
@@ -1853,7 +1965,8 @@ class MainWindow(QMainWindow):
         if not targets:
             QMessageBox.information(
                 self, "没有可导出的整轨",
-                "请先添加带 CUE 索引的整轨文件（WAV/APE/FLAC + CUE），或选中它们。",
+                "请先添加带 CUE 索引的整轨文件（WAV/APE/FLAC + CUE）或 SACD ISO，"
+                "或选中它们。",
             )
             return
 
@@ -1867,6 +1980,7 @@ class MainWindow(QMainWindow):
             return
 
         self._set_running(True)
+        self._split_stopped = False
         self.progress.setMaximum(max(1, sum(len(t.cue.tracks) for t in targets)))
         self.progress.setValue(0)
         self.brand_bar.set_status("分轨导出", theme.CYAN)
@@ -1889,6 +2003,9 @@ class MainWindow(QMainWindow):
         self.status_hint.setText(summary.text())
 
     def _on_split_finished(self) -> None:
+        if self._split_stopped:
+            self._append_log("WARNING", "分轨导出已停止")
+            self._split_stopped = False
         self._set_running(False)
         self.brand_bar.set_status("就绪", theme.FG_DIM)
 

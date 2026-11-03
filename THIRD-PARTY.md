@@ -13,6 +13,7 @@
 | NumPy | ≥ 1.26 | BSD-3-Clause | 频谱分析数值计算 | 宽松授权，仅需保留版权声明 |
 | FFmpeg | 7.1（imageio-ffmpeg 内置） | LGPL-2.1-or-later（本构建） | 解码 DSD/APE/WV/FLAC 做频谱分析 | 仅调用其命令行做**解码**，不做再编码；可自行替换为系统 ffmpeg |
 | imageio-ffmpeg | ≥ 0.5 | BSD-2-Clause | 提供 ffmpeg 可执行文件 | 分发的是官方 LGPL 构建 |
+| sacd_extract | 0.3.9.3-107（Windows x64） | GPL-2.0 | 读取 SACD ISO 曲目表、导出分轨 DSF | 以独立命令行程序调用；授权全文见 `assets/tools/LICENSE-sacd_extract.txt` |
 
 ## 字体（SIL Open Font License 1.1）
 

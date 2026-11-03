@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import logging
+import re
+import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,11 +111,11 @@ def split_one(
     return True
 
 
-def _safe_filename(number: int, title: str) -> str:
+def _safe_filename(number: int, title: str, suffix: str = ".flac") -> str:
     title = (title or "").strip() or f"Track {number:02d}"
     for ch in '\\/:*?"<>|':
         title = title.replace(ch, "_")
-    return f"{number:02d} - {title}.flac"
+    return f"{number:02d} - {title}{suffix}"
 
 
 def _entry_bounds(
@@ -200,6 +203,18 @@ def split_cue_sheet(
     sheet = track.cue
     if sheet is None or len(sheet.tracks) <= 1:
         return SplitSummary(total=0, elapsed_sec=0.0)
+
+    # SACD ISO 不是 ffmpeg 能解码的容器：一次调用 sacd_extract 导出全部 DSF
+    if getattr(sheet, "sacd", False):
+        return split_sacd_sheet(
+            track, output_dir, client,
+            use_lrclib=use_lrclib,
+            use_netmusic=use_netmusic,
+            use_qqmusic=use_qqmusic,
+            fetch_lyrics=fetch_lyrics,
+            on_progress=on_progress,
+            cancel=cancel,
+        )
 
     ffmpeg = _find_ffmpeg()
     if ffmpeg is None:
@@ -326,6 +341,260 @@ def split_cue_sheet(
 
         if on_progress is not None:
             on_progress(index, total)
+
+    summary.elapsed_sec = time.perf_counter() - started
+    return summary
+
+
+# ---------------------------------------------------------------- SACD ISO
+
+
+def _local_cover(folder: Path) -> tuple[Optional[bytes], str]:
+    """读取 ISO 同目录的 cover/folder/front 等封面图。"""
+    from ..core.cover import COVER_EXTS, COVER_NAMES
+
+    try:
+        entries = {p.name.lower(): p for p in folder.iterdir() if p.is_file()}
+    except OSError:
+        return None, ""
+    for name in COVER_NAMES:
+        for ext in COVER_EXTS:
+            path = entries.get(f"{name}{ext}")
+            if path is None:
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if len(data) <= 64:
+                continue
+            mime = {
+                ".png": "image/png",
+                ".webp": "image/webp",
+                ".gif": "image/gif",
+                ".bmp": "image/bmp",
+            }.get(ext, "image/jpeg")
+            return data, mime
+    return None, ""
+
+
+def _dsf_duration(path: Path) -> float:
+    from ..core.probe import probe as _probe
+
+    try:
+        return _probe(path, with_cue=False).info.duration or 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _run_sacd_extract(
+    tool: str,
+    iso: Path,
+    temp_dir: Path,
+    numbers: list[int],
+    cancel=None,
+) -> tuple[int, bool]:
+    """一次导出全部选中轨；返回 ``(退出码, 是否被取消)``。"""
+    from ..core.sacd import tool_cwd
+
+    log_path = temp_dir / "sacd_extract.log"
+    command = [
+        tool, "-2", "-s", "-c",
+        "-t", ",".join(str(n) for n in numbers),
+        "-y", str(temp_dir),
+        "-i", str(iso),
+    ]
+    cancelled = False
+    with log_path.open("wb") as handle:
+        proc = subprocess.Popen(
+            command,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            cwd=tool_cwd(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        while proc.poll() is None:
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                break
+            time.sleep(0.2)
+    return proc.returncode or 0, cancelled
+
+
+def split_sacd_sheet(
+    track: Track,
+    output_dir: Path,
+    client: HttpClient,
+    *,
+    use_lrclib: bool = True,
+    use_netmusic: bool = True,
+    use_qqmusic: bool = True,
+    fetch_lyrics: bool = True,
+    on_progress=None,
+    cancel=None,
+) -> SplitSummary:
+    """把 SACD ISO 导出为 ``NN - 标题.dsf``，写标签并嵌入同目录封面。
+
+    一次命令导出全部轨（比逐轨调用省很多读盘时间），输出先在临时目录，
+    校验时长后再按我们的命名规则移入目标目录 —— ``sacd_extract`` 会自建
+    以专辑名命名的子目录，且标题栏是 ``unknown track title``。
+    """
+    from ..core.probe import is_placeholder_title
+    from ..core.sacd import find_sacd_extract
+
+    sheet = track.cue
+    if sheet is None or len(sheet.tracks) <= 1:
+        return SplitSummary(total=0, elapsed_sec=0.0)
+
+    total = len(sheet.tracks)
+    tool = find_sacd_extract()
+    if tool is None:
+        log.error("未找到 sacd_extract，无法导出 SACD ISO")
+        return SplitSummary(total=total, failed=total)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = SplitSummary(total=total)
+    started = time.perf_counter()
+    try:
+        size_gb = track.path.stat().st_size / (1024 ** 3)
+    except OSError:
+        size_gb = 0.0
+    log.info(
+        "SACD 分轨：%s，%d 轨，镜像 %.1f GB（请确认目标磁盘空间充足）",
+        track.path.name, total, size_gb,
+    )
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=".seqaudio-sacd-", dir=str(output_dir)))
+    try:
+        if cancel is not None and cancel.is_set():
+            return summary
+        code, cancelled = _run_sacd_extract(
+            tool, track.path, temp_dir,
+            [entry.number for entry in sheet.tracks],
+            cancel=cancel,
+        )
+        if cancelled:
+            log.info("SACD 分轨已取消")
+            return summary
+        if code != 0:
+            log_path = temp_dir / "sacd_extract.log"
+            tail = ""
+            try:
+                tail = log_path.read_text("utf-8", errors="replace")[-300:]
+            except OSError:
+                pass
+            log.error("sacd_extract 退出码 %s：%s", code, tail.strip())
+            summary.failed = total
+            return summary
+
+        files = sorted(
+            (path for path in temp_dir.rglob("*.dsf") if path.is_file()),
+            key=lambda path: path.name.lower(),
+        )
+        by_number: dict[int, Path] = {}
+        for path in files:
+            match = re.match(r"(\d{1,3})\s*[-._ ]", path.name)
+            if match:
+                by_number.setdefault(int(match.group(1)), path)
+        if not by_number:
+            log.error("sacd_extract 未生成任何 DSF 文件")
+            summary.failed = total
+            return summary
+        if len(by_number) < total:
+            log.warning(
+                "SACD 只导出 %d/%d 轨，缺失轨将计入失败", len(by_number), total
+            )
+
+        cover, cover_mime = _local_cover(track.path.parent)
+        for index, entry in enumerate(sheet.tracks, start=1):
+            if cancel is not None and cancel.is_set():
+                break
+
+            title = entry.title or f"Track {entry.number:02d}"
+            artist = entry.performer or sheet.performer or ""
+            album = sheet.album or sheet.title or ""
+            expected = entry.duration
+            dst = output_dir / _safe_filename(entry.number, title, suffix=".dsf")
+
+            reuse = False
+            if dst.exists():
+                actual = _dsf_duration(dst)
+                reuse = expected > 0.05 and actual > 0 and abs(actual - expected) <= 0.6
+                if not reuse:
+                    log.info("重导异常分轨 %s：已有 %.2fs，应为 %.2fs", dst.name, actual, expected)
+
+            if not reuse:
+                src = by_number.get(entry.number)
+                if src is None or not src.exists():
+                    log.warning("SACD 第 %s 轨未导出", entry.number)
+                    summary.failed += 1
+                    if on_progress is not None:
+                        on_progress(index, total)
+                    continue
+                try:
+                    if dst.exists():
+                        dst.unlink()
+                    shutil.move(str(src), str(dst))
+                except OSError as exc:
+                    log.warning("保存 SACD 分轨失败 %s：%s", dst.name, exc)
+                    summary.failed += 1
+                    if on_progress is not None:
+                        on_progress(index, total)
+                    continue
+
+                actual = _dsf_duration(dst)
+                if expected > 0.05 and (actual <= 0 or abs(actual - expected) > 0.6):
+                    log.warning(
+                        "SACD 分轨时长异常 %s：期望 %.2fs，实际 %.2fs",
+                        dst.name, expected, actual,
+                    )
+                    dst.unlink(missing_ok=True)
+                    summary.failed += 1
+                    if on_progress is not None:
+                        on_progress(index, total)
+                    continue
+
+            tags = Tags(
+                title=title,
+                artist=artist,
+                album=album,
+                albumartist=sheet.performer or "",
+                date=sheet.date or "",
+                genre=sheet.genre or "",
+                track=f"{entry.number}/{total}",
+            )
+            if cover:
+                tags.cover = cover
+                tags.cover_mime = cover_mime
+
+            if fetch_lyrics and not is_placeholder_title(title):
+                lyrics = aggregator.fetch_lyrics(
+                    client, title, artist, album, expected,
+                    use_lrclib=use_lrclib,
+                    use_netmusic=use_netmusic,
+                    use_qqmusic=use_qqmusic,
+                )
+                if lyrics is not None and lyrics.text:
+                    tags.lyrics = lyrics.text
+                    summary.with_lyrics += 1
+
+            result = write_tags(dst, tags)
+            if result.ok:
+                summary.created += 1
+            else:
+                log.warning("写入 SACD 分轨标签失败 %s：%s", dst.name, result.message)
+                summary.failed += 1
+
+            if on_progress is not None:
+                on_progress(index, total)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     summary.elapsed_sec = time.perf_counter() - started
     return summary

@@ -23,11 +23,17 @@ from PySide6.QtCore import QTimer  # noqa: E402
 from seqaudio.app import create_app  # noqa: E402
 from seqaudio.core.config import Settings  # noqa: E402
 from seqaudio.core.logging_setup import setup_logging  # noqa: E402
-from seqaudio.core.model import Tags, TrackStatus  # noqa: E402
-from seqaudio.core.probe import probe  # noqa: E402
+from seqaudio.core.model import Tags, Track, TrackStatus  # noqa: E402
+from seqaudio.core.probe import expand_cue_tracks, probe, scan_folder  # noqa: E402
 from seqaudio.core.tags import read_tags  # noqa: E402
 from seqaudio.pipeline.processor import BatchOptions  # noqa: E402
-from seqaudio.ui.main_window import MainWindow  # noqa: E402
+from seqaudio.ui.main_window import AUDIO_FILE_FILTER, MainWindow  # noqa: E402
+
+#: 真实 SACD 样本（本机没有时跳过相关检查）
+SACD_ISO = Path(
+    r"F:\musicM\样本\赵鹏与惊堂木乐队 低音炮 3套车 SACD iso"
+    r"\赵鹏与惊堂木乐队 低音炮 3套车 SACD.iso"
+)
 
 
 def main() -> int:
@@ -71,10 +77,79 @@ def main() -> int:
         ok = False
     for theme_name in theme.THEMES:
         window.apply_theme(theme_name, persist=False, quiet=True)
+        app.processEvents()
     window.apply_theme("深空", persist=False, quiet=True)
     if theme.CURRENT != "深空":
         print("✗ 主题切换后未回到默认：", theme.CURRENT)
         ok = False
+    if len({palette.pattern for palette in theme.THEMES.values()}) < 10:
+        print("✗ 主题背景笔触数量不足")
+        ok = False
+    if type(window.surface).__name__ != "BackdropWidget":
+        print("✗ 主窗口未使用主题背景层")
+        ok = False
+    if any(action.icon().isNull() for action in window._theme_actions.values()):
+        print("✗ 主题菜单色块图标缺失")
+        ok = False
+
+    def _luminance(color: str) -> float:
+        value = color.lstrip("#")
+        rgb = [int(value[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        rgb = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+    def _contrast(a: str, b: str) -> float:
+        high, low = sorted((_luminance(a), _luminance(b)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    for name, palette in theme.THEMES.items():
+        if _contrast(palette.fg, palette.base) < 7.0:
+            print("✗ 主题正文对比度不足：", name)
+            ok = False
+        if _contrast(palette.fg_dim, palette.base) < 4.5:
+            print("✗ 主题次要文字对比度不足：", name)
+            ok = False
+        if _contrast(palette.fg_mute, palette.base) < 3.0:
+            print("✗ 主题弱文字对比度不足：", name)
+            ok = False
+        if _contrast(palette.on_accent, palette.accent) < 4.5:
+            print("✗ 主题主按钮文字对比度不足：", name)
+            ok = False
+        if _contrast(theme._readable(palette.ok), palette.ok) < 4.5:
+            print("✗ 主题成功按钮文字对比度不足：", name)
+            ok = False
+        if _contrast(theme._readable(palette.bad), palette.bad) < 4.5:
+            print("✗ 主题危险按钮文字对比度不足：", name)
+            ok = False
+
+    # SACD ISO：文件过滤器包含镜像，加载后展开成 12 轨且曲名来自同目录文本
+    if "*.iso" not in AUDIO_FILE_FILTER:
+        print("✗ 添加文件过滤器未包含 SACD ISO")
+        ok = False
+    if SACD_ISO.exists():
+        scanned = expand_cue_tracks(
+            scan_folder(SACD_ISO.parent, recursive=False, auto_align=False)
+        )
+        if len(scanned) != 12:
+            print("✗ SACD ISO 展开轨数不对：", len(scanned))
+            ok = False
+        elif scanned[0].working.title != "三套车" or scanned[-1].working.title != "踏浪":
+            print("✗ SACD ISO 曲名未从同目录文本读取：",
+                  scanned[0].working.title, scanned[-1].working.title)
+            ok = False
+
+        # 回归：旧版本留下的同路径「失败」行必须在重新导入时被 12 个分轨替换，
+        # 否则按路径去重会把新行全部丢掉，看起来永远「导入失败」。
+        stale = Track(path=SACD_ISO)
+        stale.status = TrackStatus.FAILED
+        stale.note("1.5.0 不支持 SACD ISO")
+        window.model.add_tracks([stale])
+        window._on_scan_finished(scanned)
+        rows = window.model.tracks()
+        if len(rows) != 12 or any(row.status is TrackStatus.FAILED for row in rows):
+            print("✗ 旧的失败行未被重新导入替换：", len(rows))
+            ok = False
+        window.model.clear()
 
     tracks = [probe(p, with_cue=False) for p in files.values() if p.suffix != ".cue"]
     # 制造一条带水印的标签，验证清理链路
@@ -296,6 +371,36 @@ def main() -> int:
         print("✗ 命令面板命令执行错误：", hits)
         ok = False
     palette.close()
+
+    # 停止按钮：必须能真正取消鉴定/分轨等后台任务（V1.5.1 修复）
+    class _RunningTask:
+        def __init__(self):
+            self.cancelled = False
+
+        def isRunning(self) -> bool:
+            return True
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    auth_task = _RunningTask()
+    split_task = _RunningTask()
+    window.auth_worker = auth_task
+    window.split_worker = split_task
+    window.stop()
+    if not auth_task.cancelled or not split_task.cancelled:
+        print("✗ 停止按钮未取消鉴定/分轨任务")
+        ok = False
+    if not window._auth_stopped or not window._split_stopped:
+        print("✗ 停止状态未记录")
+        ok = False
+    if window.btn_stop.isEnabled():
+        print("✗ 停止后按钮仍可点击")
+        ok = False
+    window.auth_worker = None
+    window.split_worker = None
+    window._auth_stopped = False
+    window._split_stopped = False
 
     # 右键「按标签重命名本目录」入口存在，且无选中时不崩（V1.4.2）
     if not hasattr(window, "rename_folder") or not hasattr(window, "_run_rename"):

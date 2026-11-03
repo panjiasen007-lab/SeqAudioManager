@@ -44,7 +44,10 @@ class ScanWorker(QThread):
                     break
                 if path.is_dir():
                     found = scan_folder(
-                        path, recursive=self.recursive, auto_align=self.auto_align
+                        path,
+                        recursive=self.recursive,
+                        auto_align=self.auto_align,
+                        cancel=self.isInterruptionRequested,
                     )
                     tracks.extend(found)
                     self.discovered.emit(len(tracks))
@@ -57,6 +60,9 @@ class ScanWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             log.exception("扫描失败")
             self.failed.emit(str(exc))
+
+    def cancel(self) -> None:
+        self.requestInterruption()
 
 
 class ProcessorWorker(QThread):
@@ -226,6 +232,9 @@ class AuthenticityWorker(QThread):
             else:
                 true_count += 1
         self.finishedAll.emit(true_count, suspect, unknown)
+
+    def cancel(self) -> None:
+        self.requestInterruption()
 
 
 class CoverWorker(QThread):

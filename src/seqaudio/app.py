@@ -114,6 +114,14 @@ def _selftest() -> int:
         report["formats"] = len(SUPPORTED_EXTS)
     except Exception as exc:  # noqa: BLE001
         report["formats_error"] = str(exc)
+    try:
+        from .core.sacd import find_sacd_extract
+
+        tool = find_sacd_extract() or ""
+        report["sacd_extract"] = tool
+        report["sacd_extract_exists"] = bool(tool and Path(tool).exists())
+    except Exception as exc:  # noqa: BLE001
+        report["sacd_error"] = str(exc)
 
     target = Path(tempfile.gettempdir()) / "seqaudio_selftest.json"
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -134,25 +142,74 @@ def _selftest_file(target: str) -> int:
         from .core.probe import probe
 
         path = Path(target)
-        info = probe(path, with_cue=False).info
+        track = probe(path, with_cue=False)
+        info = track.info
         report["probe"] = {
             "fmt": info.fmt,
             "spec": info.spec_text,
             "lossless": info.lossless,
             "duration": info.duration,
         }
-        result = analyze(path, info)
-        report["verdict"] = result.verdict
-        report["score"] = result.score
-        report["cutoff_hz"] = result.cutoff_hz
-        report["nyquist_hz"] = result.nyquist_hz
-        report["effective_bit_depth"] = result.bit_depth_effective
-        report["reasons"] = result.reasons
-        report["error"] = result.error
+        if path.suffix.lower() == ".iso" and track.cue is not None:
+            # SACD ISO：镜像本身不能做频谱鉴定，改为报告曲目表/文本解析结果
+            report["sacd"] = {
+                "tracks": len(track.cue.tracks),
+                "album": track.cue.album,
+                "artist": track.cue.performer,
+                "date": track.cue.date,
+                "titles": [entry.title for entry in track.cue.tracks],
+            }
+            report["verdict"] = "SACD ISO 镜像"
+        else:
+            result = analyze(path, info)
+            report["verdict"] = result.verdict
+            report["score"] = result.score
+            report["cutoff_hz"] = result.cutoff_hz
+            report["nyquist_hz"] = result.nyquist_hz
+            report["effective_bit_depth"] = result.bit_depth_effective
+            report["reasons"] = result.reasons
+            report["error"] = result.error
     except Exception as exc:  # noqa: BLE001
         report["exception"] = f"{type(exc).__name__}: {exc}"
 
     out = Path(tempfile.gettempdir()) / "seqaudio_selftest_file.json"
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0
+
+
+def _selftest_scan(target: str) -> int:
+    """`--selftest-scan <路径>`：用真实的 ScanWorker 扫描并落盘结果。
+
+    用于验证打包后的 GUI 导入链路（QThread + probe + cue 展开），
+    比只调 ``probe`` 更接近用户点击「添加文件/文件夹」的真实路径。
+    """
+    import json
+    import tempfile
+
+    from PySide6.QtCore import QCoreApplication, QTimer
+
+    from .ui.worker import ScanWorker
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    report: dict = {"input": target}
+    worker = ScanWorker([Path(target)], recursive=False)
+    worker.finishedScan.connect(
+        lambda tracks: (report.update(tracks=len(tracks), items=[
+            {
+                "status": track.status.value,
+                "title": track.title,
+                "duration": track.duration_text,
+                "notes": track.notes,
+            }
+            for track in tracks[:12]
+        ]), app.quit())
+    )
+    worker.failed.connect(lambda message: (report.update(error=message), app.quit()))
+    worker.start()
+    QTimer.singleShot(60000, app.quit)
+    app.exec()
+
+    out = Path(tempfile.gettempdir()) / "seqaudio_selftest_scan.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0
 
@@ -229,6 +286,10 @@ def main(argv: list[str] | None = None) -> int:
         index = args.index("--selftest-file")
         target = args[index + 1] if index + 1 < len(args) else ""
         return _selftest_file(target)
+    if "--selftest-scan" in args:
+        index = args.index("--selftest-scan")
+        target = args[index + 1] if index + 1 < len(args) else ""
+        return _selftest_scan(target)
     if "--uninstall" in args:
         setup_logging()
         return _uninstall_flow()

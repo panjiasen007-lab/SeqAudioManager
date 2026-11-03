@@ -25,7 +25,7 @@
 
 Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 → 清标签水印 → 安全写标签 → 批量重命名 → 导出报表，一键跑完。
 
-面向本地音乐收藏玩家，**无损优先**：FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF 全部支持，只改标签区块、绝不重新编码音频。
+面向本地音乐收藏玩家，**无损优先**：FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF / SACD ISO 全部支持，只改标签区块、绝不重新编码音频。
 
 进阶能力：
 
@@ -34,6 +34,23 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.1 更新摘要
+
+- **SACD ISO 镜像支持**：直接添加 `.iso` 作为整轨，按镜像曲目表展开成每轨一行；
+  专辑/歌手从 ISO 的 `SACDText` 原始字节还原（GBK/UTF-8/Big5 自动识别），
+  逐轨歌名优先读同目录 `专辑简介.txt` / `*.nfo` 的「专辑曲目」段，缺失才用 `Track NN`；
+- **SACD 分轨导出**：一键导出 `NN - 歌名.dsf`（DSD64 / 2 声道），复用 CUE 分轨的
+  标签、封面与歌词流程；内置 `sacd_extract`（GPL-2.0）读取镜像，无需外部安装；
+- ISO 本体不做真假无损鉴定（镜像不是 ffmpeg 可解容器），分轨成 DSF/DFF 后再鉴定。
+- **11 套主题全量重做**：每套主题都有独立的程序化背景笔触（星云、黑胶纹、花瓣、
+  日光、落叶、冰晶、海浪、晚霞、太极、纸纹、网格），不再共用一张底图；
+  主按钮按强调色明暗自动选深/浅文字，正文/次要/弱文字的对比度全部重新校准。
+- **停止按钮修复**：批处理、无损鉴定、封面生成、分轨导出、扫描都能中断；
+  鉴定停止后显示已完成数量，不再让按钮“点了没反应”。
+- **中文目录 SACD 导入修复**：内置 `sacd_extract` 改用纯 ASCII 工作目录，
+  解决在「音序管家-v1.5.1」这类中文文件夹下双击运行时导入失败；
+  重新导入同路径镜像时，旧的失败/未展开记录会被新分轨自动替换。
 
 ### V1.5.0 更新摘要
 
@@ -189,6 +206,7 @@ src/seqaudio/
 │   ├── probe.py            格式探测、技术参数、流式读取（4GB 文件不进内存）
 │   ├── writer.py           安全写入：备份 → 影子副本 → 写后校验 → 原子替换
 │   ├── cue.py              CUE 解析（UTF-8/UTF-16/GBK 编码自识别）
+│   ├── sacd.py             SACD ISO 解析（-P 曲目表 / SACDText / 同目录曲目文本）
 │   ├── watermark.py        标签水印清理（强规则整段清空 / 片段删除 / 自定义词）
 │   ├── rename.py           模板重命名（非法字符、保留名、循环改名安全）
 │   ├── lyrics.py           LRC 清洗、同步歌词判定、同名 .lrc 读写
@@ -222,8 +240,9 @@ src/seqaudio/
     ├── dialogs.py          标签编辑 / 候选选择 / 重命名预览
     ├── fonts.py            开源字体注册与选择
     ├── worker.py           QThread 包装，保证 UI 不阻塞
+    ├── backdrop.py         11 套主题的程序化背景笔触（QPainter 缓存）
     ├── disclaimer.py       启动免责声明
-    └── theme.py            半透明深色主题 QSS
+    └── theme.py            11 套调色板、对比度校准与动态 QSS
 
 installer/installer.py      安装向导（独立 Qt 应用，打包成 Setup.exe）
 build.py                    构建：便携版 7z + 安装程序
@@ -600,7 +619,7 @@ GPLv3 提供源代码。
 
 A Windows local batch audio metadata processor. Batch import → online completion → tag watermark cleanup → safe tag writing → batch rename → report export, all in one pass.
 
-Built for local music collectors, **lossless-first**: FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF are all supported. Only the tag blocks are modified — audio is never re-encoded.
+Built for local music collectors, **lossless-first**: FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF / SACD ISO are all supported. Only the tag blocks are modified — audio is never re-encoded.
 
 Advanced capabilities:
 
@@ -609,6 +628,22 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.1 highlights
+
+- **SACD ISO support** — add a `.iso` as a whole-disc track; it expands into one row
+  per track, reads album/artist from the ISO `SACDText`, and takes track titles from
+  a nearby `专辑简介.txt` / `*.nfo`. One-click export writes `NN - title.dsf`
+  (DSD64 / stereo) with tags, cover and lyrics, using the bundled `sacd_extract`.
+- **Theme redesign** — all 11 themes now have their own procedural backdrop
+  (nebula, vinyl grooves, blossoms, sunlight, leaves, ice crystals, waves, dusk,
+  yin-yang, paper grain, grid). Button text automatically switches between light
+  and dark for readable contrast.
+- **Stop button fixed** — batch processing, lossless analysis, folder covers,
+  CUE/SACD splitting and scanning can all be interrupted; a stopped analysis
+  reports how many tracks were completed.
+- **SACD import under Chinese paths** — subprocesses run with an ASCII working
+  directory, fixing imports from folders such as `音序管家-v1.5.1`.
 
 ### V1.5.0 highlights
 

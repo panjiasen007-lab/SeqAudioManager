@@ -24,6 +24,9 @@ LOSSLESS_EXTS: frozenset[str] = frozenset(
 #: 有损格式（兼容兜底）
 LOSSY_EXTS: frozenset[str] = frozenset({".mp3", ".aac", ".ogg", ".oga", ".opus", ".mpc", ".wma"})
 
+#: SACD 光盘镜像（需 sacd_extract 解析，内部是 DSD 音频）
+SACD_EXTS: frozenset[str] = frozenset({".iso"})
+
 #: 需要 ffmpeg 兜底探测的扩展名（mutagen 不支持这些容器/编码）
 EXTRA_EXTS: frozenset[str] = frozenset(
     {
@@ -34,7 +37,7 @@ EXTRA_EXTS: frozenset[str] = frozenset(
     }
 )
 
-SUPPORTED_EXTS: frozenset[str] = LOSSLESS_EXTS | LOSSY_EXTS | EXTRA_EXTS
+SUPPORTED_EXTS: frozenset[str] = LOSSLESS_EXTS | LOSSY_EXTS | EXTRA_EXTS | SACD_EXTS
 
 #: 加密格式：明确不支持、不解密，导入时直接跳过并提示
 ENCRYPTED_EXTS: frozenset[str] = frozenset(
@@ -298,6 +301,10 @@ class CueSheet:
     tracks: list[CueTrack] = field(default_factory=list)
     encoding_used: str = ""
     warnings: list[str] = field(default_factory=list)
+    #: 来自 SACD ISO 光盘镜像（而不是 .cue 文件）
+    sacd: bool = False
+    area: str = ""
+    channels: int = 0
 
     @property
     def is_single_track(self) -> bool:
