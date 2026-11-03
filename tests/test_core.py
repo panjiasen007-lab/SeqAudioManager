@@ -488,6 +488,8 @@ class TestPlaceholderTags(unittest.TestCase):
         self.assertEqual(track.original.title, "Track 01")
         self.assertEqual(track.working.track, "1")
         self.assertTrue(any("占位符" in n for n in track.notes))
+        # 标记供导入后弹窗确认「是否写回文件」
+        self.assertTrue(track.auto_aligned)
 
     def test_real_title_is_kept(self) -> None:
         """真实歌名不能被文件名覆盖。"""
@@ -500,6 +502,7 @@ class TestPlaceholderTags(unittest.TestCase):
         track = probe.probe(path, with_cue=False)
         self.assertEqual(track.working.title, "富士山下（Live）")
         self.assertEqual(track.original.title, "富士山下（Live）")
+        self.assertFalse(track.auto_aligned)
 
     def test_filename_without_title_kept(self) -> None:
         """文件名本身也是占位符（01.wav）时，不要瞎补。"""
@@ -511,6 +514,21 @@ class TestPlaceholderTags(unittest.TestCase):
 
         track = probe.probe(path, with_cue=False)
         self.assertEqual(track.working.title, "Track 01")
+        self.assertFalse(track.auto_aligned)
+
+    def test_probe_can_disable_auto_align(self) -> None:
+        """用户选「不保存」后重读磁盘：不得再按文件名对齐，也不弹确认。"""
+        path = make_samples.make_wav(self.tmp / "01 - 陈奕迅 - 富士山下.wav")
+        track = probe.probe(path, with_cue=False)
+        writer.safe_write(
+            track, tags=Tags(title="Track 01"), backup=False, mirror_backup=False
+        )
+
+        track = probe.probe(path, with_cue=False, auto_align=False)
+        self.assertEqual(track.working.title, "Track 01")
+        self.assertEqual(track.original.title, "Track 01")
+        self.assertFalse(track.auto_aligned)
+        self.assertFalse(any("占位符" in n for n in track.notes))
 
 
 class TestWriteRoundtrip(unittest.TestCase):

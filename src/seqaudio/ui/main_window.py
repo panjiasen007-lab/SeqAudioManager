@@ -84,6 +84,8 @@ class MainWindow(QMainWindow):
         self.presets = PresetStore()
         self.worker: Optional[ProcessorWorker] = None
         self.scan_worker: Optional[ScanWorker] = None
+        self.revert_scan_worker: Optional[ScanWorker] = None
+        self._revert_targets: list[Track] = []
         self._match_workers: list[MatchPreviewWorker] = []
         self.auth_worker: Optional[AuthenticityWorker] = None
         self.cover_worker: Optional[CoverWorker] = None
@@ -505,6 +507,142 @@ class MainWindow(QMainWindow):
         self._refresh_stats()
         self.brand_bar.set_status("就绪", theme.FG_DIM)
 
+        aligned = [t for t in fresh if t.auto_aligned]
+        if aligned:
+            # 等表格先画出来再弹窗：用户能直接看到哪些行的歌名被自动对齐了
+            QTimer.singleShot(
+                0, lambda rows=aligned: self._confirm_auto_alignment(rows)
+            )
+
+    def _confirm_auto_alignment(self, tracks: list[Track]) -> None:
+        """导入后确认「占位符标签按文件名对齐」是否写回文件。
+
+        扫描时对齐只改内存里的 ``working``，文件里的原始标签仍是 ``Track 01``
+        这类占位符。保存才落盘；不保存则把 ``working`` 还原，列表恢复未对齐的样子。
+        """
+        if not tracks:
+            return
+        if self.worker is not None and self.worker.isRunning():
+            # 正在跑批处理时不要插一个写任务，对齐结果先留在列表里
+            self._append_log(
+                "INFO",
+                f"{len(tracks)} 个文件的占位符标签已按文件名对齐"
+                "（暂存列表中，可用「全部确认保存」写入）",
+            )
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("文件名与歌名已对齐")
+        box.setIcon(QMessageBox.Question)
+        box.setText(
+            f"导入的 {len(tracks)} 个文件，标签里的歌名（或歌手）是"
+            "「Track 01」「Unknown」这类占位内容，已按文件名自动对齐。"
+            "当前只改列表显示，文件本身还没改动。"
+        )
+        preview = "、".join(t.path.name for t in tracks[:3])
+        if len(tracks) > 3:
+            preview += f" 等 {len(tracks)} 个"
+        box.setInformativeText(
+            f"示例：{preview}\n\n"
+            "「保存到文件」会把对齐后的歌名/歌手写入音频标签（写入前自动备份）；\n"
+            "「不保存」会还原为文件原有的占位符标签，列表恢复未对齐的样子。"
+        )
+        save_btn = box.addButton("保存到文件", QMessageBox.AcceptRole)
+        revert_btn = box.addButton("不保存，还原", QMessageBox.RejectRole)
+        box.setDefaultButton(save_btn)
+        box.setEscapeButton(revert_btn)
+        box.exec()
+
+        if box.clickedButton() is save_btn:
+            self._append_log("INFO", f"按文件名对齐：写入 {len(tracks)} 个文件的标签")
+            self._start_worker(
+                BatchOptions(
+                    match_online=False,
+                    clean_watermark=False,
+                    write_tags=True,
+                    fetch_lyrics=False,
+                    do_rename=False,
+                    ensure_covers=False,
+                    write_only=True,
+                ),
+                tracks=tracks,
+            )
+            return
+
+        for track in tracks:
+            track.reset_working()
+            track.auto_aligned = False
+            track.notes = [
+                n for n in track.notes
+                if not n.startswith("占位符标签已按文件名补全")
+            ]
+            self.model.refresh_row(track)
+        self._refresh_stats()
+        self._append_log("INFO", f"已还原 {len(tracks)} 个文件的原始标签（未写入磁盘）")
+        # 再从磁盘重读一遍，确保列表与文件里的原始标签完全一致。
+        # 重扫时 auto_align=False，不会再弹对齐确认，不会形成死循环。
+        self._rescan_without_alignment(tracks)
+
+    def _rescan_without_alignment(self, tracks: list[Track]) -> None:
+        """重读这些文件的磁盘标签，且不触发「占位符按文件名对齐」。"""
+        targets = [
+            t for t in tracks
+            if t.cue_track is None and t.path.exists()
+        ]
+        if not targets:
+            return
+        if (
+            self.revert_scan_worker is not None
+            and self.revert_scan_worker.isRunning()
+        ):
+            return
+        self._revert_targets = targets
+        self.brand_bar.set_status("还原中", theme.CYAN)
+        self.status_hint.setText("正在重新读取原始标签…")
+        self.revert_scan_worker = ScanWorker(
+            [t.path for t in targets], recursive=False, auto_align=False
+        )
+        self.revert_scan_worker.finishedScan.connect(self._on_revert_scan_finished)
+        self.revert_scan_worker.failed.connect(
+            lambda msg: self._append_log("ERROR", f"重读原始标签失败：{msg}")
+        )
+        self.revert_scan_worker.start()
+
+    def _on_revert_scan_finished(self, fresh: list[Track]) -> None:
+        """把重读结果写回原 Track 对象（保持列表行位置不变）。"""
+        by_path: dict[str, Track] = {}
+        ambiguous: set[str] = set()
+        for track in fresh:
+            key = str(track.path).lower()
+            if key in by_path:
+                # 多轨 CUE 展开后同一文件有多条，不能简单按路径合并
+                ambiguous.add(key)
+            else:
+                by_path[key] = track
+        updated = 0
+        for old in self._revert_targets:
+            key = str(old.path).lower()
+            new = by_path.get(key)
+            if new is None or key in ambiguous:
+                continue
+            old.original = new.original
+            old.working = new.working
+            old.info = new.info
+            old.notes = list(new.notes)
+            old.status = new.status
+            old.cue = new.cue
+            old.cue_track = new.cue_track
+            old.auto_aligned = False
+            self.model.refresh_row(old)
+            updated += 1
+        self._revert_targets = []
+        self._refresh_stats()
+        self.brand_bar.set_status("就绪", theme.FG_DIM)
+        self.status_hint.setText(f"已恢复 {updated} 个文件的原始标签")
+        self._append_log(
+            "INFO", f"已重新读取 {updated} 个文件，显示未对齐的原始标签"
+        )
+
     # ------------------------------------------------------------ 拖拽
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
@@ -601,27 +739,29 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def _start_worker(self, options: BatchOptions) -> None:
+    def _start_worker(
+        self, options: BatchOptions, tracks: Optional[list[Track]] = None
+    ) -> None:
         self.settings_panel.apply_to(self.settings)
         self.settings.save()
         self.settings_panel.mark_saved()
 
-        tracks = self.model.tracks()
+        targets = tracks if tracks is not None else self.model.tracks()
         self._set_running(True)
-        self.progress.setMaximum(len(tracks))
+        self.progress.setMaximum(len(targets))
         self.progress.setValue(0)
         if options.write_only:
             self.mode_label.setText("确认保存")
-            self._append_log("INFO", f"开始写入 {len(tracks)} 首的标签变更")
+            self._append_log("INFO", f"开始写入 {len(targets)} 首的标签变更")
         else:
             self.mode_label.setText("联网模式" if options.match_online else "离线模式")
             self._append_log(
                 "INFO",
-                f"开始处理 {len(tracks)} 首（{'联网匹配' if options.match_online else '仅本地'}，"
+                f"开始处理 {len(targets)} 首（{'联网匹配' if options.match_online else '仅本地'}，"
                 f"覆盖策略：{self.settings.conflict()}）",
             )
 
-        self.worker = ProcessorWorker(self.settings, tracks, options)
+        self.worker = ProcessorWorker(self.settings, targets, options)
         self.worker.trackUpdated.connect(self.model.refresh_row)
         self.worker.trackUpdated.connect(lambda _: self._refresh_stats())
         self.worker.progressChanged.connect(self._on_progress)
@@ -1672,6 +1812,12 @@ class MainWindow(QMainWindow):
         if self.scan_worker is not None and self.scan_worker.isRunning():
             self.scan_worker.requestInterruption()
             self.scan_worker.wait(2000)
+        if (
+            self.revert_scan_worker is not None
+            and self.revert_scan_worker.isRunning()
+        ):
+            self.revert_scan_worker.requestInterruption()
+            self.revert_scan_worker.wait(2000)
         # 未保存的参数修改：明确让用户选择，绝不静默自动保存 ——
         # 否则「保存才生效」就是一句空话，关窗口一样能改配置
         if self.settings_panel.is_dirty():

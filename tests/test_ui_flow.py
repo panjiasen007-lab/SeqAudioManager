@@ -183,6 +183,21 @@ def main() -> int:
     if fill_dialog.result_tags().title != filled_title:
         print("✗ 补全结果未进入返回值")
         ok = False
+    # 文本框不能挤成看不见文字的小条（回归：旧版两列输入框只有一百多像素）
+    fill_dialog.show()
+    app.processEvents()
+    narrow = [key for key, edit in fill_dialog.edits.items() if edit.width() < 250]
+    if narrow:
+        print("✗ 标签编辑输入框过窄：", narrow)
+        ok = False
+    # 回归：窗口高度不足时 Qt 会把输入框压成 17px，文字挤成一条线
+    squashed = [key for key, edit in fill_dialog.edits.items() if edit.height() < 28]
+    if squashed:
+        print("✗ 标签编辑输入框被压扁：", squashed)
+        ok = False
+    if fill_dialog.comment_edit.height() < 80:
+        print("✗ 注释框过矮：", fill_dialog.comment_edit.height())
+        ok = False
     fill_dialog.close()
 
     # 右键「按标签重命名本目录」入口存在，且无选中时不崩（V1.4.2）

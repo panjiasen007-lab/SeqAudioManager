@@ -332,6 +332,7 @@ class Track:
     changed_fields: list[str] = field(default_factory=list)
     backup_path: Optional[Path] = None
     elapsed_ms: int = 0
+    auto_aligned: bool = False                      # working 是否由「占位符按文件名补全」自动对齐
 
     # ---- 派生属性 ----
     @property

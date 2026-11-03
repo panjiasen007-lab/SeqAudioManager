@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.3-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.4.5-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,28 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。界面字体 Noto Sans SC / JetBrains Mono 为 SIL OFL 1.1，随包分发。
+
+### V1.4.5 更新摘要
+
+修复 V1.4.4 测试反馈的两个问题：
+
+- **编辑标签输入框被压扁**：加宽后内容最小高度超过窗口高度，Qt 会把输入框压到 17px。
+  现在内容区可滚动、歌词与封面并排，窗口高度按屏幕可用空间自适应；输入框保持正常
+  高度（33px），屏幕较矮时出现滚动条而不是把控件压扁；
+- **「不保存，还原」没有还原**：点击后立即恢复磁盘原始标签，并以 `auto_align=False`
+  重新读取文件标签，列表显示未对齐的原始内容；重读不会再触发对齐确认，不会死循环。
+
+### V1.4.4 更新摘要
+
+界面上的一轮修复，以及导入对齐确认：
+
+- **编辑标签对话框加宽**：两列输入框最小 250px 并随窗口拉伸，长歌名/专辑名不再被截断；
+  注释框 56px → 92px，歌词框可随窗口扩展；鼠标悬停可查看完整内容；
+- **批量编辑对话框同步加宽**，字段输入框最小 240px；
+- **文件名对齐确认**：导入时若把 `Track 01` / `Unknown` 这类占位标签按文件名自动对齐，
+  会弹窗询问是否写回文件 —— 「保存到文件」写入标签（自动备份），
+  「不保存，还原」恢复文件原有的占位标签；
+- 候选匹配、重命名预览的长文本自动换行；参数面板「…」浏览按钮不再把文字压没。
 
 ### V1.4.3 更新摘要
 
@@ -242,8 +264,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.4.3-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.4.3-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.4.5-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
+dist/音序管家-v1.4.5-x86-x64-Setup.exe     安装程序（约 90 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -567,6 +589,34 @@ Advanced capabilities:
 
 > License: **GNU General Public License v3.0**. The bundled fonts Noto Sans SC / JetBrains Mono are SIL OFL 1.1.
 
+### V1.4.5 highlights
+
+Fixes two issues reported from the V1.4.4 test build:
+
+- **Squashed tag-editor fields** — after widening, the content's minimum height exceeded
+  the window height, so Qt squeezed the line edits down to 17 px. The content is now in a
+  scroll area with the lyrics and cover side by side, and the window height adapts to the
+  screen; fields keep their normal height (33 px) and a scrollbar appears on short screens
+  instead of squashing the controls;
+- **"Don't save" did not revert** — it now restores the on-disk original tags immediately
+  and re-reads them with `auto_align=False`, so the list shows the unaligned original
+  content; the re-scan never triggers the alignment dialog again (no loop).
+
+### V1.4.4 highlights
+
+UI fixes plus an import-time alignment confirmation:
+
+- **Wider tag editor** — the two columns of fields are at least 250 px wide and grow with the
+  window, so long titles/album names are no longer cut off; the comment box grows from 56 px
+  to 92 px, the lyrics box expands with the window, and full text is available as a tooltip;
+- **Batch tag editor widened** as well, with fields at least 240 px wide;
+- **File-name alignment confirmation** — when placeholder tags (`Track 01` / `Unknown`) are
+  auto-filled from the file name on import, a dialog asks whether to write them back:
+  "Save to file" writes the tags (with automatic backup), "Don't save" restores the
+  original placeholder tags;
+- Long text in the candidate and rename-preview dialogs now wraps; the settings panel's "…"
+  browse button no longer clips its label.
+
 ### V1.4.1 highlights
 
 Root-cause fixes for "albums with no official SACD release being judged genuine DSD"
@@ -709,8 +759,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.4.3-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.4.3-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.4.5-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
+dist/音序管家-v1.4.5-x86-x64-Setup.exe     installer (~90 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.

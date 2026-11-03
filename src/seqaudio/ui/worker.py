@@ -24,10 +24,17 @@ class ScanWorker(QThread):
     finishedScan = Signal(object)     # list[Track]
     failed = Signal(str)
 
-    def __init__(self, paths: list[Path], recursive: bool = True, parent=None):
+    def __init__(
+        self,
+        paths: list[Path],
+        recursive: bool = True,
+        auto_align: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.paths = paths
         self.recursive = recursive
+        self.auto_align = auto_align
 
     def run(self) -> None:
         tracks: list[Track] = []
@@ -36,11 +43,13 @@ class ScanWorker(QThread):
                 if self.isInterruptionRequested():
                     break
                 if path.is_dir():
-                    found = scan_folder(path, recursive=self.recursive)
+                    found = scan_folder(
+                        path, recursive=self.recursive, auto_align=self.auto_align
+                    )
                     tracks.extend(found)
                     self.discovered.emit(len(tracks))
                 elif path.is_file():
-                    tracks.append(probe(path))
+                    tracks.append(probe(path, auto_align=self.auto_align))
                     self.discovered.emit(len(tracks))
             # 多轨 CUE 整轨展开成分轨，让列表显示所有歌曲
             tracks = expand_cue_tracks(tracks)

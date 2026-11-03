@@ -388,8 +388,14 @@ def _ffmpeg_probe(path: Path) -> Optional[AudioInfo]:
     return info
 
 
-def probe(path: Path | str, *, with_cue: bool = True) -> Track:
-    """读取单个音频文件，返回可直接进列表的 Track。"""
+def probe(
+    path: Path | str, *, with_cue: bool = True, auto_align: bool = True
+) -> Track:
+    """读取单个音频文件，返回可直接进列表的 Track。
+
+    ``auto_align=False`` 时不执行「占位符按文件名补全」—— 用户选择不保存
+    对齐结果、需要重读磁盘原始标签时使用。
+    """
     path = Path(path)
     ok, reason = check_extension(path)
     track = Track(path=path)
@@ -446,7 +452,11 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
     # 只改 ``working``，``original`` 保留文件里的原值 —— 列表里直接显示正确
     # 歌名，保存前用户能看出差异，事后也能「还原原始标签」。
     _filled: list[str] = []
-    if is_placeholder_title(track.working.title) or is_placeholder_artist(track.working.artist):
+    _filled_title = False
+    if auto_align and (
+        is_placeholder_title(track.working.title)
+        or is_placeholder_artist(track.working.artist)
+    ):
         _guessed = guess_from_filename(path)
         if (
             is_placeholder_title(track.working.title)
@@ -456,6 +466,7 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
         ):
             _filled.append(f"歌名「{track.working.title or '空'}」→「{_guessed.title}」")
             track.working.title = _guessed.title
+            _filled_title = True
             # 文件名里带的曲目号也顺手补上，否则列表按曲目号排序会乱
             if not (track.working.track or "").strip() and _guessed.track:
                 track.working.track = _guessed.track
@@ -463,6 +474,9 @@ def probe(path: Path | str, *, with_cue: bool = True) -> Track:
             _filled.append(f"歌手「{track.working.artist or '空'}」→「{_guessed.artist}」")
             track.working.artist = _guessed.artist
     if _filled:
+        # 只有「歌名」被文件名替换时才需要用户确认是否写回；
+        # 仅补了空歌手属于常规兜底，不弹窗打扰
+        track.auto_aligned = _filled_title
         track.note("占位符标签已按文件名补全：" + "、".join(_filled))
 
     if with_cue:
@@ -525,7 +539,9 @@ def expand_cue_tracks(tracks: list[Track]) -> list[Track]:
     return out
 
 
-def scan_folder(folder: Path | str, *, recursive: bool = True) -> list[Track]:
+def scan_folder(
+    folder: Path | str, *, recursive: bool = True, auto_align: bool = True
+) -> list[Track]:
     """扫描目录下全部受支持音频（跳过加密格式并记录提示）。"""
     folder = Path(folder)
     tracks: list[Track] = []
@@ -540,7 +556,7 @@ def scan_folder(folder: Path | str, *, recursive: bool = True) -> list[Track]:
             continue
         ext = entry.suffix.lower()
         if ext in SUPPORTED_EXTS:
-            tracks.append(probe(entry))
+            tracks.append(probe(entry, auto_align=auto_align))
         elif ext in ENCRYPTED_EXTS:
             t = Track(path=entry)
             t.status = TrackStatus.UNSUPPORTED

@@ -169,7 +169,9 @@ class SettingsPanel(QWidget):
         self.backup_dir_edit.setPlaceholderText("默认：程序目录下 backup")
         self.backup_dir_edit.editingFinished.connect(self._notify)
         browse = QPushButton("…")
-        browse.setFixedSize(32, 30)
+        # 只固定高度，宽度跟主题内边距走；32px 会把「…」压没
+        browse.setFixedHeight(30)
+        browse.setMinimumWidth(44)
         browse.setObjectName("ghost")
         browse.setCursor(Qt.PointingHandCursor)
         browse.clicked.connect(self._pick_backup_dir)

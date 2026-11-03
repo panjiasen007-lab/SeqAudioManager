@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -49,12 +51,32 @@ class TagEditDialog(QDialog):
         super().__init__(parent)
         self.track = track
         self.setWindowTitle(f"编辑标签 — {track.path.name}")
-        self.resize(620, 700)
-        self.setMinimumSize(560, 620)
+        # 两列字段并排，窗口太窄时每个输入框只剩一百多像素，长歌名/专辑名
+        # 直接被截断。默认给足宽度，并给每个输入框设下限，窗口再被缩小时
+        # 也不会挤成看不见文字。
+        #
+        # 高度按屏幕可用空间给：屏幕较矮时宁可出滚动条，
+        # 也不能让 Qt 把输入框压成十几像素的一条。
+        screen = parent.screen() if parent is not None else None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        max_h = 720
+        max_w = 880
+        if screen is not None:
+            avail = screen.availableGeometry()
+            max_h = min(max_h, max(560, avail.height() - 70))
+            max_w = min(max_w, max(780, avail.width() - 80))
+        self.resize(max_w, max_h)
+        self.setMinimumSize(780, 560)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
 
         # ---- 曲目信息 ----
         info_card = Card("曲目信息", track.info.fmt)
@@ -72,6 +94,7 @@ class TagEditDialog(QDialog):
         filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.fill_hint = QLabel("")
         self.fill_hint.setStyleSheet(f"color:{theme.FG_MUTE}; font-size:11px;")
+        self.fill_hint.setVisible(False)
         fill_btn = QPushButton("按文件名补全")
         fill_btn.setObjectName("ghost")
         fill_btn.setCursor(Qt.PointingHandCursor)
@@ -90,27 +113,34 @@ class TagEditDialog(QDialog):
         right_form: list[tuple[str, QWidget]] = []
         for i, (label, key) in enumerate(self.FIELDS):
             edit = QLineEdit(track.working.get(key))
+            edit.setMinimumWidth(250)
+            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            edit.setToolTip(edit.text())
+            edit.textChanged.connect(
+                lambda text, e=edit: e.setToolTip(text)
+            )
             self.edits[key] = edit
             (left_form if i % 2 == 0 else right_form).append((label, edit))
 
         two_col = QHBoxLayout()
-        two_col.setSpacing(14)
+        two_col.setSpacing(18)
         two_col.addLayout(self._mini_form(left_form), 1)
         two_col.addLayout(self._mini_form(right_form), 1)
         info_card.add_layout(two_col)
 
         self.comment_edit = QTextEdit(track.working.comment)
-        self.comment_edit.setFixedHeight(56)
+        # 注释常被拿来放整段说明/水印，56px 只够两行，文字直接被裁掉
+        self.comment_edit.setFixedHeight(92)
         info_card.add_widget(self._dim_label("注释"))
         info_card.add_widget(self.comment_edit)
-        layout.addWidget(info_card)
+        body_layout.addWidget(info_card)
 
         # ---- 歌词 ----
         lyrics_card = Card("歌词", "支持 LRC 时间轴", theme.PURPLE)
         self.lyrics_edit = QTextEdit(track.working.lyrics)
-        self.lyrics_edit.setFixedHeight(120)
+        self.lyrics_edit.setMinimumHeight(120)
+        self.lyrics_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         lyrics_card.add_widget(self.lyrics_edit)
-        layout.addWidget(lyrics_card, 1)
 
         # ---- 封面 ----
         cover_card = Card("封面", "", theme.CYAN)
@@ -123,7 +153,7 @@ class TagEditDialog(QDialog):
             f"border:1px dashed {theme.LINE}; border-radius:8px; "
             f"color:{theme.FG_MUTE}; background:{theme.BG_CARD};"
         )
-        cover_row.addWidget(self.cover_label)
+        cover_row.addWidget(self.cover_label, 0, Qt.AlignTop)
 
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
@@ -141,7 +171,21 @@ class TagEditDialog(QDialog):
         cover_row.addLayout(btn_col)
         cover_row.addStretch(1)
         cover_card.add_layout(cover_row)
-        layout.addWidget(cover_card)
+        # 歌词与封面并排：封面只有 104px 预览，占满一整行会把对话框撑得
+        # 过高，导致 Qt 压缩上面的输入框（V1.4.4 的实际问题）
+        cover_card.setFixedWidth(286)
+        lower_row = QHBoxLayout()
+        lower_row.setSpacing(10)
+        lower_row.addWidget(lyrics_card, 1)
+        lower_row.addWidget(cover_card)
+        body_layout.addLayout(lower_row, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
 
         self._pending_cover: Optional[bytes] = track.working.cover
         self._pending_mime = track.working.cover_mime
@@ -209,6 +253,7 @@ class TagEditDialog(QDialog):
                                    + "（仍需点「保存到列表」才生效）")
         else:
             self.fill_hint.setText("文件名里没有可用的新信息，字段保持原样")
+        self.fill_hint.setVisible(True)
 
     def _render_cover(self) -> None:
         if not self._pending_cover:
@@ -283,8 +328,8 @@ class BatchTagEditDialog(QDialog):
         super().__init__(parent)
         self.tracks = tracks
         self.setWindowTitle(f"批量编辑标签 — {len(tracks)} 首曲目")
-        self.resize(660, 620)
-        self.setMinimumSize(600, 540)
+        self.resize(760, 660)
+        self.setMinimumSize(700, 560)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -325,6 +370,8 @@ class BatchTagEditDialog(QDialog):
             check.setFixedWidth(96)
             edit = QLineEdit()
             edit.setPlaceholderText(self._placeholder(key))
+            edit.setMinimumWidth(240)
+            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             edit.setEnabled(False)
             check.toggled.connect(lambda checked, e=edit: e.setEnabled(checked))
             self.checks[key] = check
@@ -395,6 +442,8 @@ class CandidateDialog(QDialog):
             + (f" — {track.working.artist}" if track.working.artist else "")
         )
         head.setStyleSheet("color:#8b909a;")
+        # 歌名/歌手很长时单行会被对话框宽度截断
+        head.setWordWrap(True)
         layout.addWidget(head)
 
         self.list = QListWidget()
@@ -441,6 +490,7 @@ class RenamePreviewDialog(QDialog):
             f"冲突 {len(plan.blocked)} 项"
         )
         info.setStyleSheet("color:#8b909a;")
+        info.setWordWrap(True)
         layout.addWidget(info)
 
         table = QTableWidget(len(plan.items), 3)
