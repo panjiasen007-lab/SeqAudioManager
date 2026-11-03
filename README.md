@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.4.5-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -33,7 +33,28 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **一键清理假无损** —— 判定可疑的文件移入回收站或软件隔离区，随时可还原，附频谱图可自行复核；
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
-> 授权：**GNU General Public License v3.0**。界面字体 Noto Sans SC / JetBrains Mono 为 SIL OFL 1.1，随包分发。
+> 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.0 更新摘要
+
+这一版是「收藏标准 + 感官升级」：
+
+- **PCM 最低收藏规格**：低于 16bit / 44.1kHz / 立体声 的 PCM 直接判「假无损」
+  （单声道、32k/22.05k、8bit 均不达标）；DSD 走独立判据，32bit 浮点与 5.1/7.1 声道不受影响；
+- **20 款随包开源字体**：5 款中文字体（思源黑体、霞鹜文楷、得意黑、马善政毛笔楷书、
+  站酷庆科黄油体）+ 10 款西文 UI 字体（Inter / IBM Plex / Source Sans / Fira / Public Sans /
+  Manrope / Work Sans / Rubik / Lato / Noto Sans）+ 5 款等宽字体（JetBrains Mono /
+  Fira Code / IBM Plex Mono / Source Code Pro / Cascadia Code）；
+  支持界面/数据字体分开选择、90%~125% 字号缩放、即时预览与还原；
+- **曲库体检**：重复文件（大小 + 首/中/尾各 1MB 快速哈希、标签/时长聚合）、缺封面/歌词、
+  文件名不一致、专辑艺术家不一致、低规格/假无损/未鉴定汇总，可导出 CSV；
+- **界面焕新**：11 套重新设计的主题、右侧详情检查器（封面/标签/规格/鉴定结论）、
+  参数分页、带数量的筛选胶囊、选中操作条、可折叠日志、可搜索设置的命令面板（Ctrl+K）、
+  Ctrl+Z 撤销标签编辑、列宽/排序持久化；
+- 顶栏柔光与静态波形、背景渐变、统计卡微型波形；不引入星空或持续动画。
+
+> 20 款字体让便携版体积从约 79MB 增至约 100MB；不需要多字体的用户可以继续用默认
+> Noto Sans SC。
 
 ### V1.4.5 更新摘要
 
@@ -149,7 +170,7 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 | 界面 | **PySide6 (Qt 6)** | Qt 官方维护，Win10/11 高分屏与 125%/150% 缩放表现稳定；LGPL 授权，商业分发无负担 |
 | 网络 | 标准库 `urllib` | 目标 API 都是简单 GET，无需 HTTP/2；少一层依赖就少一层 DLL 冲突，打包更小 |
 | 频谱分析 | **numpy** + 内置 **ffmpeg** | 真假无损鉴定要解码后做 FFT；ffmpeg 是唯一能同时解 DSD/APE/WV/TTA 的方案，随包内置保证开箱即用 |
-| 字体 | **Noto Sans SC** + **JetBrains Mono** | 均为 SIL OFL 1.1，可随软件分发与商用；系统自带的微软雅黑等字体不允许随包分发 |
+| 字体 | **20 款 SIL OFL 字体**（5 中文 + 10 西文 UI + 5 等宽） | 全部可随软件分发与商用；系统自带的微软雅黑等字体不允许随包分发 |
 | 压缩 | **py7zr** | 纯 Python 实现 7z，构建期用，不依赖外部 7-Zip |
 | 打包 | **PyInstaller** + 自研 Qt 安装器 | PyInstaller 零编译依赖，装完即出包；本机无 Inno/NSIS，安装向导直接用 PySide6 写 |
 
@@ -264,8 +285,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.4.5-x86-x64.7z            便携绿色版（解压即用，约 90 MB）
-dist/音序管家-v1.4.5-x86-x64-Setup.exe     安装程序（约 90 MB）
+dist/音序管家-v1.5.0-x86-x64.7z            便携绿色版（解压即用，约 100 MB）
+dist/音序管家-v1.5.0-x86-x64-Setup.exe     安装程序（约 192 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -525,7 +546,7 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 
 **P1+（已实现）**
 - 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、源码带宽台阶（噪声填充升频）、16bit 上限检查、频谱空洞与 sfb21；DSD 额外用「信号边界」帧间波动判据定位源码带宽，可识别有损/CD/48k/96k 四类转制；同批一致性按调制器指纹推定；多段中位数稳健判定）
-- 一键切换 7 套主题 ✅（深空/春/夏/秋/冬/黑白极简/太极）
+- 一键切换 11 套主题 ✅（深空/黑胶/春/夏/秋/冬/海岸/暮光/太极/纸白/黑白极简）
 - 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，首屏核心字符串已翻译）
 - 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云→QQ音乐；歌词 LRCLIB→网易云→QQ音乐；封面 CAA→远程）
 - 标题去序号清洗 ✅ / 封面批量导出 ✅
@@ -551,7 +572,7 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 ## 需求差距
 
 实现与需求文档的逐项对照见 [docs/GAP.md](docs/GAP.md)。主要未实现项：
-AcoustID 音频指纹、曲库查重、按采样率/位深筛选、任务断点续处理。
+AcoustID 音频指纹、任务断点续处理。
 
 ## 已知限制
 
@@ -587,7 +608,30 @@ Advanced capabilities:
 - **One-click cleanup** — suspicious files go to the Recycle Bin or the app's quarantine (recoverable), with a spectrum chart you can verify yourself;
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
-> License: **GNU General Public License v3.0**. The bundled fonts Noto Sans SC / JetBrains Mono are SIL OFL 1.1.
+> License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.0 highlights
+
+This release combines a "collection standard" with a sensory upgrade:
+
+- **Minimum PCM collection spec**: PCM below 16-bit / 44.1 kHz / stereo is judged
+  "fake lossless" (mono, 32k/22.05k and 8-bit all fail); DSD keeps its own criteria,
+  while 32-bit float and 5.1/7.1 channels are unaffected;
+- **20 bundled open-source fonts**: five Chinese fonts (Noto Sans SC, LXGW WenKai,
+  Smiley Sans, Ma Shan Zheng, ZCOOL QingKe HuangYou), ten Latin UI fonts, and five
+  monospace fonts, with separate UI/data selection, 90%–125% scaling and live preview;
+- **Library health check**: duplicate files (size + first/middle/last 1MB quick hash, plus
+  title/duration grouping), missing covers/lyrics, filename mismatches, inconsistent
+  album artists, low-spec/fake/unanalysed counts, with CSV export;
+- **UI refresh**: 11 redesigned themes, right-side track inspector, tabbed settings,
+  verdict chips with counts, selection action bar, collapsible log, searchable
+  settings-aware command palette (Ctrl+K), Ctrl+Z tag-edit undo, and persisted
+  column widths/sorting;
+- Ambient header glow and static waveform, background gradient, mini waveforms on stat
+  cards — no starfield or continuous animation.
+
+> The 20 bundled fonts grow the portable package from ~79 MB to ~100 MB. Users who don't
+> need extra fonts can keep the default Noto Sans SC.
 
 ### V1.4.5 highlights
 
@@ -717,7 +761,7 @@ About & open-source license (full GPLv3 text embedded, readable offline):
 | UI | **PySide6 (Qt 6)** | Officially maintained; stable HiDPI behavior at 125%/150% scaling on Win10/11; LGPL, no burden for distribution |
 | Network | stdlib `urllib` | Target APIs are simple GETs, no HTTP/2 needed; fewer deps = fewer DLL conflicts and a smaller bundle |
 | Spectrum | **numpy** + bundled **ffmpeg** | Fake-lossless detection decodes audio then runs FFT; ffmpeg is the only decoder covering DSD/APE/WV/TTA, bundled for out-of-the-box use |
-| Fonts | **Noto Sans SC** + **JetBrains Mono** | Both SIL OFL 1.1 — redistributable and commercially usable; system fonts like Microsoft YaHei may not be redistributed |
+| Fonts | **20 SIL OFL fonts** (5 Chinese + 10 Latin UI + 5 monospace) | All redistributable and commercially usable; system fonts like Microsoft YaHei may not be redistributed |
 | Compression | **py7zr** | Pure-Python 7z, build-time only, no external 7-Zip |
 | Packaging | **PyInstaller** + self-written Qt installer | Zero-compile dependency; no Inno/NSIS on this machine, so the wizard is written directly in PySide6 |
 
@@ -759,8 +803,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.4.5-x86-x64.7z            portable edition (extract-and-run, ~90 MB)
-dist/音序管家-v1.4.5-x86-x64-Setup.exe     installer (~90 MB)
+dist/音序管家-v1.5.0-x86-x64.7z            portable edition (extract-and-run, ~100 MB)
+dist/音序管家-v1.5.0-x86-x64-Setup.exe     installer (~192 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.

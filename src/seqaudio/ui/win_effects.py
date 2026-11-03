@@ -30,8 +30,14 @@ def _colorref(hex_color: str) -> int:
     return (b << 16) | (g << 8) | r
 
 
-def apply_dark_titlebar(hwnd: int, caption: str = "#0a0c10", border: str = "#232a38") -> bool:
-    """把窗口标题栏切成深色。返回是否成功（失败仅意味着保持系统默认）。"""
+def apply_titlebar(
+    hwnd: int,
+    *,
+    dark: bool = True,
+    caption: str = "#0a0c10",
+    border: str = "#232a38",
+) -> bool:
+    """按主题设置标题栏深浅与颜色。返回是否成功（失败仅意味着保持系统默认）。"""
     if sys.platform != "win32" or not hwnd:
         return False
     try:
@@ -47,7 +53,7 @@ def apply_dark_titlebar(hwnd: int, caption: str = "#0a0c10", border: str = "#232
                 hwnd_value, attr, ctypes.byref(data), ctypes.sizeof(data)
             )
 
-        _set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)
+        _set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if dark else 0)
         _set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
         # 颜色属性需要 Win11 22H2+，旧系统调用会失败但不会抛异常
         try:
@@ -57,8 +63,13 @@ def apply_dark_titlebar(hwnd: int, caption: str = "#0a0c10", border: str = "#232
             pass
         return True
     except Exception as exc:  # pragma: no cover - 非关键增强
-        log.debug("深色标题栏设置失败：%s", exc)
+        log.debug("标题栏设置失败：%s", exc)
         return False
+
+
+def apply_dark_titlebar(hwnd: int, caption: str = "#0a0c10", border: str = "#232a38") -> bool:
+    """兼容旧调用：切深色标题栏。"""
+    return apply_titlebar(hwnd, dark=True, caption=caption, border=border)
 
 
 def apply_all_windows() -> None:

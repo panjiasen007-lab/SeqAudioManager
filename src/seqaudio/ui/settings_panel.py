@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -22,13 +24,14 @@ from PySide6.QtWidgets import (
 from ..core.config import Settings
 from ..core.model import ConflictMode, LyricsMode
 from ..core.rename import DEFAULT_TEMPLATE
-from . import theme
+from . import fonts, theme
 from .widgets import Card
 
 
 class SettingsPanel(QWidget):
     settingsChanged = Signal()   # 有未保存的修改（不再自动落盘，仅标记脏）
     saved = Signal()             # 「保存参数」成功后发出，主窗口据此刷新依赖设置的状态
+    appearancePreviewChanged = Signal(str, str, float)  # 字体/字号预览（id, id, scale）
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -42,29 +45,40 @@ class SettingsPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
 
-        # 参数卡片区：可滚动；保存条固定在底部，不随卡片一起滚走
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 参数分页：匹配 / 歌词 / 写入 / 外观；保存条固定在底部
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        groups = (
+            ("匹配", [self._build_match_card(), self._build_source_card()]),
+            ("歌词", [self._build_lyrics_card()]),
+            (
+                "写入",
+                [
+                    self._build_write_card(),
+                    self._build_watermark_card(),
+                    self._build_rename_card(),
+                    self._build_scan_card(),
+                ],
+            ),
+            ("外观", [self._build_appearance_card(), self._build_ui_card()]),
+        )
+        for title, cards in groups:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(8, 8, 4, 8)
+            page_layout.setSpacing(10)
+            for card in cards:
+                page_layout.addWidget(card)
+            page_layout.addStretch(1)
 
-        body = QWidget()
-        scroll.setWidget(body)
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(0, 0, 6, 0)
-        layout.setSpacing(10)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, title)
 
-        layout.addWidget(self._build_match_card())
-        layout.addWidget(self._build_source_card())
-        layout.addWidget(self._build_lyrics_card())
-        layout.addWidget(self._build_write_card())
-        layout.addWidget(self._build_watermark_card())
-        layout.addWidget(self._build_rename_card())
-        layout.addWidget(self._build_scan_card())
-        layout.addWidget(self._build_ui_card())
-        layout.addStretch(1)
-
-        root.addWidget(scroll, 1)
+        root.addWidget(self.tabs, 1)
         root.addWidget(self._build_save_bar())
 
         self.load_from(settings)
@@ -272,6 +286,77 @@ class SettingsPanel(QWidget):
         card.add_widget(self.trim_pregap_check)
         return card
 
+    def _build_appearance_card(self) -> Card:
+        card = Card("字体与外观", "随包开源字体", theme.CYAN)
+
+        self.ui_font_combo = QComboBox()
+        for index, choice in enumerate(fonts.UI_CHOICES):
+            self.ui_font_combo.addItem(f"{choice.name} · {choice.category}", choice.id)
+            tip = f"{choice.name}（{choice.license}）"
+            if not choice.cjk:
+                tip += "\n不含中文字形：中文自动回退到 Noto Sans SC"
+            self.ui_font_combo.setItemData(index, tip, Qt.ToolTipRole)
+        self.ui_font_combo.currentIndexChanged.connect(self._on_appearance_changed)
+
+        self.mono_font_combo = QComboBox()
+        for choice in fonts.MONO_CHOICES:
+            self.mono_font_combo.addItem(choice.name, choice.id)
+        self.mono_font_combo.currentIndexChanged.connect(self._on_appearance_changed)
+
+        self.font_scale_combo = QComboBox()
+        for label, value in (("90%", 0.9), ("100%", 1.0), ("110%", 1.1), ("125%", 1.25)):
+            self.font_scale_combo.addItem(label, value)
+        self.font_scale_combo.currentIndexChanged.connect(self._on_appearance_changed)
+
+        card.add_form(
+            [
+                ("界面字体", self.ui_font_combo),
+                ("数据字体", self.mono_font_combo),
+                ("字号", self.font_scale_combo),
+            ]
+        )
+
+        self.font_preview = QLabel("乐与怒 · Beyond · 海阔天空")
+        self.font_preview.setObjectName("fontPreview")
+        self.font_preview.setWordWrap(True)
+        self.mono_preview = QLabel("01/12 · 96kHz / 24bit · 1.2 GB")
+        self.mono_preview.setObjectName("monoPreview")
+        self.mono_preview.setWordWrap(True)
+        card.add_widget(self.font_preview)
+        card.add_widget(self.mono_preview)
+        return card
+
+    def _appearance_values(self) -> tuple[str, str, float]:
+        ui_id = self.ui_font_combo.currentData() or fonts.DEFAULT_UI
+        mono_id = self.mono_font_combo.currentData() or fonts.DEFAULT_MONO
+        try:
+            scale = float(self.font_scale_combo.currentData() or 1.0)
+        except (TypeError, ValueError):
+            scale = 1.0
+        return str(ui_id), str(mono_id), scale
+
+    def _refresh_appearance_preview(self) -> None:
+        ui_id, mono_id, scale = self._appearance_values()
+        ui = next((c for c in fonts.UI_CHOICES if c.id == ui_id), fonts.UI_CHOICES[0])
+        mono = next(
+            (c for c in fonts.MONO_CHOICES if c.id == mono_id), fonts.MONO_CHOICES[0]
+        )
+        ui_font = QFont(ui.family)
+        ui_font.setFamilies([ui.family, "Noto Sans SC", "Microsoft YaHei UI"])
+        ui_font.setPixelSize(round(14 * scale))
+        self.font_preview.setFont(ui_font)
+
+        mono_font = QFont(mono.family)
+        mono_font.setFamilies([mono.family, "Consolas"])
+        mono_font.setPixelSize(round(12 * scale))
+        self.mono_preview.setFont(mono_font)
+
+    def _on_appearance_changed(self, *_) -> None:
+        self._refresh_appearance_preview()
+        if not self._loading:
+            self.appearancePreviewChanged.emit(*self._appearance_values())
+            self._notify()
+
     def _build_ui_card(self) -> Card:
         card = Card("界面与清理", "", theme.PURPLE)
 
@@ -305,8 +390,7 @@ class SettingsPanel(QWidget):
         layout.setSpacing(8)
 
         self.dirty_label = QLabel("")
-        self.dirty_label.setObjectName("hint")
-        self.dirty_label.setStyleSheet(f"color:{theme.WARN};")
+        self.dirty_label.setObjectName("warnHint")
 
         self.revert_btn = QPushButton("还原")
         self.revert_btn.setObjectName("ghost")
@@ -355,6 +439,8 @@ class SettingsPanel(QWidget):
         """放弃未保存的修改，恢复为已保存的参数。"""
         self.load_from(self.settings)
         self._set_dirty(False)
+        # 字体是即时预览的，还原时也要立刻退回已保存的字体
+        self.appearancePreviewChanged.emit(*self._appearance_values())
 
     def mark_saved(self) -> None:
         """外部在 apply_to + save 之后调用，清除「未保存」标记。
@@ -436,6 +522,17 @@ class SettingsPanel(QWidget):
             self.trim_pregap_check.setChecked(settings.cue_split_trim_pregap)
             self.suspect_check.setChecked(settings.cleanup_include_suspect)
             self.cover_check.setChecked(settings.ensure_folder_cover)
+
+            self.ui_font_combo.setCurrentIndex(
+                max(0, self.ui_font_combo.findData(settings.ui_font))
+            )
+            self.mono_font_combo.setCurrentIndex(
+                max(0, self.mono_font_combo.findData(settings.mono_font))
+            )
+            self.font_scale_combo.setCurrentIndex(
+                max(0, self.font_scale_combo.findData(float(settings.font_scale or 1.0)))
+            )
+            self._refresh_appearance_preview()
         finally:
             self._loading = False
 
@@ -483,4 +580,6 @@ class SettingsPanel(QWidget):
 
         settings.cleanup_include_suspect = self.suspect_check.isChecked()
         settings.ensure_folder_cover = self.cover_check.isChecked()
+
+        settings.ui_font, settings.mono_font, settings.font_scale = self._appearance_values()
         return settings

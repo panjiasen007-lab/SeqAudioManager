@@ -59,6 +59,9 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
              "ru": "Ещё", "fr": "Plus", "de": "Mehr"},
     "panel": {"zh_CN": "参数", "zh_TW": "參數", "en": "Options", "ja": "設定", "ko": "옵션",
               "ru": "Параметры", "fr": "Options", "de": "Optionen"},
+    "sidebar": {"zh_CN": "侧栏", "zh_TW": "側欄", "en": "Sidebar", "ja": "サイドバー",
+                "ko": "사이드바", "ru": "Боковая панель", "fr": "Panneau latéral",
+                "de": "Seitenleiste"},
 
     # 统计卡
     "stat_total": {"zh_CN": "曲目总数", "zh_TW": "曲目總數", "en": "Tracks", "ja": "曲数",
@@ -117,6 +120,10 @@ for _key, _names in {
     "秋": ("秋", "秋", "Autumn", "秋", "가을", "Осень", "Automne", "Herbst"),
     "冬": ("冬", "冬", "Winter", "冬", "겨울", "Зима", "Hiver", "Winter"),
     "太极": ("太极", "太極", "Taiji", "太極", "태극", "Тайцзи", "Taiji", "Taiji"),
+    "黑胶": ("黑胶", "黑膠", "Vinyl", "レコード", "바이닐", "Винил", "Vinyle", "Vinyl"),
+    "海岸": ("海岸", "海岸", "Coast", "海岸", "해안", "Побережье", "Côte", "Küste"),
+    "暮光": ("暮光", "暮光", "Twilight", "トワイライト", "황혼", "Сумерки", "Crépuscule", "Dämmerung"),
+    "纸白": ("纸白", "紙白", "Paper", "紙白", "종이색", "Бумага", "Papier", "Papier"),
     "黑白极简": ("黑白极简", "黑白極簡", "Monochrome", "モノクロ", "흑백 미니멀", "Монохром", "Monochrome", "Monochrom"),
 }.items():
     _TRANSLATIONS[f"theme:{_key}"] = dict(zip(LOCALE_NAMES, _names))

@@ -7,11 +7,20 @@ Qt 的 QSS 能力有限（无阴影、无过渡），"现代感"主要靠三件�
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -90,6 +99,33 @@ class StatCard(QFrame):
         """按当前主题重算数字颜色。全零时转灰，避免整排彩色数字互相干扰。"""
         color = getattr(theme, self.color_name.upper(), theme.FG) if self._value else theme.FG_MUTE
         self.value_label.setStyleSheet(f"color:{color};")
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        color = QColor(
+            getattr(theme, self.color_name.upper(), theme.FG)
+            if self._value
+            else theme.FG_MUTE
+        )
+        color.setAlpha(110 if self._value else 45)
+        painter.fillRect(0, 0, self.width(), 2, color)
+
+        # 右下角迷你波形：给数据卡一点"音频"质感，不参与数值表达
+        color.setAlpha(46 if self._value else 20)
+        heights = (0.28, 0.52, 0.36, 0.72, 0.44, 0.62)
+        bar_w, gap = 3, 3
+        total = len(heights) * bar_w + (len(heights) - 1) * gap
+        x = self.width() - 14 - total
+        base_y = self.height() - 10
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        for factor in heights:
+            h = max(2, int(22 * factor))
+            painter.drawRoundedRect(QRectF(x, base_y - h, bar_w, h), 1.5, 1.5)
+            x += bar_w + gap
+        painter.end()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
@@ -178,9 +214,43 @@ class BrandBar(QFrame):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
-        # 底部 1px 渐变线：从强调色淡出到透明，作为品牌区的收口
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # 左上角柔光：给顶栏一点"录音棚灯"的氛围，静态、不闪动
+        glow = QRadialGradient(86, self.height() / 2, 230)
+        accent = QColor(theme.ACCENT)
+        accent.setAlpha(34)
+        mid_glow = QColor(theme.ACCENT)
+        mid_glow.setAlpha(12)
+        edge_glow = QColor(theme.ACCENT)
+        edge_glow.setAlpha(0)
+        glow.setColorAt(0.0, accent)
+        glow.setColorAt(0.55, mid_glow)
+        glow.setColorAt(1.0, edge_glow)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QRectF(-110, -140, 430, 330))
+
+        # 右侧极淡波形线：音频工具的视觉符号，不遮挡文字
+        wave = QPainterPath()
+        left = max(self.width() - 460, 360)
+        right = self.width() - 150
+        mid = self.height() / 2 - 4
+        samples = 90
+        for index in range(samples + 1):
+            x = left + (right - left) * index / samples
+            amp = math.sin(index * 0.28) * math.sin(index * 0.07 + 0.6)
+            wave.lineTo(x, mid - amp * 9)
+        wave_color = QColor(theme.CYAN)
+        wave_color.setAlpha(34)
+        pen = QPen(wave_color)
+        pen.setWidthF(1.1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(wave)
+
+        # 底部 1px 渐变线：从强调色淡出到透明，作为品牌区的收口
         gradient = QLinearGradient(0, 0, self.width(), 0)
         top = QColor(theme.ACCENT)
         top.setAlpha(90)

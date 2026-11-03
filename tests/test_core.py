@@ -2569,6 +2569,164 @@ class _FakeInfo:
         self.dsd_rate = 0
 
 
+class TestPcmMinimumSpec(unittest.TestCase):
+    """V1.5 收藏最低规格：16bit / 44.1kHz / 立体声，低于即判假无损。"""
+
+    def test_standard_is_ok(self) -> None:
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        info = AudioInfo(sample_rate=44100, bit_depth=16, channels=2)
+        self.assertEqual(pcm_spec_issues(info), [])
+
+    def test_high_spec_is_ok(self) -> None:
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        for info in (
+            AudioInfo(sample_rate=48000, bit_depth=24, channels=2),
+            AudioInfo(sample_rate=96000, bit_depth=32, channels=2),
+            AudioInfo(sample_rate=44100, bit_depth=16, channels=6),
+        ):
+            self.assertEqual(pcm_spec_issues(info), [], info)
+
+    def test_mono_is_low(self) -> None:
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        issues = pcm_spec_issues(
+            AudioInfo(sample_rate=44100, bit_depth=16, channels=1)
+        )
+        self.assertEqual(issues, ["单声道"])
+
+    def test_low_sample_rate_is_low(self) -> None:
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        issues = pcm_spec_issues(
+            AudioInfo(sample_rate=22050, bit_depth=16, channels=2)
+        )
+        self.assertTrue(any("22.05kHz" in i for i in issues), issues)
+
+    def test_low_bit_depth_is_low(self) -> None:
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        issues = pcm_spec_issues(
+            AudioInfo(sample_rate=44100, bit_depth=8, channels=2)
+        )
+        self.assertTrue(any("8bit" in i for i in issues), issues)
+
+    def test_multiple_issues(self) -> None:
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        issues = pcm_spec_issues(
+            AudioInfo(sample_rate=22050, bit_depth=8, channels=1)
+        )
+        self.assertEqual(len(issues), 3, issues)
+
+    def test_unknown_fields_skipped(self) -> None:
+        """声明值未知时不能瞎判低规格。"""
+        from seqaudio.core.authenticity import pcm_spec_issues
+        from seqaudio.core.model import AudioInfo
+
+        self.assertEqual(pcm_spec_issues(AudioInfo()), [])
+
+    @unittest.skipUnless(
+        __import__("seqaudio.core.authenticity", fromlist=["x"]).ffmpeg_available(),
+        "需要 ffmpeg",
+    )
+    def test_analyze_marks_low_spec_as_fake(self) -> None:
+        from seqaudio.core.authenticity import analyze
+        from seqaudio.core.probe import probe
+
+        tmp = Path(tempfile.mkdtemp(prefix="seq_spec_"))
+        try:
+            low = make_samples.make_wav(
+                tmp / "low.wav", seconds=3.0, sample_rate=22050, channels=2
+            )
+            result = analyze(low, probe(low, with_cue=False).info)
+            self.assertEqual(result.verdict, "假无损")
+            self.assertTrue(result.spec_low)
+            self.assertTrue(any("低于最低规格" in r for r in result.reasons))
+
+            mono = make_samples.make_wav(tmp / "mono.wav", seconds=3.0, channels=1)
+            result = analyze(mono, probe(mono, with_cue=False).info)
+            self.assertEqual(result.verdict, "假无损")
+            self.assertTrue(any("单声道" in r for r in result.reasons))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestLibraryHealth(unittest.TestCase):
+    """V1.5 曲库体检：快速查重、缺失项与异常汇总。"""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seq_health_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_exact_and_near_duplicates(self) -> None:
+        from seqaudio.core.health import analyze_library
+        from seqaudio.core.model import AudioInfo, Tags
+        from seqaudio.core.probe import probe
+
+        a = make_samples.make_wav(self.tmp / "01 - 陈奕迅 - 富士山下.wav")
+        b = self.tmp / "copy.wav"
+        shutil.copy2(a, b)
+        c = make_samples.make_wav(
+            self.tmp / "02 - 陈奕迅 - 富士山下.wav", sample_rate=48000
+        )
+
+        tracks = [probe(p, with_cue=False) for p in (a, b, c)]
+        for track in tracks:
+            track.info = AudioInfo(fmt="WAV", lossless=True, duration=2.0, channels=2,
+                                   bit_depth=16, sample_rate=44100,
+                                   file_size=track.path.stat().st_size)
+            track.working = Tags(title="富士山下", artist="陈奕迅")
+            track.original = track.working.copy()
+
+        report = analyze_library(tracks)
+        exact = [g for g in report.duplicates if g.kind == "完全相同"]
+        near = [g for g in report.duplicates if g.kind == "疑似同一首歌"]
+        self.assertEqual(len(exact), 1)
+        self.assertEqual(len(exact[0].tracks), 2)
+        self.assertGreater(exact[0].wasted_bytes, 0)
+        self.assertTrue(any(len(g.tracks) >= 2 for g in near), near)
+        self.assertGreaterEqual(report.count("缺少封面"), 1)
+        self.assertGreaterEqual(report.count("缺少歌词"), 1)
+
+    def test_spec_and_failure_counts(self) -> None:
+        from seqaudio.core.authenticity import VERDICT_FAKE, AuthenticityResult
+        from seqaudio.core.health import analyze_library
+        from seqaudio.core.model import Track, TrackStatus
+
+        t1 = Track(path=self.tmp / "fake.wav")
+        t1.authenticity = AuthenticityResult(verdict=VERDICT_FAKE, spec_low=True,
+                                             reasons=["低于最低规格"])
+        t2 = Track(path=self.tmp / "broken.wav")
+        t2.status = TrackStatus.FAILED
+        report = analyze_library([t1, t2], check_duplicates=False)
+        self.assertEqual(report.fake_count, 1)
+        self.assertEqual(report.low_spec_count, 1)
+        self.assertEqual(report.count("读取/写入失败"), 1)
+
+    def test_health_report_csv(self) -> None:
+        from seqaudio.core.health import analyze_library, write_health_report
+        from seqaudio.core.model import Track
+
+        track = Track(path=self.tmp / "song.wav")
+        track.working.title = "测试歌曲"
+        report = analyze_library([track], check_duplicates=False)
+        target = self.tmp / "health.csv"
+        write_health_report(report, target)
+        text = target.read_text(encoding="utf-8-sig")
+        self.assertIn("类型", text)
+        self.assertIn("测试歌曲", text)
+
+
 class TestAuthenticityOldCD(unittest.TestCase):
     """老 CD / 模拟母带：高频平滑滚降不能被判成假无损（V1.1 修复）。"""
 
@@ -2589,7 +2747,7 @@ class TestAuthenticityOldCD(unittest.TestCase):
         path = make_samples.make_rolloff_wav(self.tmp / f"{name}.wav", **kw)
         info = AudioInfo(
             fmt="WAV", lossless=True, sample_rate=44100,
-            bit_depth=16, channels=1, duration=4.0,
+            bit_depth=16, channels=2, duration=4.0,
         )
         return analyze(path, info)
 

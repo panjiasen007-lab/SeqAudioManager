@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from . import APP_NAME, __version__
 from .core.config import Settings
 from .core.logging_setup import setup_logging
+from .ui import fonts, theme
 from .ui.disclaimer import DisclaimerDialog
 from .ui.main_window import MainWindow
 from .ui.theme import QSS
@@ -239,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
     _install_excepthook(app)
 
     settings = Settings.load()
+    # 免责声明/首个窗口出现前就套用用户选择的字体与主题
+    fonts.configure(settings.ui_font, settings.mono_font, settings.font_scale)
+    app.setFont(fonts.ui_font(13))
+    app.setStyleSheet(theme.apply_theme(settings.theme))
 
     if not DisclaimerDialog.is_accepted(settings.accepted_disclaimer):
         dialog = DisclaimerDialog()

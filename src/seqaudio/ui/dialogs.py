@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -423,6 +423,108 @@ class BatchTagEditDialog(QDialog):
             if check.isChecked():
                 values[key] = self.edits[key].text().strip()
         return values
+
+
+class CommandPaletteDialog(QDialog):
+    """命令面板：按分组搜索操作与设置，Enter 直接执行（Ctrl+K）。"""
+
+    def __init__(
+        self,
+        commands: list[tuple],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("命令面板")
+        self.resize(640, 520)
+        self._commands: list[tuple[str, str, str, Callable[[], None]]] = []
+        for entry in commands:
+            if len(entry) >= 4:
+                group, name, shortcut, callback = entry[:4]
+            else:
+                name, shortcut, callback = entry[:3]
+                group = "操作"
+            self._commands.append((str(group), str(name), str(shortcut), callback))
+        self._filtered: list[int] = []
+        self.selected_command: Optional[Callable[[], None]] = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 10)
+        layout.setSpacing(8)
+
+        head = QLabel("命令面板")
+        head.setObjectName("sectionTitle")
+        layout.addWidget(head)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索命令或设置，例如「主题」「字体」「鉴定」「只看」…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._apply_filter)
+        self.search.returnPressed.connect(self._accept_current)
+        layout.addWidget(self.search)
+
+        self.list = QListWidget()
+        self.list.setAlternatingRowColors(False)
+        self.list.itemActivated.connect(lambda _: self._accept_current())
+        self.list.itemDoubleClicked.connect(lambda _: self._accept_current())
+        layout.addWidget(self.list, 1)
+
+        hint = QLabel("Enter 执行 · ↑↓ 选择 · Esc 关闭；设置类命令会立即生效并保存")
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("执行")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self._accept_current)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._apply_filter("")
+        self.search.setFocus()
+
+    def _apply_filter(self, text: str) -> None:
+        keyword = (text or "").strip().lower()
+        self.list.clear()
+        self._filtered = []
+        last_group = ""
+        for index, (group, name, shortcut, _) in enumerate(self._commands):
+            haystack = f"{group} {name} {shortcut}".lower()
+            if keyword and keyword not in haystack:
+                continue
+            if group != last_group:
+                header = QListWidgetItem(group)
+                header.setFlags(Qt.NoItemFlags)
+                header.setForeground(QBrush(QColor(theme.FG_DIM)))
+                header.setBackground(QBrush(QColor(theme.BG_CARD)))
+                font = header.font()
+                font.setBold(True)
+                header.setFont(font)
+                header.setSizeHint(QSize(0, 26))
+                self.list.addItem(header)
+                last_group = group
+            item = QListWidgetItem(f"{name}    {shortcut}" if shortcut else name)
+            item.setData(Qt.UserRole, index)
+            item.setSizeHint(QSize(0, 30))
+            self.list.addItem(item)
+            self._filtered.append(index)
+
+        for row in range(self.list.count()):
+            if self.list.item(row).data(Qt.UserRole) is not None:
+                self.list.setCurrentRow(row)
+                break
+
+    def _accept_current(self) -> None:
+        item = self.list.currentItem()
+        if item is None:
+            return
+        row = self.list.currentRow()
+        for offset in range(self.list.count()):
+            candidate = self.list.item((row + offset) % self.list.count())
+            index = candidate.data(Qt.UserRole)
+            if index is not None and 0 <= index < len(self._commands):
+                self.selected_command = self._commands[index][3]
+                self.accept()
+                return
 
 
 class CandidateDialog(QDialog):

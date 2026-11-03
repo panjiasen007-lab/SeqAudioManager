@@ -82,6 +82,14 @@ class Settings:
     # ---- 界面 ----
     theme: str = "深空"                     # 主题名（见 ui/theme.THEMES）
     language: str = "zh_CN"                 # 界面语言（见 ui/i18n.LOCALES）
+    ui_font: str = "noto"                   # 界面字体 id（见 ui/fonts.UI_CHOICES）
+    mono_font: str = "jetbrains"            # 数据字体 id（见 ui/fonts.MONO_CHOICES）
+    font_scale: float = 1.0                 # 字号倍率 0.85 ~ 1.35
+    column_widths: list[int] = field(default_factory=list)   # 列表列宽（退出时保存）
+    hidden_columns: list[int] = field(default_factory=list)  # 隐藏的列索引
+    sort_column: int = -1                   # 排序列（-1 = 不排序）
+    sort_order: int = 0                     # 0 升序 / 1 降序
+    view_state_saved: bool = False          # 是否已有保存过的列布局
     cleanup_include_suspect: bool = True   # 清理时是否包含「疑似」项
 
     # ---- 文件夹封面 ----

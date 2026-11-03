@@ -31,6 +31,7 @@ from seqaudio.ui.main_window import MainWindow  # noqa: E402
 
 
 def main() -> int:
+    ok = True
     setup_logging(to_console=False)
     tmp = Path(tempfile.mkdtemp(prefix="seq_ui_"))
     audio_dir = tmp / "audio"
@@ -46,9 +47,34 @@ def main() -> int:
         watermark_enabled=True,
         lyrics_mode="内嵌到标签",
         rename_enabled=False,
+        ui_font="wenkai",
     )
     window = MainWindow(settings)
     window.show()
+
+    from seqaudio.ui import fonts, theme
+
+    if len(fonts.UI_CHOICES) + len(fonts.MONO_CHOICES) != 20:
+        print("✗ 可选字体不是 20 款：", len(fonts.UI_CHOICES), len(fonts.MONO_CHOICES))
+        ok = False
+    if fonts.ui_family() != "LXGW WenKai":
+        print("✗ 字体设置未生效：", fonts.ui_family())
+        ok = False
+    if "LXGW WenKai" not in theme.QSS:
+        print("✗ QSS 未使用所选字体")
+        ok = False
+    if window.right_tabs.count() != 2 or window.settings_panel.tabs.count() != 4:
+        print("✗ 右侧/参数分页数量不对")
+        ok = False
+    if len(theme.THEMES) < 10:
+        print("✗ 主题数量不足：", len(theme.THEMES))
+        ok = False
+    for theme_name in theme.THEMES:
+        window.apply_theme(theme_name, persist=False, quiet=True)
+    window.apply_theme("深空", persist=False, quiet=True)
+    if theme.CURRENT != "深空":
+        print("✗ 主题切换后未回到默认：", theme.CURRENT)
+        ok = False
 
     tracks = [probe(p, with_cue=False) for p in files.values() if p.suffix != ".cue"]
     # 制造一条带水印的标签，验证清理链路
@@ -60,6 +86,23 @@ def main() -> int:
     tracks[0].original = tracks[0].working.copy()
     window.model.add_tracks(tracks)
     assert window.model.rowCount() == 3, window.model.rowCount()
+    window._refresh_stats()
+    if "3" not in window.verdict_chips["all"].text():
+        print("✗ 筛选胶囊未显示数量：", window.verdict_chips["all"].text())
+        ok = False
+    window.table.selectRow(0)
+    app.processEvents()
+    if not window.inspector.isVisible() or not window.inspector.title.text():
+        print("✗ 右侧详情检查器未随选中项更新")
+        ok = False
+    window._toggle_log()
+    if window.log_view.isVisible():
+        print("✗ 日志收起失败")
+        ok = False
+    window._toggle_log()
+    if not window.log_view.isVisible():
+        print("✗ 日志展开失败")
+        ok = False
 
     results: dict[str, object] = {}
 
@@ -88,7 +131,6 @@ def main() -> int:
     app.exec()
 
     summary = results.get("summary")
-    ok = True
     if summary is None:
         print("✗ 批处理未在超时内完成")
         ok = False
@@ -138,6 +180,16 @@ def main() -> int:
         print("✗ 还原后应清除脏标记并恢复原值")
         ok = False
 
+    # 字体即时预览 → 还原回已保存字体（V1.5）
+    panel.ui_font_combo.setCurrentIndex(panel.ui_font_combo.findData("smiley"))
+    if fonts.ui_family() != "Smiley Sans":
+        print("✗ 字体预览未生效：", fonts.ui_family())
+        ok = False
+    panel.revert()
+    if fonts.ui_family() != "LXGW WenKai":
+        print("✗ 字体还原失败：", fonts.ui_family())
+        ok = False
+
     # 批量标签编辑：只有勾选的字段才修改，未勾选保持原值（V1.1）
     from seqaudio.ui.dialogs import BatchTagEditDialog
 
@@ -166,6 +218,15 @@ def main() -> int:
         ok = False
     if "artist" not in target.changed_fields:
         print("✗ 批量编辑未记录变更字段")
+        ok = False
+
+    # 标签编辑撤销（V1.5）：写盘前可回退
+    before_undo = target.working.copy()
+    window._push_tag_undo([target])
+    target.working.title = "撤销测试标题"
+    window.undo_last_tag_edit()
+    if target.working.title != before_undo.title:
+        print("✗ 撤销标签编辑未恢复：", target.working.title)
         ok = False
 
     # 单曲标签编辑：占位符 title（Track 03）可用「按文件名补全」一键对齐（V1.4.2）
@@ -199,6 +260,42 @@ def main() -> int:
         print("✗ 注释框过矮：", fill_dialog.comment_edit.height())
         ok = False
     fill_dialog.close()
+
+    # 曲库体检：汇总、重复/问题表格可生成（V1.5 追加）
+    from seqaudio.ui.health import HealthDialog
+
+    health = HealthDialog(tracks[:2], window)
+    if health.report is None:
+        print("✗ 曲库体检未生成报告")
+        ok = False
+    elif health.issue_table.rowCount() == 0:
+        print("✗ 曲库体检问题清单为空（合成样本至少应缺少封面/歌词）")
+        ok = False
+    health.close()
+
+    # 命令面板：关键字过滤与执行回调（V1.5）
+    from seqaudio.ui.dialogs import CommandPaletteDialog
+
+    hits: list[str] = []
+    palette = CommandPaletteDialog(
+        [("导出报表", "", lambda: hits.append("export")),
+         ("清理假无损", "", lambda: hits.append("clean"))],
+        window,
+    )
+    palette.search.setText("清理")
+    if len(palette._filtered) != 1:
+        print("✗ 命令面板过滤失效：", len(palette._filtered))
+        ok = False
+    palette._accept_current()
+    if palette.selected_command is None:
+        print("✗ 命令面板未返回选中命令")
+        ok = False
+    else:
+        palette.selected_command()
+    if hits != ["clean"]:
+        print("✗ 命令面板命令执行错误：", hits)
+        ok = False
+    palette.close()
 
     # 右键「按标签重命名本目录」入口存在，且无选中时不崩（V1.4.2）
     if not hasattr(window, "rename_folder") or not hasattr(window, "_run_rename"):

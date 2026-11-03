@@ -18,10 +18,28 @@
 
 | 字体 | 用途 | 授权文本 |
 |---|---|---|
-| Noto Sans SC（Regular / Bold） | 界面主字体 | `assets/fonts/OFL-NotoSansSC.txt` |
-| JetBrains Mono（Regular / Bold） | 数据列等宽字体 | `assets/fonts/OFL-JetBrainsMono.txt` |
+| Noto Sans SC（Regular / Bold） | 中文无衬线（默认） | `assets/fonts/OFL-NotoSansSC.txt` |
+| 霞鹜文楷 LXGW WenKai（Regular） | 中文楷体 | `assets/fonts/OFL-LXGWWenKai.txt` |
+| 得意黑 Smiley Sans（Oblique） | 中文展示 | `assets/fonts/OFL-SmileySans.txt` |
+| 马善政毛笔楷书 Ma Shan Zheng | 中文书法 | `assets/fonts/OFL-MaShanZheng.txt` |
+| 站酷庆科黄油体 ZCOOL QingKe HuangYou | 中文展示 | `assets/fonts/OFL-ZCOOLQingKeHuangYou.txt` |
+| Inter（Variable） | 西文 UI | `assets/fonts/OFL-Inter.txt` |
+| IBM Plex Sans | 西文 UI | `assets/fonts/OFL-IBMPlexSans.txt` |
+| Source Sans 3 | 西文 UI | `assets/fonts/OFL-SourceSans3.txt` |
+| Fira Sans | 西文 UI | `assets/fonts/OFL-FiraSans.txt` |
+| Public Sans | 西文 UI | `assets/fonts/OFL-PublicSans.txt` |
+| Manrope | 西文 UI | `assets/fonts/OFL-Manrope.txt` |
+| Work Sans | 西文 UI | `assets/fonts/OFL-WorkSans.txt` |
+| Rubik | 西文 UI | `assets/fonts/OFL-Rubik.txt` |
+| Lato | 西文 UI | `assets/fonts/OFL-Lato.txt` |
+| Noto Sans | 西文 UI | `assets/fonts/OFL-NotoSans.txt` |
+| JetBrains Mono（Regular / Bold） | 等宽（默认） | `assets/fonts/OFL-JetBrainsMono.txt` |
+| Fira Code | 等宽连字 | `assets/fonts/OFL-FiraCode.txt` |
+| IBM Plex Mono | 等宽 | `assets/fonts/OFL-IBMPlexMono.txt` |
+| Source Code Pro | 等宽 | `assets/fonts/OFL-SourceCodePro.txt` |
+| Cascadia Code | 等宽连字 | `assets/fonts/OFL-CascadiaCode.txt` |
 
-两种字体都随软件分发，未做字形修改（未使用保留字体名）。OFL 允许随任意软件
+20 款字体都随软件分发，未做字形修改（未使用保留字体名）。OFL 允许随任意软件
 免费分发与商用，唯一义务是保留授权文本与版权声明。
 
 ## 构建期工具（不随软件分发）

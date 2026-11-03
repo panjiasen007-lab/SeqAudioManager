@@ -198,6 +198,12 @@ HOLE_MAX_WIDTH_HZ = 600.0
 SFB21_BAND = (15_500.0, 16_800.0)
 SFB21_DEPTH_DB = 8.0
 
+#: 收藏最低规格（V1.5）：低于这个标准的 PCM 直接判假无损。
+#: 16bit / 44.1kHz / 立体声 是 CD 基线；单声道、32k/22.05k、8bit 均不达标。
+MIN_PCM_SAMPLE_RATE = 44_100
+MIN_PCM_BIT_DEPTH = 16
+MIN_PCM_CHANNELS = 2
+
 VERDICT_TRUE = "真无损"
 VERDICT_SUSPECT = "疑似假无损"
 VERDICT_FAKE = "假无损"
@@ -236,6 +242,7 @@ class AuthenticityResult:
     bit_above_16: bool = False         # 存在超过 16bit 上限的样本
     bit_depth_declared: int = 0
     bit_depth_effective: int = 0
+    spec_low: bool = False             # 低于 16bit/44.1kHz/立体声，直接判假无损
     spectral_roughness: float = 0.0    # 4~16kHz 相邻频点幅度差 RMS（有损编码"锯齿"度）
     extended_flatness: float = 0.0     # 扩展带频谱平坦度（噪声填充型升频的兜底证据）
     sbr_copyup_score: float = 0.0      # SBR copy-up 去趋势相关性（HE-AAC 转码特征）
@@ -278,6 +285,8 @@ class AuthenticityResult:
     def detail_text(self) -> str:
         if self.verdict == VERDICT_UNKNOWN:
             return self.error or "未能分析"
+        if self.spec_low:
+            return "；".join(self.reasons) or "低于最低规格"
         # DSD 的「截止」永远是 DSD 自身的 Nyquist（352.5/705.2kHz），报带宽 100%
         # 毫无意义；DSD 要看的是「内容边界」和「噪声整形」两项
         if self.noise_shaping_slope or self.signal_edge_hz:
@@ -1678,6 +1687,24 @@ def _judge(
 # ---------------------------------------------------------------- 对外入口
 
 
+def pcm_spec_issues(info: AudioInfo) -> list[str]:
+    """返回低于收藏最低规格的原因；空列表表示达标。
+
+    只看声明规格，未知字段跳过（不做猜测）。DSD 不走这条规则。
+    """
+    issues: list[str] = []
+    sample_rate = info.sample_rate or 0
+    bits = info.bit_depth or 0
+    channels = info.channels or 0
+    if sample_rate and sample_rate < MIN_PCM_SAMPLE_RATE:
+        issues.append(f"采样率 {sample_rate / 1000:g}kHz")
+    if bits and bits < MIN_PCM_BIT_DEPTH:
+        issues.append(f"位深 {bits}bit")
+    if channels and channels < MIN_PCM_CHANNELS:
+        issues.append("单声道" if channels == 1 else f"{channels} 声道")
+    return issues
+
+
 def analyze(
     path: Path | str,
     info: Optional[AudioInfo] = None,
@@ -1704,14 +1731,36 @@ def analyze(
     sample_rate = info.sample_rate or 0
     result.nyquist_hz = sample_rate // 2
 
-    duration = info.duration or _probe_duration(ffmpeg, path)
-    if not duration or duration < 2:
-        result.error = "时长过短，无法分析"
-        return result
     # 有损格式（MP3/AAC/Vorbis/µ-law/AIFF-ADPCM…）没有「真假无损」可谈：
     # 它们本身就是有损的，再判「真无损」会给出完全错误的结论。
     if not info.lossless:
         result.error = f"有损格式（{info.fmt or '未知'}），不做无损鉴定"
+        return result
+
+    is_dsd = (
+        info.fmt in ("DSF", "DFF")
+        or bool(info.dsd_rate)
+        or (info.bit_depth == 1 and (info.sample_rate or 0) >= 352_800)
+    )
+    # 收藏最低规格（V1.5）：PCM 低于 16bit / 44.1kHz / 立体声 直接判假无损。
+    # 放在解码之前，既能省掉无意义的频谱分析，也避免低采样率文件的
+    # 11~16kHz 内容被有损判据误读。DSD 有自己的判据，不参与这条。
+    if not is_dsd:
+        spec_issues = pcm_spec_issues(info)
+        if spec_issues:
+            result.spec_low = True
+            result.verdict = VERDICT_FAKE
+            result.score = 0.0
+            result.bit_depth_effective = info.bit_depth or 0
+            result.reasons = [
+                "低于最低规格（要求 16bit / 44.1kHz / 立体声）："
+                + "、".join(spec_issues)
+            ]
+            return result
+
+    duration = info.duration or _probe_duration(ffmpeg, path)
+    if not duration or duration < 2:
+        result.error = "时长过短，无法分析"
         return result
 
     spectra: list[tuple[np.ndarray, np.ndarray]] = []
@@ -1719,11 +1768,6 @@ def analyze(
     analyzed = 0.0
     above_16 = False
     peak_dbfs = -200.0
-    is_dsd = (
-        info.fmt in ("DSF", "DFF")
-        or bool(info.dsd_rate)
-        or (info.bit_depth == 1 and (info.sample_rate or 0) >= 352_800)
-    )
     # DSD 的「信号边界」判据要保留整段样本做分帧统计，取能量最大的一段
     # （前奏/淡出段内容少，波动曲线会失真）
     edge_samples: Optional[np.ndarray] = None

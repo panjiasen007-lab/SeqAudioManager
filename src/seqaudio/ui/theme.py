@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------- 调色板
@@ -55,6 +56,18 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def _mix(color_a: str, color_b: str, weight_b: float) -> str:
+    """两色混合，``weight_b`` 是 color_b 的占比（0~1）。"""
+    va = color_a.lstrip("#")
+    vb = color_b.lstrip("#")
+    channels = []
+    for index in range(3):
+        a = int(va[index * 2 : index * 2 + 2], 16)
+        b = int(vb[index * 2 : index * 2 + 2], 16)
+        channels.append(round(a * (1 - weight_b) + b * weight_b))
+    return "#{:02x}{:02x}{:02x}".format(*channels)
+
+
 def _dark(
     name: str,
     accent: str,
@@ -78,33 +91,65 @@ def _dark(
 
 
 THEMES: dict[str, Palette] = {
-    "深空": _dark("深空", "#4d7cfe", cyan="#22d3ee"),
-    "春": _dark("春", "#34d399", tint="#0e1a14", cyan="#5eead4"),
-    "夏": _dark("夏", "#fbbf24", tint="#1a170e", cyan="#fde68a"),
-    "秋": _dark("秋", "#fb923c", tint="#1a120c", cyan="#fdba74"),
-    "冬": _dark("冬", "#38bdf8", tint="#0d1620", cyan="#bae6fd"),
-    "太极": _dark("太极", "#e5e7eb", base="#050505", tint="#111111",
-                 accent_hover="#ffffff", cyan="#d1d5db"),
+    "深空": _dark(
+        "深空", "#5b8cff", base="#070b16", tint="#101a30",
+        accent_hover="#7aa2ff", cyan="#2dd4bf",
+    ),
+    "黑胶": _dark(
+        "黑胶", "#f59e0b", base="#0d0a08", tint="#1c1610",
+        accent_hover="#fbbf24", cyan="#fcd34d",
+    ),
+    "春": _dark(
+        "春", "#34d399", base="#06120d", tint="#0d2118",
+        accent_hover="#6ee7b7", cyan="#2dd4bf",
+    ),
+    "夏": _dark(
+        "夏", "#fbbf24", base="#120e05", tint="#211a0a",
+        accent_hover="#fcd34d", cyan="#f59e0b",
+    ),
+    "秋": _dark(
+        "秋", "#fb923c", base="#140b06", tint="#24140b",
+        accent_hover="#fdba74", cyan="#f59e0b",
+    ),
+    "冬": _dark(
+        "冬", "#38bdf8", base="#061018", tint="#0b1c2b",
+        accent_hover="#7dd3fc", cyan="#a5f3fc",
+    ),
+    "海岸": _dark(
+        "海岸", "#10b981", base="#04110f", tint="#0a201d",
+        accent_hover="#34d399", cyan="#67e8f9",
+    ),
+    "暮光": _dark(
+        "暮光", "#a78bfa", base="#0c0714", tint="#181024",
+        accent_hover="#c4b5fd", cyan="#f0abfc",
+    ),
+    "太极": _dark(
+        "太极", "#e5e7eb", base="#050505", tint="#111111",
+        accent_hover="#ffffff", cyan="#9ca3af",
+    ),
+    "纸白": Palette(
+        name="纸白", light=True, base="#f3eee4",
+        panel="#faf6ed", card="#fffdf8", input="#fffefb",
+        hover="#efe8dc", active="#e7dfd2", table="#fdfaf3", log="#f6f1e7",
+        line="#d8cec0", line_soft="#e7ded2",
+        fg="#2a241c", fg_dim="#6b6258", fg_mute="#948a7d",
+        accent="#b45309", accent_hover="#92400e", accent_dim="#f1d0a8",
+        cyan="#0f766e", ok="#15803d", warn="#b45309", bad="#b91c1c", purple="#7c3aed",
+    ),
     "黑白极简": Palette(
-        name="黑白极简", light=True, base="#f4f5f7",
+        name="黑白极简", light=True, base="#f3f4f6",
         panel="#ffffff", card="#ffffff", input="#ffffff",
-        hover="#e8eaee", active="#dfe3ea", table="#ffffff", log="#f7f8fa",
-        line="#d4d9e0", line_soft="#e6e9ee",
-        fg="#16181d", fg_dim="#4b5563", fg_mute="#8b94a3",
-        accent="#16181d", accent_hover="#3a3f48", accent_dim="#c4c8cf",
+        hover="#e9ebef", active="#dfe3e8", table="#ffffff", log="#f7f8fa",
+        line="#d5d9df", line_soft="#e5e7eb",
+        fg="#111827", fg_dim="#4b5563", fg_mute="#8b94a3",
+        accent="#111827", accent_hover="#374151", accent_dim="#c7cbd1",
         cyan="#0e7490", ok="#059669", warn="#b45309", bad="#dc2626", purple="#6d28d9",
     ),
 }
 
 CURRENT = "深空"
 
-# ---------------------------------------------------------------- 字体（不随主题变）
-
-UI_FONT = (
-    '"Noto Sans SC", "Source Han Sans SC", "HarmonyOS Sans SC", "MiSans", '
-    '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif'
-)
-MONO_FONT = '"JetBrains Mono", "Sarasa Mono SC", "Cascadia Mono", Consolas, "Courier New", monospace'
+# ---------------------------------------------------------------- 字体（不随主题变，由 ui/fonts 动态提供）
 
 # ---------------------------------------------------------------- QSS 生成
 
@@ -125,16 +170,25 @@ def _status_colors(p: Palette) -> dict[str, tuple[str, str]]:
 
 
 def build_qss(p: Palette) -> str:
+    from . import fonts
+
     dim_border = p.line
-    return f"""
+    ui_font = fonts.ui_css()
+    mono_font = fonts.mono_css()
+    qss = f"""
 /* ============================== 基础 ============================== */
 QWidget {{
     background: transparent;
     color: {p.fg};
-    font-family: {UI_FONT};
+    font-family: {ui_font};
     font-size: 12px;
 }}
-QMainWindow {{ background: {p.base}; }}
+QMainWindow {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 {_mix(p.base, p.accent, 0.10)},
+        stop:0.42 {p.base},
+        stop:1 {_mix(p.base, p.accent, 0.04)});
+}}
 QDialog {{ background: {p.base}; }}
 
 QToolTip {{
@@ -192,11 +246,24 @@ QPushButton#success {{
 }}
 QPushButton#success:hover {{ background: {p.ok}; }}
 QPushButton#success:disabled {{ background: {_rgba(p.ok, 0.35)}; border-color: {_rgba(p.ok, 0.2)}; color: #8fc98f; }}
+QPushButton#chip {{
+    background: transparent; border: 1px solid {p.line}; border-radius: 14px;
+    padding: 3px 12px; color: {p.fg_dim}; font-size: 11px;
+}}
+QPushButton#chip:hover {{ border-color: {p.accent}; color: {p.fg}; }}
+QPushButton#chip:checked {{
+    background: {_rgba(p.accent, 0.16)}; border-color: {p.accent};
+    color: {p.fg}; font-weight: 600;
+}}
 
 /* ============================== 容器 ============================== */
 QFrame#card {{ background: {p.card}; border: 1px solid {p.line_soft}; border-radius: 10px; }}
 QFrame#statCard {{ background: {p.card}; border: 1px solid {p.line_soft}; border-radius: 9px; }}
 QFrame#statCard:hover {{ border-color: {dim_border}; }}
+QFrame#selectionBar {{
+    background: {_rgba(p.accent, 0.10)}; border: 1px solid {_rgba(p.accent, 0.28)};
+    border-radius: 9px;
+}}
 QFrame#brandBar {{ background: {_rgba(p.base, 0.72)}; border: none; border-bottom: 1px solid {p.line_soft}; }}
 QFrame#panelBox {{ background: {p.panel}; border: 1px solid {p.line_soft}; border-radius: 12px; }}
 QFrame#hLine {{ background: {p.line_soft}; border: none; }}
@@ -204,10 +271,26 @@ QFrame#hLine {{ background: {p.line_soft}; border: none; }}
 QLabel#brandTitle {{ color: {p.fg}; font-size: 16px; font-weight: 700; }}
 QLabel#brandSub {{ color: {p.fg_mute}; font-size: 10px; }}
 QLabel#statLabel {{ color: {p.fg_mute}; font-size: 11px; }}
-QLabel#statValue {{ font-family: {MONO_FONT}; font-size: 21px; font-weight: 700; }}
+QLabel#statValue {{ font-family: {mono_font}; font-size: 21px; font-weight: 700; }}
 QLabel#sectionTitle {{ color: {p.fg}; font-size: 12px; font-weight: 700; }}
 QLabel#hint {{ color: {p.fg_mute}; font-size: 11px; }}
-QLabel#mono {{ font-family: {MONO_FONT}; color: {p.fg_dim}; }}
+QLabel#strong {{ color: {p.fg}; font-weight: 600; }}
+QLabel#warnHint {{ color: {p.warn}; font-size: 11px; }}
+QLabel#mono {{ font-family: {mono_font}; color: {p.fg_dim}; }}
+QLabel#fontPreview {{
+    padding: 8px 10px; border: 1px solid {p.line_soft}; border-radius: 8px;
+    color: {p.fg_dim};
+}}
+QLabel#monoPreview {{
+    padding: 6px 10px; border: 1px solid {p.line_soft}; border-radius: 8px;
+    color: {p.fg_mute};
+}}
+QFrame#vLine {{ background: {p.line_soft}; border: none; }}
+QPushButton#smallGhost {{
+    background: transparent; border: 1px solid {p.line_soft}; border-radius: 6px;
+    color: {p.fg_mute}; padding: 1px 10px; font-size: 11px;
+}}
+QPushButton#smallGhost:hover {{ color: {p.fg}; border-color: {p.line}; }}
 
 /* ============================== 表格 ============================== */
 QTableView, QTableWidget {{
@@ -269,7 +352,7 @@ QTextBrowser {{
     background: {p.card}; border: 1px solid {p.line_soft}; border-radius: 8px;
     padding: 6px; color: {p.fg_dim};
 }}
-QTextBrowser#licenseView {{ font-family: {MONO_FONT}; font-size: 11px; }}
+QTextBrowser#licenseView {{ font-family: {mono_font}; font-size: 11px; }}
 
 /* ============================== 勾选 / 单选 ============================== */
 QCheckBox {{ spacing: 8px; color: {p.fg_dim}; background: transparent; }}
@@ -335,7 +418,7 @@ QMenu::indicator {{ width: 13px; height: 13px; margin-left: 6px; }}
 /* ============================== 日志 ============================== */
 QPlainTextEdit#logView {{
     background: {p.log}; border: 1px solid {p.line_soft}; border-radius: 10px;
-    padding: 8px 10px; font-family: {MONO_FONT}; font-size: 11px; color: {p.fg_dim};
+    padding: 8px 10px; font-family: {mono_font}; font-size: 11px; color: {p.fg_dim};
 }}
 
 /* ============================== Tab ============================== */
@@ -344,6 +427,12 @@ QTabBar::tab {{ background: transparent; padding: 8px 16px; color: {p.fg_mute}; 
 QTabBar::tab:hover {{ color: {p.fg_dim}; }}
 QTabBar::tab:selected {{ color: {p.fg}; border-bottom-color: {p.accent}; }}
 """
+    # 字号倍率：QSS 里所有 font-size:Npx 统一缩放，避免逐条改模板
+    return re.sub(
+        r"font-size:\s*(\d+)px",
+        lambda m: f"font-size: {fonts.scale_px(int(m.group(1)))}px",
+        qss,
+    )
 
 
 # ---------------------------------------------------------------- 运行时应用

@@ -10,6 +10,8 @@ from typing import Optional
 from PySide6.QtCore import QEvent, QItemSelectionModel, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -38,9 +41,17 @@ from ..core.config import PresetStore, Settings
 from ..core.logging_setup import add_listener, remove_listener
 from ..core.model import Tags, Track, TrackStatus
 from ..pipeline.processor import BatchOptions
-from . import i18n, theme
+from . import fonts, i18n, theme
 from .delegate import TrackDelegate
-from .dialogs import BatchTagEditDialog, CandidateDialog, RenamePreviewDialog, TagEditDialog
+from .dialogs import (
+    BatchTagEditDialog,
+    CandidateDialog,
+    CommandPaletteDialog,
+    RenamePreviewDialog,
+    TagEditDialog,
+)
+from .health import HealthDialog
+from .inspector import InspectorPanel
 from .settings_panel import SettingsPanel
 from .track_model import (
     COLUMNS,
@@ -81,11 +92,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         i18n.set_locale(getattr(settings, "language", "zh_CN") or "zh_CN")
         self.settings = settings
+        # 字体必须在构建控件之前选好：QSS 里的 font-family 与全局字体都依赖它
+        fonts.configure(settings.ui_font, settings.mono_font, settings.font_scale)
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(fonts.ui_font(13))
         self.presets = PresetStore()
         self.worker: Optional[ProcessorWorker] = None
         self.scan_worker: Optional[ScanWorker] = None
         self.revert_scan_worker: Optional[ScanWorker] = None
         self._revert_targets: list[Track] = []
+        self._undo_stack: list[tuple[list[Track], list[Tags]]] = []
         self._match_workers: list[MatchPreviewWorker] = []
         self.auth_worker: Optional[AuthenticityWorker] = None
         self.cover_worker: Optional[CoverWorker] = None
@@ -146,8 +163,20 @@ class MainWindow(QMainWindow):
         self.settings_panel = SettingsPanel(self.settings)
         self.settings_panel.settingsChanged.connect(self._on_settings_changed)
         self.settings_panel.saved.connect(self._on_settings_saved)
+        self.settings_panel.appearancePreviewChanged.connect(self._preview_appearance)
+
+        self.inspector = InspectorPanel()
+        self.inspector.editRequested.connect(self.edit_selected)
+        self.inspector.spectrumRequested.connect(self.show_spectrum)
+
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setDocumentMode(True)
+        self.right_tabs.addTab(self.inspector, "详情")
+        self.right_tabs.addTab(self.settings_panel, "参数")
+        self.right_tabs.setCurrentWidget(self.inspector)
+
         QTimer.singleShot(0, lambda: self.btn_toggle_panel.setChecked(True))
-        splitter.addWidget(self.settings_panel)
+        splitter.addWidget(self.right_tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([1040, 348])
@@ -167,7 +196,7 @@ class MainWindow(QMainWindow):
         self.status_hint = QLabel("拖入音频文件，或点击「添加文件夹」")
         status.addWidget(self.status_hint, 1)
         self.mode_label = QLabel("")
-        self.mode_label.setStyleSheet(f"color:{theme.FG_MUTE};")
+        self.mode_label.setObjectName("hint")
         status.addPermanentWidget(self.mode_label)
 
     def _build_action_bar(self) -> QWidget:
@@ -221,7 +250,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_more)
 
         # 窄屏救星：收起参数面板，表格独占整宽
-        self.btn_toggle_panel = self._button(i18n.tr("panel"), self.toggle_settings_panel, ghost=True, i18n_key="panel")
+        self.btn_toggle_panel = self._button(i18n.tr("sidebar"), self.toggle_settings_panel, ghost=True, i18n_key="sidebar")
         self.btn_toggle_panel.setCheckable(True)
         self.btn_toggle_panel.setToolTip("显示 / 隐藏右侧参数面板（Ctrl+P）")
         layout.addWidget(self.btn_toggle_panel)
@@ -232,6 +261,7 @@ class MainWindow(QMainWindow):
 
         self.action_rename = menu.addAction("重命名预览…", self.rename_preview)
         self.action_report = menu.addAction("导出处理报表…", self.export_report)
+        menu.addAction("曲库体检…", self.open_health)
         menu.addAction("批量导出封面…", self.export_covers)
         menu.addAction("生成文件夹封面", self.run_folder_covers)
         menu.addSeparator()
@@ -261,6 +291,7 @@ class MainWindow(QMainWindow):
             self._theme_actions[name] = action
 
         menu.addSeparator()
+        menu.addAction("命令面板…", self.show_command_palette)
         menu.addAction("打开日志目录", self._open_log_dir)
         menu.addSeparator()
         menu.addAction("关于音序管家…", self.show_about)
@@ -271,8 +302,8 @@ class MainWindow(QMainWindow):
         return None
 
     def toggle_settings_panel(self) -> None:
-        visible = not self.settings_panel.isVisible()
-        self.settings_panel.setVisible(visible)
+        visible = not self.right_tabs.isVisible()
+        self.right_tabs.setVisible(visible)
         self.btn_toggle_panel.setChecked(visible)
 
     def _button(self, text: str, slot, ghost: bool = False, i18n_key: str = "") -> QPushButton:
@@ -289,8 +320,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _vline() -> QFrame:
         line = QFrame()
+        line.setObjectName("vLine")
         line.setFixedSize(1, 20)
-        line.setStyleSheet(f"background:{theme.LINE}; border:none;")
         return line
 
     def _build_stat_row(self) -> QHBoxLayout:
@@ -334,22 +365,6 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self.lossless_check)
         filter_row.addWidget(self.problems_check)
 
-        self.verdict_combo = QComboBox()
-        self.verdict_combo.setFixedHeight(34)
-        self.verdict_combo.setMinimumWidth(118)
-        self._verdict_filter_items = [
-            ("filter_all", "all"),
-            ("verdict_true", "true"),
-            ("verdict_fake", "fake"),
-            ("filter_suspect", "suspect"),
-            ("filter_any", "suspect_any"),
-            ("verdict_unknown", "unknown"),
-        ]
-        for label_key, key in self._verdict_filter_items:
-            self.verdict_combo.addItem(i18n.tr(label_key), key)
-        self.verdict_combo.currentIndexChanged.connect(self._on_verdict_filter)
-        filter_row.addWidget(self.verdict_combo)
-
         self.spec_combo = QComboBox()
         self.spec_combo.setFixedHeight(34)
         self.spec_combo.setMinimumWidth(112)
@@ -370,6 +385,60 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(self.spec_combo)
         layout.addLayout(filter_row)
 
+        # 判定筛选胶囊：带数量，点一下即可切换
+        self._verdict_filter_items = [
+            ("filter_all", "all"),
+            ("verdict_true", "true"),
+            ("verdict_fake", "fake"),
+            ("filter_any", "suspect_any"),
+            ("verdict_unknown", "unknown"),
+        ]
+        self._verdict_key = "all"
+        self._verdict_counts: dict[str, int] = {}
+        self.verdict_chips: dict[str, QPushButton] = {}
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(6)
+        self._verdict_group = QButtonGroup(self)
+        self._verdict_group.setExclusive(True)
+        for label_key, key in self._verdict_filter_items:
+            chip = QPushButton(i18n.tr(label_key))
+            chip.setObjectName("chip")
+            chip.setCheckable(True)
+            chip.setFixedHeight(28)
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.clicked.connect(lambda _checked, k=key: self._select_verdict_filter(k))
+            self._verdict_group.addButton(chip)
+            self.verdict_chips[key] = chip
+            chip_row.addWidget(chip)
+        self.verdict_chips["all"].setChecked(True)
+        chip_row.addStretch(1)
+        layout.addLayout(chip_row)
+
+        # 选中操作条：有选中项时才出现，减少工具栏常驻按钮
+        self.selection_bar = QFrame()
+        self.selection_bar.setObjectName("selectionBar")
+        self.selection_bar.setVisible(False)
+        sel_layout = QHBoxLayout(self.selection_bar)
+        sel_layout.setContentsMargins(12, 6, 10, 6)
+        sel_layout.setSpacing(8)
+        self.selection_label = QLabel("已选 0 首")
+        self.selection_label.setObjectName("strong")
+        sel_layout.addWidget(self.selection_label)
+        sel_layout.addStretch(1)
+        for text, slot in (
+            ("鉴定", self.run_authenticity),
+            ("编辑标签", self.edit_selected),
+            ("清理", self.run_cleanup),
+            ("取消选择", lambda: self.table.clearSelection()),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("ghost")
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(slot)
+            sel_layout.addWidget(btn)
+        layout.addWidget(self.selection_bar)
+
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setItemDelegate(TrackDelegate(self.table))
@@ -384,16 +453,35 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setHighlightSections(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
+        saved_widths = (
+            list(self.settings.column_widths)
+            if self.settings.view_state_saved
+            else []
+        )
         for index, (_, _, width) in enumerate(COLUMNS):
-            self.table.setColumnWidth(index, width)
+            initial = saved_widths[index] if index < len(saved_widths) else width
+            self.table.setColumnWidth(index, max(24, initial))
         self.table.horizontalHeader().setSectionResizeMode(STRETCH_COLUMN, QHeaderView.Stretch)
-        for index in HIDDEN_BY_DEFAULT:
-            self.table.setColumnHidden(index, True)
+        hidden = (
+            set(self.settings.hidden_columns)
+            if self.settings.view_state_saved
+            else set(HIDDEN_BY_DEFAULT)
+        )
+        for index in range(len(COLUMNS)):
+            self.table.setColumnHidden(index, index in hidden)
+        if self.settings.view_state_saved and self.settings.sort_column >= 0:
+            order = (
+                Qt.DescendingOrder
+                if self.settings.sort_order == 1
+                else Qt.AscendingOrder
+            )
+            self.table.sortByColumn(self.settings.sort_column, order)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.horizontalHeader().customContextMenuRequested.connect(self._header_menu)
         self.table.doubleClicked.connect(lambda _: self.edit_selected())
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
         # 空列表引导层：铺在 viewport 上，随尺寸变化自适应
         self.empty_state = EmptyState(parent=self.table.viewport())
@@ -417,14 +505,16 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.addWidget(SectionHeader("运行日志", "识别失败的具体原因都在这里"))
         head.addStretch(1)
+        self.btn_log_toggle = QPushButton("收起")
+        self.btn_log_toggle.setObjectName("smallGhost")
+        self.btn_log_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_log_toggle.setFixedHeight(22)
+        self.btn_log_toggle.clicked.connect(self._toggle_log)
+        head.addWidget(self.btn_log_toggle)
         self.btn_log_clear = QPushButton("清空")
+        self.btn_log_clear.setObjectName("smallGhost")
         self.btn_log_clear.setCursor(Qt.PointingHandCursor)
         self.btn_log_clear.setFixedHeight(22)
-        self.btn_log_clear.setStyleSheet(
-            f"QPushButton{{background:transparent;border:1px solid {theme.LINE_SOFT};"
-            f"border-radius:6px;color:{theme.FG_MUTE};padding:1px 10px;font-size:11px;}}"
-            f"QPushButton:hover{{color:{theme.FG};border-color:{theme.LINE};}}"
-        )
         self.btn_log_clear.clicked.connect(lambda: self.log_view.clear())
         head.addWidget(self.btn_log_clear)
         layout.addLayout(head)
@@ -439,11 +529,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_view)
         return wrapper
 
+    def _toggle_log(self) -> None:
+        visible = not self.log_view.isVisible()
+        self.log_view.setVisible(visible)
+        self.btn_log_toggle.setText("收起" if visible else "展开")
+
     def _init_shortcuts(self) -> None:
         QShortcut(QKeySequence.Open, self, self.add_folder)
         QShortcut(QKeySequence.Delete, self, self.remove_selected)
+        undo = QShortcut(QKeySequence.Undo, self.table)
+        undo.setContext(Qt.WidgetWithChildrenShortcut)
+        undo.activated.connect(self.undo_last_tag_edit)
         QShortcut(QKeySequence("Ctrl+Return"), self, self.run_auto)
         QShortcut(QKeySequence("Ctrl+E"), self, self.edit_selected)
+        QShortcut(QKeySequence("Ctrl+K"), self, self.show_command_palette)
         QShortcut(QKeySequence("Ctrl+P"), self, self.toggle_settings_panel)
         QShortcut(QKeySequence("Ctrl+S"), self, self.settings_panel.save)
         QShortcut(QKeySequence("Ctrl+Shift+D"), self, self.run_cleanup)
@@ -866,6 +965,7 @@ class MainWindow(QMainWindow):
         track = tracks[0]
         dialog = TagEditDialog(track, self)
         if dialog.exec() == TagEditDialog.Accepted:
+            self._push_tag_undo(tracks)
             track.working = dialog.result_tags()
             track.status = TrackStatus.PENDING
             track.changed_fields = [
@@ -880,6 +980,33 @@ class MainWindow(QMainWindow):
                 track.changed_fields.append("cover")
             track.note("已手动编辑，等待写入")
             self.model.refresh_row(track)
+            if getattr(self, "inspector", None) is not None:
+                self.inspector.refresh()
+
+    def _push_tag_undo(self, tracks: list[Track]) -> None:
+        """记录写盘前的标签快照，支持 Ctrl+Z 撤销（最多 30 步）。"""
+        self._undo_stack.append((list(tracks), [t.working.copy() for t in tracks]))
+        if len(self._undo_stack) > 30:
+            self._undo_stack.pop(0)
+
+    def undo_last_tag_edit(self) -> None:
+        if not self._undo_stack:
+            QMessageBox.information(self, "没有可撤销的操作", "当前没有可撤销的标签编辑。")
+            return
+        tracks, snapshots = self._undo_stack.pop()
+        from ..pipeline.processor import Processor
+
+        for track, snapshot in zip(tracks, snapshots):
+            track.working = snapshot
+            track.status = TrackStatus.PENDING
+            track.notes = [n for n in track.notes if n != "已手动编辑，等待写入"]
+            Processor._rebuild_changed_fields(track)
+            self.model.refresh_row(track)
+        self._refresh_stats()
+        if getattr(self, "inspector", None) is not None:
+            self.inspector.refresh()
+        self._append_log("INFO", f"已撤销 {len(tracks)} 首的标签编辑")
+        self.status_hint.setText(f"已撤销 {len(tracks)} 首的标签编辑")
 
     def batch_edit_selected(self) -> None:
         """批量编辑选中曲目的标签：只有勾选的字段才会被修改（V1.1）。"""
@@ -895,8 +1022,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "未选择字段", "请至少勾选一个要修改的字段。")
             return
 
+        self._push_tag_undo(tracks)
         changed_count = self._apply_batch_values(tracks, values)
         self._refresh_stats()
+        if getattr(self, "inspector", None) is not None:
+            self.inspector.refresh()
         self._append_log(
             "INFO",
             f"批量编辑 {len(tracks)} 首，实际变更 {changed_count} 首"
@@ -1064,6 +1194,7 @@ class MainWindow(QMainWindow):
         menu.addAction("批量编辑标签…", self.batch_edit_selected)
         menu.addAction("查看候选匹配", self.show_candidates)
         menu.addAction("确认匹配（采纳最佳候选）", self.confirm_selected)
+        menu.addAction("撤销标签编辑", self.undo_last_tag_edit)
         menu.addAction("撤销本地修改", self.revert_selected)
         menu.addSeparator()
         menu.addAction("查看频谱", self.show_spectrum)
@@ -1078,11 +1209,22 @@ class MainWindow(QMainWindow):
         menu.addAction("仅处理选中项", self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def _on_selection_changed(self, *_) -> None:
+        tracks = self._selected_tracks()
+        self.selection_bar.setVisible(bool(tracks))
+        if tracks:
+            self.selection_label.setText(f"已选 {len(tracks)} 首")
+        self.inspector.set_track(tracks[0] if tracks else None)
+
     def _select_verdict_filter(self, key: str) -> None:
-        for index in range(self.verdict_combo.count()):
-            if self.verdict_combo.itemData(index) == key:
-                self.verdict_combo.setCurrentIndex(index)
-                return
+        chip = self.verdict_chips.get(key)
+        if chip is None:
+            return
+        self._verdict_key = key
+        chip.blockSignals(True)
+        chip.setChecked(True)
+        chip.blockSignals(False)
+        self.proxy.set_verdict_group(key)
 
     def _quarantine_selected(self) -> None:
         """右键直接把选中项送进隔离区（不弹清单，仅对已鉴定的项生效）。"""
@@ -1439,6 +1581,97 @@ class MainWindow(QMainWindow):
 
         AboutDialog(self).exec()
 
+    def open_health(self) -> None:
+        if not self.model.tracks():
+            QMessageBox.information(self, "没有曲目", "请先添加音频文件或文件夹。")
+            return
+        HealthDialog(self.model.tracks(), self).exec()
+
+    def _show_settings_tab(self, index: int) -> None:
+        self.right_tabs.setVisible(True)
+        self.right_tabs.setCurrentWidget(self.settings_panel)
+        self.settings_panel.tabs.setCurrentIndex(max(0, min(index, self.settings_panel.tabs.count() - 1)))
+        self.btn_toggle_panel.setChecked(True)
+
+    def _apply_font_command(self, ui_id: str) -> None:
+        panel = self.settings_panel
+        index = panel.ui_font_combo.findData(ui_id)
+        if index >= 0:
+            panel.ui_font_combo.setCurrentIndex(index)
+            panel.save()
+
+    def _apply_scale_command(self, scale: float) -> None:
+        panel = self.settings_panel
+        index = panel.font_scale_combo.findData(scale)
+        if index >= 0:
+            panel.font_scale_combo.setCurrentIndex(index)
+            panel.save()
+
+    def _toggle_setting_widget(self, attr: str) -> None:
+        panel_widget = getattr(self.settings_panel, attr, None)
+        if panel_widget is not None:
+            panel_widget.setChecked(not panel_widget.isChecked())
+            self.settings_panel.save()
+            return
+        window_widget = getattr(self, attr, None)
+        if window_widget is not None:
+            window_widget.setChecked(not window_widget.isChecked())
+
+    def show_command_palette(self) -> None:
+        commands: list[tuple[str, str, str, object]] = []
+
+        def add(group: str, name: str, shortcut: str, callback) -> None:
+            commands.append((group, name, shortcut, callback))
+
+        add("操作", "添加文件", "", self.add_files)
+        add("操作", "添加文件夹", "Ctrl+O", self.add_folder)
+        add("操作", "一键全自动", "Ctrl+Return", self.run_auto)
+        add("操作", "仅本地处理", "", self.run_local_only)
+        add("操作", "保存全部变更", "", self.confirm_save_all)
+        add("操作", "真假无损鉴定", "", self.run_authenticity)
+        add("操作", "清理假无损", "Ctrl+Shift+D", self.run_cleanup)
+        add("操作", "曲库体检", "", self.open_health)
+        add("操作", "编辑标签", "Ctrl+E", self.edit_selected)
+        add("操作", "批量编辑标签", "", self.batch_edit_selected)
+        add("操作", "撤销标签编辑", "Ctrl+Z", self.undo_last_tag_edit)
+        add("操作", "查看频谱", "", self.show_spectrum)
+        add("操作", "重命名预览", "", self.rename_preview)
+        add("操作", "导出处理报表", "", self.export_report)
+        add("操作", "批量导出封面", "", self.export_covers)
+        add("操作", "隔离区管理", "", self.open_quarantine)
+        add("操作", "收起 / 展开日志", "", self._toggle_log)
+        add("操作", "关于音序管家", "F1", self.show_about)
+
+        for index, (title, _) in enumerate(("匹配", "歌词", "写入", "外观")):
+            add("设置", f"打开参数页：{title}", "", lambda i=index: self._show_settings_tab(i))
+        add("设置", "侧栏显示 / 隐藏", "Ctrl+P", self.toggle_settings_panel)
+
+        add("筛选", "判定：全部", "", lambda: self._select_verdict_filter("all"))
+        add("筛选", "判定：真无损", "", lambda: self._select_verdict_filter("true"))
+        add("筛选", "判定：假无损", "", lambda: self._select_verdict_filter("fake"))
+        add("筛选", "判定：假无损 + 可疑", "", lambda: self._select_verdict_filter("suspect_any"))
+        add("筛选", "判定：无法判定", "", lambda: self._select_verdict_filter("unknown"))
+        add("筛选", "只看无损（开关）", "", lambda: self._toggle_setting_widget("lossless_check"))
+        add("筛选", "只看问题（开关）", "", lambda: self._toggle_setting_widget("problems_check"))
+
+        for name in theme.THEMES:
+            add("外观", f"主题：{i18n.tr_theme(name)}", "", lambda n=name: self.apply_theme(n))
+        for choice in fonts.UI_CHOICES:
+            add("外观", f"界面字体：{choice.name}", "", lambda f=choice.id: self._apply_font_command(f))
+        for label, value in (("90%", 0.9), ("100%", 1.0), ("110%", 1.1), ("125%", 1.25)):
+            add("外观", f"字号：{label}", "", lambda v=value: self._apply_scale_command(v))
+
+        add("设置", "递归扫描（开关）", "", lambda: self._toggle_setting_widget("recursive_check"))
+        add("设置", "清理时包含「疑似」（开关）", "", lambda: self._toggle_setting_widget("suspect_check"))
+        add("设置", "每个文件夹生成封面（开关）", "", lambda: self._toggle_setting_widget("cover_check"))
+        add("设置", "自动重命名（开关）", "", lambda: self._toggle_setting_widget("rename_check"))
+        add("设置", "兼容模式 ID3v2.3（开关）", "", lambda: self._toggle_setting_widget("compat_check"))
+        add("设置", "联网匹配（开关）", "", lambda: self._toggle_setting_widget("online_check"))
+
+        dialog = CommandPaletteDialog(commands, self)
+        if dialog.exec() == CommandPaletteDialog.Accepted and dialog.selected_command:
+            dialog.selected_command()
+
     def _open_log_dir(self) -> None:
         import os as _os
 
@@ -1460,17 +1693,8 @@ class MainWindow(QMainWindow):
         for key, title_key in self._i18n_stat_keys.items():
             self._stat_cards[key].title_label.setText(i18n.tr(title_key))
 
-        # 判定筛选下拉：重建标签，保持当前选择
-        current_data = self.verdict_combo.currentData()
-        self.verdict_combo.blockSignals(True)
-        self.verdict_combo.clear()
-        for label_key, key in self._verdict_filter_items:
-            self.verdict_combo.addItem(i18n.tr(label_key), key)
-        self.verdict_combo.setCurrentIndex(
-            next((i for i in range(self.verdict_combo.count())
-                  if self.verdict_combo.itemData(i) == current_data), 0)
-        )
-        self.verdict_combo.blockSignals(False)
+        # 判定筛选胶囊：只更新文字，数量和当前选择保持不变
+        self._update_verdict_chips()
 
         # 菜单标题与主题项
         self.lang_menu.setTitle(i18n.tr("menu_language"))
@@ -1491,10 +1715,18 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 主题
 
-    def apply_theme(self, name: str, *, persist: bool = True) -> None:
+    def _preview_appearance(self, ui_id: str, mono_id: str, scale: float) -> None:
+        """字体/字号即时预览：只改当前会话，点「保存参数」后才持久化。"""
+        fonts.configure(ui_id, mono_id, scale)
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(fonts.ui_font(13))
+        self.apply_theme(self.settings.theme, persist=False, quiet=True)
+        self.status_hint.setText("字体已预览，点击「保存参数」后生效")
+
+    def apply_theme(self, name: str, *, persist: bool = True, quiet: bool = False) -> None:
         if name not in theme.THEMES:
             return
-        from PySide6.QtWidgets import QApplication
 
         qss = theme.apply_theme(name)
         QApplication.instance().setStyleSheet(qss)
@@ -1506,6 +1738,19 @@ class MainWindow(QMainWindow):
         self.model.refresh_all()
         for card in self._stat_cards.values():
             card.restyle()
+        if getattr(self, "inspector", None) is not None:
+            self.inspector.refresh()
+        try:
+            from .win_effects import apply_titlebar
+
+            apply_titlebar(
+                int(self.winId()),
+                dark=not theme.is_light(name),
+                caption=theme.BG_BASE,
+                border=theme.LINE,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         self.brand_bar.update()
         self.update()
         if persist:
@@ -1513,10 +1758,16 @@ class MainWindow(QMainWindow):
                 self.settings.save()
             except OSError:
                 pass
-        self._append_log("INFO", f"主题已切换：{name}")
+        if not quiet:
+            self._append_log("INFO", f"主题已切换：{name}")
 
-    def _on_verdict_filter(self) -> None:
-        self.proxy.set_verdict_group(str(self.verdict_combo.currentData()))
+    def _update_verdict_chips(self) -> None:
+        for label_key, key in self._verdict_filter_items:
+            text = i18n.tr(label_key)
+            count = self._verdict_counts.get(key, 0)
+            if count:
+                text = f"{text}  {count}"
+            self.verdict_chips[key].setText(text)
 
     def _on_spec_filter(self) -> None:
         self.proxy.set_spec_filter(str(self.spec_combo.currentData()))
@@ -1764,6 +2015,28 @@ class MainWindow(QMainWindow):
             if card is not None:
                 card.set_value(value)
 
+        from ..core.authenticity import group_of
+
+        counts = {key: 0 for _, key in self._verdict_filter_items}
+        counts["all"] = len(tracks)
+        for track in tracks:
+            group = (
+                group_of(track.authenticity.verdict)
+                if track.authenticity is not None
+                else "unknown"
+            )
+            if group == "true":
+                counts["true"] += 1
+            elif group == "fake":
+                counts["fake"] += 1
+                counts["suspect_any"] += 1
+            elif group == "suspect":
+                counts["suspect_any"] += 1
+            else:
+                counts["unknown"] += 1
+        self._verdict_counts = counts
+        self._update_verdict_chips()
+
         self.empty_state.setVisible(not tracks)
         if not tracks:
             self.status_hint.setText("拖入音频文件，或点击「添加文件夹」")
@@ -1835,8 +2108,25 @@ class MainWindow(QMainWindow):
                 return
             if clicked is save_btn:
                 self.settings_panel.save()
+        self._save_view_state()
         remove_listener(self._log_listener)
         event.accept()
+
+    def _save_view_state(self) -> None:
+        """退出时保存列宽、隐藏列与排序，下次打开保持原样。"""
+        header = self.table.horizontalHeader()
+        count = self.table.model().columnCount()
+        self.settings.column_widths = [header.sectionSize(i) for i in range(count)]
+        self.settings.hidden_columns = [
+            i for i in range(count) if self.table.isColumnHidden(i)
+        ]
+        self.settings.sort_column = header.sortIndicatorSection()
+        self.settings.sort_order = 1 if header.sortIndicatorOrder() == Qt.DescendingOrder else 0
+        self.settings.view_state_saved = True
+        try:
+            self.settings.save()
+        except OSError:
+            pass
 
 
 def _escape(text: str) -> str:
