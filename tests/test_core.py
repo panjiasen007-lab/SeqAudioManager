@@ -860,7 +860,7 @@ class TestAuthenticity(unittest.TestCase):
         """16bit 内容存进 24bit 容器时，有效位深应仍识别为 16。"""
         from seqaudio.core.authenticity import _decode_segment, _effective_bit_depth
 
-        samples, _ = _decode_segment(_ffmpeg(), self.true_wav, 3.0, 2.0)
+        samples, _, _ = _decode_segment(_ffmpeg(), self.true_wav, 3.0, 2.0)
         self.assertEqual(_effective_bit_depth(samples), 16)
 
     def test_mp3_file_can_be_decoded(self) -> None:
@@ -2561,6 +2561,18 @@ class TestPcmUpsampleCliff(unittest.TestCase):
         self.assertLess(score, 0.5)
         self.assertTrue(any("44.1" in r for r in reasons), reasons)
 
+    def test_off_boundary_step_not_upsample(self) -> None:
+        """48k 母带在 21.2kHz 自身低通：22.05k 处的台阶不能判升频。"""
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            _FakeInfo(48_000, 24), 21_200.0, 8.0, -40.0, 24,
+            steep_oct=20.0, edge_db=-85.0, ratio=0.88, holes=0.0, sfb21=0.0,
+            above16=True, peak_dbfs=-4.0, depth_padding=False,
+            upsample_src=44_100.0, upsample_step=19.0,
+        )
+        self.assertEqual(verdict, "真无损", reasons)
+
 
 class _FakeInfo:
     def __init__(self, sample_rate: int, bit_depth: int):
@@ -2965,6 +2977,79 @@ class TestSacdIso(unittest.TestCase):
         iso.write_bytes(b"not a real iso")
         result = analyze(iso)
         self.assertIn("SACD ISO", result.error)
+
+
+class TestWallStepAndStereo(unittest.TestCase):
+    """V1.5.2：墙 vs 斜坡判据 + 立体声频谱 + 配色无关性。"""
+
+    def _spectrum(self, cutoff_hz: float, wall: bool):
+        import numpy as np
+
+        freqs = np.arange(0, 24000, 5.0)
+        db = np.full_like(freqs, -20.0)
+        if wall:
+            db[freqs >= cutoff_hz] = -80.0
+        else:
+            # 2kHz 内从 -10dB 平缓滚到 -30dB，250Hz 落差只有几 dB
+            mask = (freqs >= cutoff_hz - 2000) & (freqs < cutoff_hz)
+            db[mask] = -10.0 - (freqs[mask] - (cutoff_hz - 2000)) * 0.01
+            db[freqs >= cutoff_hz] = -30.0
+        return freqs, db
+
+    def test_wall_step_detects_brickwall(self) -> None:
+        from seqaudio.core.authenticity import _wall_step
+
+        freqs, db = self._spectrum(16000.0, wall=True)
+        self.assertGreaterEqual(_wall_step(freqs, db, 16000.0), 20.0)
+
+    def test_wall_step_rejects_slope(self) -> None:
+        from seqaudio.core.authenticity import _wall_step
+
+        freqs, db = self._spectrum(16000.0, wall=False)
+        self.assertLess(_wall_step(freqs, db, 16000.0), 12.0)
+
+    def test_stereo_spectrum_sees_right_channel_only(self) -> None:
+        """只有右声道有 16kHz 内容时，也不该被当成「高频被砍」。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import (
+            FFT_SIZE,
+            _find_cutoff,
+            _average_spectrum_stereo,
+        )
+
+        sr = 44100
+        t = np.arange(FFT_SIZE * 2) / sr
+        left = np.zeros_like(t)
+        right = np.sin(2 * np.pi * 16000 * t) * 0.5
+        freqs, db = _average_spectrum_stereo(left, right, sr)
+        cutoff, _, _ = _find_cutoff(freqs, db)
+        self.assertGreater(cutoff, 14000.0)
+
+    def test_identical_channels_match_mono(self) -> None:
+        """两声道相同的素材，立体声功率谱应与单声道完全一致。"""
+        import numpy as np
+
+        from seqaudio.core.authenticity import (
+            FFT_SIZE,
+            _average_spectrum,
+            _average_spectrum_stereo,
+        )
+
+        rng = np.random.default_rng(7)
+        data = rng.integers(-1000, 1000, FFT_SIZE * 2).astype(np.int32)
+        mono_f, mono_db = _average_spectrum(data, 44100)
+        st_f, st_db = _average_spectrum_stereo(data, data, 44100)
+        self.assertTrue(np.allclose(mono_f, st_f))
+        self.assertTrue(np.allclose(mono_db, st_db, atol=1e-6))
+
+    def test_algorithm_has_no_color_dependency(self) -> None:
+        """判据必须在 dB 域算，不能读界面配色/像素。"""
+        from seqaudio.core import authenticity
+
+        source = Path(authenticity.__file__).read_text(encoding="utf-8")
+        for token in ("QColor", "QPixmap", "QImage", "cmap", "_LUT", "colormap"):
+            self.assertNotIn(token, source)
 
 
 if __name__ == "__main__":

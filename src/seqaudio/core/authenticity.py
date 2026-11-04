@@ -20,6 +20,23 @@
 
 DSD 单独处理：真 DSD 因为噪声整形，20kHz 以上能量异常高且能延伸到 100kHz 附近；
 PCM 转的假 DSD 在 22.05kHz 以上会直接掉到地板。
+## 判定与界面配色无关
+
+所有判据都在 **dB 域** 用 numpy 数值计算（FFT 幅度、频段能量、帧间波动），
+不读取界面渲染出的像素或颜色；`ui/spectrum.py` 只负责把 dB 矩阵映射成 RGB
+用于显示。因此切换主题、调整色阶、换调色板都不会改变鉴定结论。
+
+参考（2026）
+------------
+* D'Alessandro & Shi, *MP3 Bit Rate Quality Detection through Frequency
+  Spectrum Analysis*（ACM MM&Sec 2009）：16~20kHz 的功率谱密度是码率指纹，
+  转码后不会改变；256k CBR 与 VBR-0 是唯一天然重叠区。
+* Lacroix et al., *Lossless Audio Checker*（AES 139th, 2015）：升位深用纯时域
+  判决（样本是否越过 16bit 上限）；升采样看扩展带能量是否高于声明位深对应的
+  量化噪声底。
+* FLAC Detective（2026）的 Gate D 经验：**「斜率不是墙」**。截止位置本身
+  无法区分编码器低通与母带自然滚降，真正能分开的是**截止处 250Hz 内的落差**：
+  编码器低通在 250Hz 内掉 20~40dB，自然滚降通常只有几 dB。
 """
 
 from __future__ import annotations
@@ -181,6 +198,17 @@ CUTOFF_MEDIAN_DB = 62.0
 STEEP_ENCODER_OCT = 60.0
 STEEP_NATURAL_OCT = 28.0
 
+#: 「墙 vs 斜坡」判据（参考 FLAC Detective Gate D）：
+#: 在截止点 ±1kHz 内按 250Hz 分格，取相邻格的最大落差。
+#: 编码器低通在 250Hz 内通常掉 20~40dB；母带/磁带自然滚降只有几 dB。
+#: 12dB 位于两者之间（实测 LAME 转码 19~51dB，自然滚降 4.5~6.2dB）。
+WALL_CELL_HZ = 250.0
+WALL_SEARCH_HZ = 1000.0
+WALL_MIN_STEP_DB = 12.0
+#: 320k 分支的残余能量阈值：断崖之上仍有模拟底噪时更像母带低通，
+#: 而不是码率压缩留下的数字空白。
+W320_RESIDUAL_DB = -85.0
+
 #: 升采样：截止低于该比例 × Nyquist，且扩展带能量低于阈值
 UPSAMPLE_RATIO = 0.96
 UPSAMPLE_EDGE_DB = -95.0
@@ -233,6 +261,7 @@ class AuthenticityResult:
     nyquist_hz: int = 0                # 理论最高频率
     steepness_db: float = 0.0          # 截止处下降速度（dB/kHz，历史字段）
     steepness_oct: float = 0.0         # 截止处下降速度（dB/oct，与文献可比）
+    wall_step_db: float = 0.0          # 截止处 250Hz 内的最大落差（墙 vs 斜坡）
     peak_db: float = 0.0               # 轨道频谱峰值（绝对 dB），判据的参考点
     edge_energy_db: float = 0.0        # 截止之上到 Nyquist 的能量（相对峰值）
     bandwidth_ratio: float = 0.0       # 截止 / Nyquist
@@ -304,7 +333,9 @@ class AuthenticityResult:
         parts = [f"截止 {self.cutoff_hz / 1000:.1f}kHz / 上限 {self.nyquist_hz / 1000:.1f}kHz"]
         if self.bandwidth_ratio:
             parts.append(f"带宽 {self.bandwidth_ratio:.0%}")
-        if self.steepness_oct:
+        if self.wall_step_db:
+            parts.append(f"断崖 {self.wall_step_db:.0f}dB")
+        elif self.steepness_oct:
             parts.append(f"陡度 {self.steepness_oct:.0f}dB/oct")
         if self.edge_energy_db:
             parts.append(f"扩展带 {self.edge_energy_db:.0f}dB")
@@ -370,8 +401,8 @@ def _decode_segment(
     seconds: float,
     sample_rate: Optional[int] = None,
     sample_rate_hint: int = 0,
-) -> Optional[tuple[np.ndarray, int]]:
-    """解码一段音频为单声道 float32。
+) -> Optional[tuple[np.ndarray, np.ndarray, int]]:
+    """解码一段音频为左右声道 float32（供频谱分析）。
 
     注意**不要重采样**：重采样会在 Nyquist 附近做抗混叠滤波，
     把我们要找的"频谱悬崖"抹平，鉴定就失效了。
@@ -410,8 +441,12 @@ def _decode_segment(
     data = np.frombuffer(proc.stdout, dtype="<i4")
     if data.size < FFT_SIZE * 2:
         return None
-    # 交错立体声，取左声道即可（不做混音，保持原始整数精度）
-    data = data[0::2].copy()
+    # 交错立体声：分开保留 L/R，频谱按功率相加。
+    # 只取左声道会漏掉「右声道才有超声内容」的素材；直接下混又会产生
+    # 相位抵消（(L+R)/2 在某些频点互相抵消，看起来像高频被砍）。
+    frames = data[: data.size - data.size % 2].reshape(-1, 2)
+    left = np.ascontiguousarray(frames[:, 0])
+    right = np.ascontiguousarray(frames[:, 1])
 
     # 采样率：优先用文件头声明的值。截断/损坏文件解码出的样本数会少于
     # 请求时长，用 data.size/seconds 反推会把 44.1kHz 误算成 33kHz，
@@ -419,7 +454,7 @@ def _decode_segment(
     if sample_rate_hint > 0:
         effective_sr = sample_rate_hint
     else:
-        effective_sr = int(round(data.size / seconds)) if seconds > 0 else 0
+        effective_sr = int(round(left.size / seconds)) if seconds > 0 else 0
     # 对齐到常见采样率，避免 ±1 的取整误差影响 Nyquist 判断
     if effective_sr:
         for candidate in (44100, 48000, 88200, 96000, 176400, 192000,
@@ -427,29 +462,45 @@ def _decode_segment(
             if abs(effective_sr - candidate) / candidate < 0.02:
                 effective_sr = candidate
                 break
-    return data, effective_sr
+    return left, right, effective_sr
 
 
 # ---------------------------------------------------------------- 频谱
 
 
-def _average_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
-    """分帧加窗做 FFT，返回 (频率轴, 平均幅度 dB)。
+def _average_spectrum_stereo(
+    left: np.ndarray, right: np.ndarray, sample_rate: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """立体声分帧 FFT，返回 (频率轴, 平均功率 dB)。
 
-    ``samples`` 可以是 int32（解码直出）或 float；统一转 float64 保证 FFT 精度。
+    每个频点取两个声道中**较大的功率**（``max(|L|², |R|²)``）：
+    * 不会漏掉「只有右声道才有超声内容」的素材；
+    * 不做 ``(L+R)/2`` 下混，避免反相内容互相抵消后被误读成高频被砍；
+    * 也不把两声道功率相加 —— 两声道各自的本底噪声互不相关，相加会把
+      噪声底抬高 3dB，改变截止判据的相对阈值。
     """
-    samples = np.asarray(samples, dtype=np.float64)
-    if samples.size < FFT_SIZE:
-        samples = np.pad(samples, (0, FFT_SIZE - samples.size))
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    if right.size != left.size:
+        right = np.zeros_like(left)
+    if left.size < FFT_SIZE:
+        pad = FFT_SIZE - left.size
+        left = np.pad(left, (0, pad))
+        right = np.pad(right, (0, pad))
+
     hop = FFT_SIZE // 2
     window = np.hanning(FFT_SIZE)
     frames: list[np.ndarray] = []
-    for start in range(0, samples.size - FFT_SIZE + 1, hop):
-        chunk = samples[start : start + FFT_SIZE]
-        if not np.any(chunk):
+    for start in range(0, left.size - FFT_SIZE + 1, hop):
+        chunk_l = left[start:start + FFT_SIZE]
+        chunk_r = right[start:start + FFT_SIZE]
+        if not np.any(chunk_l) and not np.any(chunk_r):
             continue
-        spectrum = np.abs(np.fft.rfft(chunk * window))
-        frames.append(20.0 * np.log10(spectrum + 1e-10))
+        power = np.maximum(
+            np.abs(np.fft.rfft(chunk_l * window)) ** 2,
+            np.abs(np.fft.rfft(chunk_r * window)) ** 2,
+        )
+        frames.append(10.0 * np.log10(power + 1e-20))
     if not frames:
         return np.array([]), np.array([])
     avg = np.mean(np.stack(frames), axis=0)
@@ -459,6 +510,12 @@ def _average_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray
         kernel = np.ones(9) / 9.0
         avg = np.convolve(avg, kernel, mode="same")
     return freqs, avg
+
+
+def _average_spectrum(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
+    """单声道分帧 FFT（保留给测试与内部工具使用）。"""
+    samples = np.asarray(samples, dtype=np.float64)
+    return _average_spectrum_stereo(samples, np.zeros_like(samples), sample_rate)
 
 
 def _find_cutoff(
@@ -544,6 +601,38 @@ def _find_cutoff(
             if octaves > 0.02:
                 steepness_oct = drop / octaves
     return cutoff, steepness, steepness_oct
+
+
+def _wall_step(freqs: np.ndarray, db: np.ndarray, cutoff: float) -> float:
+    """截止点 ±1kHz 内相邻 250Hz 分格的最大落差（dB）。
+
+    这是「墙 vs 斜坡」判据：编码器低通是断崖，250Hz 内掉 20~40dB；
+    母带/磁带的自然滚降是斜坡，同样跨度只有几 dB。截止**位置**分不开两者，
+    落差可以 —— 参考 FLAC Detective 的 Gate D 经验。
+
+    只统计下降方向，返回 0 表示没测到（例如截止贴着 Nyquist，右侧没有频点）。
+    """
+    if freqs.size < 8 or cutoff <= 0:
+        return 0.0
+    lo = max(float(freqs[0]), cutoff - WALL_SEARCH_HZ)
+    hi = min(float(freqs[-1]), cutoff + WALL_SEARCH_HZ)
+    mask = (freqs >= lo) & (freqs <= hi)
+    seg = db[mask]
+    seg_f = freqs[mask]
+    if seg.size < 8:
+        return 0.0
+    bin_hz = float(seg_f[1] - seg_f[0])
+    if bin_hz <= 0:
+        return 0.0
+    cell = max(2, int(round(WALL_CELL_HZ / bin_hz)))
+    cells = [
+        float(np.median(seg[i:i + cell]))
+        for i in range(0, seg.size - cell + 1, cell)
+    ]
+    if len(cells) < 2:
+        return 0.0
+    drops = [cells[i] - cells[i + 1] for i in range(len(cells) - 1)]
+    return float(max(0.0, max(drops)))
 
 
 def _noise_shaping_slope(freqs: np.ndarray, db: np.ndarray, nyquist: float) -> float:
@@ -975,7 +1064,15 @@ def _pcm_upsample_cliff(
         below = _band_energy(freqs, db, boundary * 0.93, boundary * 0.99)
         above = _band_energy(freqs, db, boundary * 1.01, boundary * 1.08)
         step = below - above
-        if step >= PCM_UPSAMPLE_STEP_DB and step > best[1]:
+        # 台阶必须够陡：只在 1kHz 带宽上取中位数，会把「母带在 21.5kHz
+        # 附近平缓滚降」也算成台阶。再看边界处 250Hz 内的局部落差，
+        # 真升采样的插值滤波器是墙（≥12dB），自然滚降不是。
+        local_wall = _wall_step(freqs, db, boundary)
+        if (
+            step >= PCM_UPSAMPLE_STEP_DB
+            and local_wall >= WALL_MIN_STEP_DB
+            and step > best[1]
+        ):
             best = (boundary * 2.0, step)
     return best
 
@@ -1330,6 +1427,7 @@ def _judge(
     base_steep: float = 0.0,
     base_silence: float = 0.0,
     steep_oct: float = 0.0,
+    wall_step: float = 0.0,
     edge_db: float = 0.0,
     ratio: float = 0.0,
     holes: float = 0.0,
@@ -1410,7 +1508,13 @@ def _judge(
     # 这种时候扩展带不空，但「台阶」仍在 —— 自然滚降不会在某个采样率边界
     # 上突然跌 18dB。所以在 analyze() 里已经用 _pcm_upsample_cliff 找过台阶，
     # 或判断「截止正好落在 22.05k」。命中任一即判升频。
-    if nyquist >= 23000 and upsample_src > 0:
+    #
+    # 但台阶必须与检测到的截止位置重合：48k 母带在 21.2kHz 有自身低通时，
+    # 22.05kHz 处也会量到台阶（1.5kHz 跨度上的滚降），若不加这条，
+    # 会把真实的 48k 母带判成 44.1k 升频（V1.5.2 修正）。
+    step_boundary = upsample_src / 2.0 if upsample_src > 0 else 0.0
+    near_step = bool(step_boundary and abs(cutoff - step_boundary) <= 600.0)
+    if nyquist >= 23000 and upsample_src > 0 and near_step:
         reasons.append(
             f"声明 {sample_rate / 1000:.1f}kHz（上限 {nyquist / 1000:.1f}kHz），"
             f"但内容在 {upsample_src / 2000:.2f}kHz 处出现台阶"
@@ -1523,18 +1627,23 @@ def _judge(
             return VERDICT_FAKE, 0.85, reasons
         return VERDICT_SUSPECT, 0.5, reasons
 
-    # ---- 4. 转码检测：按截止位置分档 ----
+    # ---- 4. 转码检测：先看「墙 vs 斜坡」，再看截止位置 ----
     if nyquist <= 24000:
         # CD 标准音源（44.1k / 48k）。
         #
         # 关键：cutoff 偏低不等于假无损。1980~90 年代的老录音、模拟母带转录，
         # 高频本来就不丰富，频谱会**平滑滚降**到 16~18kHz —— 这是真 CD 的
         # 正常特征，不能按「转码砍频」判假。
-        # 区分依据是陡度：有损转码是断崖式下跌，老录音是平缓滚降。
-        # 用 dB/oct（与文献阈值可比）优先；无法计算时退回 dB/kHz。
-        smooth_rolloff = (
-            (0.0 < steepness < 25.0)
-            or (0.0 < steep_oct < STEEP_NATURAL_OCT)
+        #
+        # 区分依据从 1.5.2 起改用「断崖落差」而不是只看陡度：
+        # 编码器低通在 250Hz 内掉 20~40dB（墙），母带/磁带自然滚降只有几 dB
+        # （斜坡）。旧版用 2kHz 平均陡度，会把「中等斜率的老录音」读成断崖。
+        is_wall = wall_step >= WALL_MIN_STEP_DB
+        smooth_rolloff = not is_wall
+        wall_text = (
+            f"截止处 250Hz 内落差 {wall_step:.0f}dB（断崖）"
+            if is_wall
+            else f"截止处 250Hz 内仅落差 {wall_step:.1f}dB（斜坡，非编码器低通）"
         )
 
         # 频谱空洞、sfb21 凹陷：低码率 MP3 的辅助证据，只用来加重措辞
@@ -1566,24 +1675,26 @@ def _judge(
         if cutoff < 17000:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（近截止 {steepness:.0f}dB/kHz），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降：{wall_text}；"
                     "符合老录音/模拟母带的高频自然衰减，不是编码器低通"
                 )
                 return VERDICT_TRUE, 0.7, reasons
-            reasons.append(f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steep_oct:.0f}dB/oct），"
-                           "符合 128kbps 有损转码特征")
+            reasons.append(
+                f"频谱在 {cutoff / 1000:.1f}kHz 截止：{wall_text}，"
+                "符合 128kbps 有损转码特征"
+            )
             if mp3_marks:
                 reasons.append("佐证：" + "、".join(mp3_marks))
             return VERDICT_FAKE, 0.9, reasons
         if cutoff < 19500:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（近截止 {steepness:.0f}dB/kHz），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降：{wall_text}；"
                     "符合老录音/模拟母带的高频自然衰减，非有损转码"
                 )
                 return VERDICT_TRUE, 0.7, reasons
             reasons.append(
-                f"频谱在 {cutoff / 1000:.1f}kHz 截止（陡度 {steep_oct:.0f}dB/oct），"
+                f"频谱在 {cutoff / 1000:.1f}kHz 截止：{wall_text}，"
                 "符合 192kbps 有损转码特征"
             )
             if mp3_marks:
@@ -1593,12 +1704,22 @@ def _judge(
         if cutoff < 20500:
             if smooth_rolloff:
                 reasons.append(
-                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降（近截止 {steepness:.0f}dB/kHz），"
+                    f"频谱在 {cutoff / 1000:.1f}kHz 平滑滚降：{wall_text}；"
                     "符合老录音高频自然衰减，非高码率转码"
                 )
                 return VERDICT_TRUE, 0.72, reasons
+            # 320k 的断崖很浅，单看位置会与母带低通混淆；再看断崖之上的
+            # 残余能量：编码器砍掉的高频是数字空白，母带低通之上仍有模拟底噪。
+            if edge_db >= W320_RESIDUAL_DB:
+                reasons.append(
+                    f"频谱在 {cutoff / 1000:.1f}kHz 有断崖（{wall_text}），"
+                    f"但截止之上仍有 {edge_db:.0f}dB 模拟底噪，更像母带/磁带低通，"
+                    "不是编码器留下的数字空白"
+                )
+                return VERDICT_TRUE, 0.7, reasons
             reasons.append(
-                f"频谱在 {cutoff / 1000:.1f}kHz 断崖截止（陡度 {steep_oct:.0f}dB/oct），"
+                f"频谱在 {cutoff / 1000:.1f}kHz 截止：{wall_text}，"
+                f"截止之上仅 {edge_db:.0f}dB（数字空白），"
                 "符合高码率有损转码特征（256~320kbps）"
             )
             if mp3_marks:
@@ -1665,7 +1786,10 @@ def _judge(
             for b in PCM_NYQUISTS
             if b < nyquist * 0.97
         )
-        if edge_db < -95.0 or near_pcm_edge:
+        # 只有「扩展带是数字静音」或「截止处是断崖」才判升频。
+        # 若截止之上仍有模拟底噪（edge_db 较高），且滚降平缓，那只是母带
+        # 本身高频稀疏，不是把低采样率内容升上来（V1.5.2）。
+        if edge_db < -95.0 or (near_pcm_edge and wall_step >= WALL_MIN_STEP_DB):
             reasons.append(
                 f"采样率 {sample_rate / 1000:.1f}kHz，但频谱只到 {cutoff / 1000:.1f}kHz"
                 f"（带宽利用率 {ratio:.0%}），扩展带 {edge_db:.0f}dB，疑似低采样率内容升频"
@@ -1793,12 +1917,17 @@ def analyze(
             continue
         if first_start is None:
             first_start = start
-        samples, effective_sr = decoded
+        left, right, effective_sr = decoded
+        # 取电平更高的声道做位深/边界统计：另一声道若因录音设置而很轻，
+        # 合并统计会被它的量化噪声拉低有效位深。
+        samples = left
+        if right.size and float(np.max(np.abs(right))) > float(np.max(np.abs(left))):
+            samples = right
         analyzed += segment_seconds
         if effective_sr:
             sample_rate = effective_sr
             result.nyquist_hz = sample_rate // 2
-        freqs, db = _average_spectrum(samples, sample_rate)
+        freqs, db = _average_spectrum_stereo(left, right, sample_rate)
         if freqs.size:
             spectra.append((freqs, db))
         depth = _effective_bit_depth(samples)
@@ -1854,6 +1983,10 @@ def analyze(
     result.spectrum = (freqs, db)
 
     _, steepness, steep_oct = _find_cutoff(freqs, db)
+    wall_step = 0.0
+    if not is_dsd and result.nyquist_hz:
+        wall_step = _wall_step(freqs, db, cutoff)
+    result.wall_step_db = wall_step
     # 各段截止差异过大：多为包含前奏/静音的正常歌曲，在理由里注明，避免用户误以为鉴定不稳定
     spread_note = ""
     if cutoff_max - cutoff_min > 3000:
@@ -2009,6 +2142,7 @@ def analyze(
         base_steep=base_steep,
         base_silence=base_silence,
         steep_oct=steep_oct,
+        wall_step=wall_step,
         edge_db=edge_db,
         ratio=bandwidth,
         holes=holes,

@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.1-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.2-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,22 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.2 更新摘要
+
+- **「墙 vs 斜坡」判据**：截止位置本身分不开编码器低通与母带自然滚降，
+  新增「截止处 ±1kHz 内、相邻 250Hz 格的最大落差」作为主判据 ——
+  有损编码是断崖（250Hz 内 20~40dB），老录音/磁带是斜坡（几 dB）。
+  原来看 2kHz 平均陡度，会把中等斜率的老录音误判成转码；
+- **升采样判据收紧**：台阶必须与检测到的截止位置重合（±600Hz）、
+  且边界处确有断崖，避免把 48k 母带自身的 21kHz 低通误判成 44.1k 升频；
+  320k 档再结合「断崖之上的残余能量」，有模拟底噪时按母带低通放行；
+- **立体声频谱**：左右声道按频点取较大功率，不再只看左声道，也不会因
+  下混反相抵消误读「高频被砍」；位深与 DSD 边界统计取电平更高的声道；
+- **确认配色不影响结论**：所有判据都在 dB 域用 numpy 计算，界面调色板
+  只做 dB→RGB 映射；新增回归测试锁定「算法源码不得出现颜色/像素依赖」；
+- 样本回归：128k 假无损、44.1k→96k 升频、真 24/96、真 DSD 判定保持不变；
+  两首 48k 母带（21.2kHz 自身低通）不再被误判为升频。
 
 ### V1.5.1 更新摘要
 
@@ -308,8 +324,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.5.1-x86-x64.7z            便携绿色版（解压即用，约 96 MB）
-dist/音序管家-v1.5.1-x86-x64-Setup.exe     安装程序（约 184 MB）
+dist/音序管家-v1.5.2-x86-x64.7z            便携绿色版（解压即用，约 96 MB）
+dist/音序管家-v1.5.2-x86-x64-Setup.exe     安装程序（约 184 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -633,6 +649,29 @@ Advanced capabilities:
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
 
+### V1.5.2 highlights
+
+- **“Wall vs slope” criterion** — cutoff position alone cannot separate a codec
+  low-pass from a master's natural roll-off. The new primary test measures the
+  largest drop between adjacent 250 Hz cells within ±1 kHz of the cutoff:
+  lossy encoders form a wall (20–40 dB per 250 Hz), analogue masters a gentle
+  slope (a few dB). The old 2 kHz average steepness misread mid-slope old
+  recordings as transcodes.
+- **Tighter upsampling test** — a detected step must coincide with the measured
+  cutoff (±600 Hz) and show a real wall, so a native 48 kHz master with its own
+  ~21 kHz low-pass is no longer called a 44.1 kHz upsample. The 320 k branch also
+  checks the residual energy above the wall: analogue noise means a master
+  low-pass, digital silence means a transcode.
+- **Stereo spectrum** — per-bin maximum power of L/R instead of left-channel only;
+  avoids both missing right-channel-only ultrasonic content and phase-cancellation
+  from downmixing. Bit-depth and DSD edge statistics use the louder channel.
+- **Colour independence confirmed** — every decision is computed in the dB domain
+  with numpy; the UI palette only maps dB to RGB. A regression test now forbids
+  colour/pixel dependencies in the algorithm source.
+- Sample regression: 128 k fake, 44.1→96 k upsample, genuine 24/96 and genuine DSD
+  verdicts unchanged; two native 48 kHz masters (21.2 kHz own low-pass) are no
+  longer flagged as upsampled.
+
 ### V1.5.1 highlights
 
 - **SACD ISO support** — add a `.iso` as a whole-disc track; it expands into one row
@@ -848,8 +887,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.5.1-x86-x64.7z            portable edition (extract-and-run, ~96 MB)
-dist/音序管家-v1.5.1-x86-x64-Setup.exe     installer (~184 MB)
+dist/音序管家-v1.5.2-x86-x64.7z            portable edition (extract-and-run, ~96 MB)
+dist/音序管家-v1.5.2-x86-x64-Setup.exe     installer (~184 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.
