@@ -38,8 +38,8 @@ class SettingsPanel(QWidget):
         self.settings = settings
         self._loading = False
         self._dirty = False
-        self.setMinimumWidth(330)
-        self.setMaximumWidth(420)
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -74,7 +74,7 @@ class SettingsPanel(QWidget):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QScrollArea.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             scroll.setWidget(page)
             self.tabs.addTab(scroll, title)
 
@@ -184,7 +184,7 @@ class SettingsPanel(QWidget):
         self.backup_dir_edit.editingFinished.connect(self._notify)
         browse = QPushButton("…")
         # 只固定高度，宽度跟主题内边距走；32px 会把「…」压没
-        browse.setFixedHeight(30)
+        browse.setFixedHeight(34)
         browse.setMinimumWidth(44)
         browse.setObjectName("ghost")
         browse.setCursor(Qt.PointingHandCursor)
@@ -395,14 +395,14 @@ class SettingsPanel(QWidget):
         self.revert_btn = QPushButton("还原")
         self.revert_btn.setObjectName("ghost")
         self.revert_btn.setCursor(Qt.PointingHandCursor)
-        self.revert_btn.setFixedHeight(32)
+        self.revert_btn.setFixedHeight(34)
         self.revert_btn.setToolTip("放弃本次未保存的修改，恢复为已保存的参数")
         self.revert_btn.clicked.connect(self.revert)
 
         self.save_btn = QPushButton("保存参数")
         self.save_btn.setObjectName("primary")
         self.save_btn.setCursor(Qt.PointingHandCursor)
-        self.save_btn.setFixedHeight(32)
+        self.save_btn.setFixedHeight(34)
         self.save_btn.setToolTip("把当前参数写入并持久化（Ctrl+S）")
         self.save_btn.clicked.connect(self.save)
 

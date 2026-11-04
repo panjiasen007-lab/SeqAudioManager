@@ -198,7 +198,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.right_tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setSizes([1040, 348])
+        splitter.setSizes([960, 460])
         body_layout.addWidget(splitter, 1)
 
         body_layout.addWidget(self._build_log_area())
@@ -220,17 +220,22 @@ class MainWindow(QMainWindow):
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        # 第一行：文件操作 + 批处理主流程
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
 
         self.btn_add_files = self._button(i18n.tr("add_files"), self.add_files, ghost=True, i18n_key="add_files")
         self.btn_add_folder = self._button(i18n.tr("add_folder"), self.add_folder, ghost=True, i18n_key="add_folder")
         self.btn_remove = self._button(i18n.tr("remove"), self.remove_selected, ghost=True, i18n_key="remove")
         for btn in (self.btn_add_files, self.btn_add_folder, self.btn_remove):
-            layout.addWidget(btn)
+            top.addWidget(btn)
 
-        layout.addWidget(self._vline())
+        top.addWidget(self._vline())
 
         # 「清空列表」放回工具栏（一键全自动左侧）
         self.btn_clear = self._button(i18n.tr("clear"), self.clear_all, ghost=True, i18n_key="clear")
@@ -245,34 +250,41 @@ class MainWindow(QMainWindow):
         self.btn_local.setToolTip("不联网：清理水印、补全空白字段、写标签、重命名")
         self.btn_stop = self._button(i18n.tr("stop"), self.stop, ghost=True, i18n_key="stop")
         self.btn_stop.setEnabled(False)
-        layout.addWidget(self.btn_clear)
-        layout.addWidget(self.btn_auto)
-        layout.addWidget(self.btn_save_all)
-        layout.addWidget(self.btn_local)
-        layout.addWidget(self.btn_stop)
+        top.addWidget(self.btn_clear)
+        top.addWidget(self.btn_auto)
+        top.addWidget(self.btn_save_all)
+        top.addStretch(1)
+        outer.addLayout(top)
 
-        layout.addWidget(self._vline())
+        # 第二行：分析/清理与辅助入口。俄/法/德等长文案不会再被压窄
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(8)
+        bottom.addWidget(self.btn_local)
+        bottom.addWidget(self.btn_stop)
+        bottom.addWidget(self._vline())
 
         self.btn_auth = self._button(i18n.tr("auth"), self.run_authenticity, ghost=True, i18n_key="auth")
         self.btn_auth.setToolTip("频谱分析判定是否真无损（需解码，速度约 0.3~1 秒/首）")
         self.btn_cleanup = self._button(i18n.tr("cleanup"), self.run_cleanup, ghost=True, i18n_key="cleanup")
         self.btn_cleanup.setObjectName("danger")
         self.btn_cleanup.setToolTip("把判定为假无损/可疑的文件移入回收站或隔离区（Ctrl+Shift+D）")
-        layout.addWidget(self.btn_auth)
-        layout.addWidget(self.btn_cleanup)
+        bottom.addWidget(self.btn_auth)
+        bottom.addWidget(self.btn_cleanup)
 
-        layout.addStretch(1)
+        bottom.addStretch(1)
 
         self.btn_more = self._button(i18n.tr("more"), self._show_more_menu, ghost=True, i18n_key="more")
         self.btn_more.setToolTip("重命名预览、导出报表、隔离区、关于")
         self.btn_more.setMenu(self._build_more_menu())
-        layout.addWidget(self.btn_more)
+        bottom.addWidget(self.btn_more)
 
         # 窄屏救星：收起参数面板，表格独占整宽
         self.btn_toggle_panel = self._button(i18n.tr("sidebar"), self.toggle_settings_panel, ghost=True, i18n_key="sidebar")
         self.btn_toggle_panel.setCheckable(True)
         self.btn_toggle_panel.setToolTip("显示 / 隐藏右侧参数面板（Ctrl+P）")
-        layout.addWidget(self.btn_toggle_panel)
+        bottom.addWidget(self.btn_toggle_panel)
+        outer.addLayout(bottom)
         return bar
 
     def _build_more_menu(self) -> QMenu:
@@ -470,7 +482,7 @@ class MainWindow(QMainWindow):
         ):
             btn = QPushButton(text)
             btn.setObjectName("ghost")
-            btn.setFixedHeight(26)
+            btn.setMinimumHeight(30)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(slot)
             sel_layout.addWidget(btn)

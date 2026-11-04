@@ -388,7 +388,10 @@ class Card(QFrame):
         self.body_layout.addLayout(layout)
 
     def add_form(self, rows: list[tuple[str, QWidget]]) -> None:
-        """``(标签, 控件)`` 列表补齐为表单，标签右对齐、控件撑满。"""
+        """``(标签, 控件)`` 列表补齐为表单，标签右对齐、控件撑满。
+
+        标签开启自动换行：德语/俄语等长译文在窄侧栏里不会被裁掉半截。
+        """
         from PySide6.QtWidgets import QFormLayout
 
         form = QFormLayout()
@@ -397,9 +400,12 @@ class Card(QFrame):
         form.setHorizontalSpacing(10)
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.DontWrapRows)
         for label, widget in rows:
             if label:
-                form.addRow(label, widget)
+                label_widget = QLabel(label)
+                label_widget.setWordWrap(True)
+                form.addRow(label_widget, widget)
             else:
                 form.addRow("", widget)
         self.body_layout.addLayout(form)

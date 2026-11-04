@@ -253,7 +253,7 @@ class QuarantineDialog(QDialog):
         self.btn_open.clicked.connect(self.open_folder)
         for button in (self.btn_restore, self.btn_purge, self.btn_open):
             button.setCursor(Qt.PointingHandCursor)
-            button.setFixedHeight(32)
+            button.setFixedHeight(34)
         row.addWidget(self.btn_restore)
         row.addWidget(self.btn_purge)
         row.addWidget(self.btn_open)
@@ -261,7 +261,7 @@ class QuarantineDialog(QDialog):
         close = QPushButton("关闭")
         close.setObjectName("ghost")
         close.setCursor(Qt.PointingHandCursor)
-        close.setFixedHeight(32)
+        close.setFixedHeight(34)
         close.clicked.connect(self.accept)
         row.addWidget(close)
         layout.addLayout(row)

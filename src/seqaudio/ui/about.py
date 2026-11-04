@@ -174,7 +174,7 @@ class AboutDialog(QDialog):
         # 不用 QDialogButtonBox：它会按平台习惯重排按钮，把 ActionRole 挪到最左，
         # 结果"关闭"跑到了最前面。这里直接排，顺序完全可控。
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(6)
         self.copy_btn = QPushButton("复制诊断信息")
         self.copy_btn.setObjectName("ghost")
         self.copy_btn.clicked.connect(self._copy_diagnostics)
@@ -195,7 +195,8 @@ class AboutDialog(QDialog):
         row.addWidget(close_btn)
         for button in (self.copy_btn, log_btn, license_btn, close_btn):
             button.setCursor(Qt.PointingHandCursor)
-            button.setFixedHeight(32)
+            button.setFixedHeight(34)
+            button.setMinimumWidth(button.sizeHint().width())
         layout.addLayout(row)
 
     # ------------------------------------------------------------

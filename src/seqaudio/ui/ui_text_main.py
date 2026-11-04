@@ -53,7 +53,7 @@ ROWS: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("写入", "寫入", "Writing", "書き込み", "쓰기", "Запись", "Écriture", "Schreiben"),
     ("外观", "外觀", "Appearance", "外観", "모양", "Оформление", "Apparence", "Darstellung"),
     ("字体与外观", "字型與外觀", "Fonts & Appearance", "フォントと外観", "글꼴 및 모양", "Шрифты и оформление", "Polices et apparence", "Schrift & Darstellung"),
-    ("随包开源字体", "隨包開源字型", "Bundled open-source fonts", "同梱のオープンソースフォント", "내장 오픈소스 글꼴", "Встроенные шрифты с открытой лицензией", "Polices open source incluses", "Mitgelieferte Open-Source-Schriften"),
+    ("随包开源字体", "隨包開源字型", "Bundled open-source fonts", "同梱のオープンソースフォント", "내장 오픈소스 글꼴", "Встроенные шрифты", "Polices open source incluses", "Mitgelieferte Open-Source-Schriften"),
     ("界面字体", "介面字型", "Interface font", "UI フォント", "인터페이스 글꼴", "Шрифт интерфейса", "Police de l’interface", "Oberflächenschrift"),
     ("数据字体", "資料字型", "Data font", "データフォント", "데이터 글꼴", "Шрифт данных", "Police des données", "Daten-Schrift"),
     ("字号", "字級", "Font size", "文字サイズ", "글자 크기", "Размер шрифта", "Taille de police", "Schriftgröße"),

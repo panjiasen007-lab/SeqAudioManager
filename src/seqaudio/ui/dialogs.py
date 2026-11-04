@@ -171,9 +171,9 @@ class TagEditDialog(QDialog):
         cover_row.addLayout(btn_col)
         cover_row.addStretch(1)
         cover_card.add_layout(cover_row)
-        # 歌词与封面并排：封面只有 104px 预览，占满一整行会把对话框撑得
-        # 过高，导致 Qt 压缩上面的输入框（V1.4.4 的实际问题）
-        cover_card.setFixedWidth(286)
+        # 歌词与封面并排：封面预览固定 104px，卡片宽度跟随按钮文案，
+        # 不再写死 286px（俄/法长译文会被裁掉）
+        cover_card.setMaximumWidth(380)
         lower_row = QHBoxLayout()
         lower_row.setSpacing(10)
         lower_row.addWidget(lyrics_card, 1)
@@ -373,7 +373,7 @@ class BatchTagEditDialog(QDialog):
 
         for label, key in self.FIELDS:
             check = QCheckBox(label)
-            check.setFixedWidth(96)
+            check.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             edit = QLineEdit()
             edit.setPlaceholderText(self._placeholder(key))
             edit.setMinimumWidth(240)
