@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from ..core.config import Settings
 from ..core.model import ConflictMode, LyricsMode
 from ..core.rename import DEFAULT_TEMPLATE
-from . import fonts, theme
+from . import fonts, i18n, theme
 from .widgets import Card
 
 
@@ -294,7 +294,7 @@ class SettingsPanel(QWidget):
             self.ui_font_combo.addItem(f"{choice.name} · {choice.category}", choice.id)
             tip = f"{choice.name}（{choice.license}）"
             if not choice.cjk:
-                tip += "\n不含中文字形：中文自动回退到 Noto Sans SC"
+                tip += i18n.tr_text("\n不含中文字形：中文自动回退到 Noto Sans SC")
             self.ui_font_combo.setItemData(index, tip, Qt.ToolTipRole)
         self.ui_font_combo.currentIndexChanged.connect(self._on_appearance_changed)
 
@@ -420,7 +420,9 @@ class SettingsPanel(QWidget):
         self._dirty = dirty
         self.save_btn.setEnabled(dirty)
         self.revert_btn.setEnabled(dirty)
-        self.dirty_label.setText("● 有未保存的修改" if dirty else "")
+        self.dirty_label.setText(
+            i18n.tr_text("● 有未保存的修改") if dirty else ""
+        )
         self.save_btn.setStyleSheet("" if dirty else "opacity:0.55;")
 
     def save(self) -> None:
@@ -429,7 +431,9 @@ class SettingsPanel(QWidget):
         try:
             self.settings.save()
         except OSError as exc:
-            self.dirty_label.setText(f"保存失败：{exc}")
+            self.dirty_label.setText(
+                i18n.tr_format("保存失败：{message}", message=str(exc))
+            )
             self.dirty_label.setStyleSheet(f"color:{theme.BAD};")
             return
         self._set_dirty(False)

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from ..core.health import HealthReport, analyze_library, write_health_report
 from ..core.model import Track
 from ..core.quarantine import human_size
-from . import theme
+from . import i18n, theme
 
 
 class HealthDialog(QDialog):
@@ -132,7 +132,7 @@ class HealthDialog(QDialog):
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(10, 6, 10, 6)
             card_layout.setSpacing(1)
-            text_label = QLabel(label)
+            text_label = QLabel(i18n.tr_text(label))
             text_label.setStyleSheet(f"color:{theme.FG_MUTE}; font-size:11px;")
             value_label = QLabel(str(value))
             value_label.setStyleSheet(f"color:{color}; font-size:18px; font-weight:700;")
@@ -147,12 +147,14 @@ class HealthDialog(QDialog):
         for row, group in enumerate(groups):
             names = "、".join(t.path.name for t in group.tracks[:2])
             if len(group.tracks) > 2:
-                names += f" 等 {len(group.tracks)} 个"
+                names = i18n.tr_format(
+                    "{names} 等 {count} 个", names=names, count=len(group.tracks)
+                )
             values = [
-                group.kind,
+                i18n.tr_text(group.kind),
                 str(len(group.tracks)),
                 human_size(group.wasted_bytes) if group.wasted_bytes else "—",
-                group.detail,
+                i18n.tr_text(group.detail),
                 names,
             ]
             for column, value in enumerate(values):
@@ -174,10 +176,10 @@ class HealthDialog(QDialog):
         for row, issue in enumerate(issues):
             track = issue.track
             values = [
-                issue.category,
+                i18n.tr_text(issue.category),
                 track.working.title or track.original.title or track.path.stem,
                 track.working.artist or track.original.artist,
-                issue.detail,
+                i18n.tr_text(issue.detail),
                 str(track.path),
             ]
             for column, value in enumerate(values):
@@ -192,13 +194,17 @@ class HealthDialog(QDialog):
         if self.report is None:
             return
         target, _ = QFileDialog.getSaveFileName(
-            self, "导出健康报表", "曲库体检.csv", "CSV (*.csv)"
+            self, i18n.tr_text("导出健康报表"), i18n.tr_text("曲库体检") + ".csv", "CSV (*.csv)"
         )
         if not target:
             return
         try:
             path = write_health_report(self.report, target)
         except OSError as exc:
-            QMessageBox.warning(self, "导出失败", str(exc))
+            QMessageBox.warning(self, i18n.tr_text("导出失败"), str(exc))
             return
-        QMessageBox.information(self, "导出完成", f"健康报表已保存到：\n{path}")
+        QMessageBox.information(
+            self,
+            i18n.tr_text("导出完成"),
+            i18n.tr_format("健康报表已保存到：\n{path}", path=path),
+        )

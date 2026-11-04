@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import theme
+from . import i18n, theme
 
 
 def app_icon_path() -> Path | None:
@@ -279,7 +279,7 @@ class Pill(QLabel):
         self.set_text(text, color)
 
     def set_text(self, text: str, color: str = theme.FG_DIM) -> None:
-        self.setText(f"  {text}  ")
+        self.setText(f"  {i18n.tr_text(text)}  ")
         self.setStyleSheet(
             f"""
             color: {color};

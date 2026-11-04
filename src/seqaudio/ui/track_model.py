@@ -8,6 +8,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProx
 from PySide6.QtGui import QColor, QBrush, QFont
 
 from ..core.model import Track, TrackStatus
+from . import i18n
 
 #: (表头, 取值函数, 列宽)
 COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
@@ -21,7 +22,7 @@ COLUMNS: list[tuple[str, Callable[[Track], Any], int]] = [
     ("时长", lambda t: t.duration_text, 46),
     ("无损", lambda t: t.info.kind_text, 42),
     ("置信度", lambda t: f"{t.confidence:.0%}" if t.confidence else "", 54),
-    ("鉴定", lambda t: (t.authenticity.verdict if t.authenticity else ""), 80),
+    ("鉴定结果", lambda t: (t.authenticity.verdict if t.authenticity else ""), 80),
     ("来源", lambda t: t.source, 80),
     ("文件名", lambda t: (
         f"{t.path.name} · #{t.cue_track_entry.number}" if t.cue_track_entry else t.path.name
@@ -69,7 +70,7 @@ class TrackTableModel(QAbstractTableModel):
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:
-            return COLUMNS[section][0]
+            return i18n.tr_text(COLUMNS[section][0])
         return section + 1
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
@@ -83,7 +84,13 @@ class TrackTableModel(QAbstractTableModel):
                 value = getter(track)
             except Exception:  # noqa: BLE001
                 return ""
-            return "" if value is None else str(value)
+            text = "" if value is None else str(value)
+            # 状态 / 无损类型 / 鉴定结论 / 来源 / 说明是界面枚举，不是用户数据
+            if index.column() == 10:
+                return i18n.tr_verdict(text)
+            if index.column() in (0, 8, 11, 13):
+                return i18n.tr_text(text)
+            return text
 
         if role == Qt.ToolTipRole:
             return self._tooltip(track)
@@ -116,28 +123,47 @@ class TrackTableModel(QAbstractTableModel):
 
     def _tooltip(self, track: Track) -> str:
         lines = [
-            f"路径：{track.path}",
-            f"状态：{track.status.value}",
-            f"技术：{track.info.fmt} / {track.info.spec_text} / {track.info.bitrate_text}"
-            f" / {track.info.kind_text}",
+            i18n.tr_format("路径：{path}", path=track.path),
+            i18n.tr_format("状态：{status}", status=i18n.tr_text(track.status.value)),
+            i18n.tr_format(
+                "技术：{value}",
+                value=f"{track.info.fmt} / {track.info.spec_text} / "
+                f"{track.info.bitrate_text} / {i18n.tr_text(track.info.kind_text)}",
+            ),
         ]
         if track.cue:
-            lines.append(f"CUE：{track.cue.cue_path.name}（{len(track.cue.tracks)} 轨）")
+            lines.append(
+                i18n.tr_format(
+                    "CUE：{name}（{count} 轨）",
+                    name=track.cue.cue_path.name,
+                    count=len(track.cue.tracks),
+                )
+            )
         if track.backup_path:
-            lines.append(f"备份：{track.backup_path}")
+            lines.append(i18n.tr_format("备份：{path}", path=track.backup_path))
         if track.lyrics_src:
-            lines.append(f"歌词来源：{track.lyrics_src}")
+            lines.append(i18n.tr_format("歌词来源：{source}", source=i18n.tr_text(track.lyrics_src)))
         if track.changed_fields:
-            lines.append(f"变更字段：{', '.join(track.changed_fields)}")
+            lines.append(
+                i18n.tr_format(
+                    "变更字段：{fields}", fields=", ".join(track.changed_fields)
+                )
+            )
         if track.authenticity is not None:
             from .i18n import tr_verdict
 
             auth = track.authenticity
-            lines.append(f"无损鉴定：{tr_verdict(auth.verdict)}（{auth.detail_text}）")
-            lines.extend(f"  · {r}" for r in auth.reasons)
+            lines.append(
+                i18n.tr_format(
+                    "无损鉴定：{verdict}（{detail}）",
+                    verdict=tr_verdict(auth.verdict),
+                    detail=i18n.tr_text(auth.detail_text),
+                )
+            )
+            lines.extend(f"  · {i18n.tr_text(r)}" for r in auth.reasons)
         if track.notes:
-            lines.append("说明：")
-            lines.extend(f"  · {n}" for n in track.notes)
+            lines.append(i18n.tr_text("说明："))
+            lines.extend(f"  · {i18n.tr_text(n)}" for n in track.notes)
         return "\n".join(lines)
 
     # ---- 数据操作 ----

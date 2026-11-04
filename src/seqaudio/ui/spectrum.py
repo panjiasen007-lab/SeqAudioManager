@@ -45,7 +45,7 @@ from ..core.authenticity import (
     full_spectrum,
 )
 from ..core.model import Track
-from . import theme
+from . import i18n, theme
 from .widgets import Card, Pill
 
 log = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ class SpectrogramCanvas(QWidget):
         self._duration = 0.0
         self._cutoff = 0.0
         self._is_dsd = False
-        self._message = "正在解码整首音频…"
+        self._message = i18n.tr_text("正在解码整首音频…")
 
     def set_message(self, text: str) -> None:
         self._message = text
@@ -168,12 +168,12 @@ class SpectrogramCanvas(QWidget):
         is_dsd: bool = False,
     ) -> None:
         if db is None or freqs is None or db.size == 0:
-            self.set_message("无法取得频谱数据")
+            self.set_message(i18n.tr_text("无法取得频谱数据"))
             return
         db = np.asarray(db, dtype=np.float32)
         freqs = np.asarray(freqs, dtype=np.float64)
         if db.ndim != 2 or db.shape[1] != freqs.size:
-            self.set_message("频谱数据格式异常")
+            self.set_message(i18n.tr_text("频谱数据格式异常"))
             return
 
         self._nyquist = float(freqs[-1]) if freqs.size else (sample_rate / 2.0)
@@ -273,7 +273,9 @@ class SpectrogramCanvas(QWidget):
         painter.setPen(QPen(color, 1.4, Qt.DashLine))
         painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
 
-        label = f"截止 {self._cutoff / 1000:.1f} kHz"
+        label = i18n.tr_format(
+            "截止 {value} kHz", value=f"{self._cutoff / 1000:.1f}"
+        )
         font = QFont(self.font())
         font.setPixelSize(10)
         font.setBold(True)
@@ -300,12 +302,15 @@ class SpectrumCanvas(QWidget):
         self._cutoff = 0.0
         self._nyquist = 22050.0
         self._is_dsd = False
-        self._message = "正在分析…"
+        self._message = i18n.tr_text("正在分析…")
 
     def set_result(self, result: AuthenticityResult) -> None:
         spectrum = getattr(result, "spectrum", None)
         if not spectrum:
-            self._message = result.error or "无法取得频谱数据"
+            self._message = (
+                i18n.tr_text(result.error) if result.error
+                else i18n.tr_text("无法取得频谱数据")
+            )
             self._freqs = None
             self.update()
             return
@@ -437,7 +442,9 @@ class SpectrumCanvas(QWidget):
         painter.setPen(pen)
         painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
 
-        label = f"截止 {self._cutoff / 1000:.1f} kHz"
+        label = i18n.tr_format(
+            "截止 {value} kHz", value=f"{self._cutoff / 1000:.1f}"
+        )
         font = QFont(self.font())
         font.setPixelSize(10)
         font.setBold(True)
@@ -478,7 +485,9 @@ class _AnalyzeWorker(QThread):
             result = analyze(self.track.path, self.track.info)
         except Exception as exc:  # noqa: BLE001
             log.exception("频谱分析失败")
-            result = AuthenticityResult(error=f"分析失败：{exc}")
+            result = AuthenticityResult(
+                error=i18n.tr_format("分析失败：{message}", message=str(exc))
+            )
 
         spectrogram = None
         if not result.error:
@@ -512,7 +521,11 @@ class SpectrumDialog(QDialog):
         head.addWidget(title)
         head.addStretch(1)
         self.verdict_pill = Pill(
-            (track.authenticity.verdict if track.authenticity else "分析中"),
+            (
+                i18n.tr_verdict(track.authenticity.verdict)
+                if track.authenticity
+                else i18n.tr_text("分析中")
+            ),
             (VERDICT_COLORS.get(track.authenticity.verdict, theme.FG_DIM)
              if track.authenticity else theme.FG_DIM),
         )
@@ -530,12 +543,12 @@ class SpectrumDialog(QDialog):
         self.tabs = QTabWidget()
         self.spectrogram = SpectrogramCanvas()
         self.curve = SpectrumCanvas()
-        self.tabs.addTab(self.spectrogram, "完整频谱")
-        self.tabs.addTab(self.curve, "平均频谱")
+        self.tabs.addTab(self.spectrogram, i18n.tr_text("完整频谱"))
+        self.tabs.addTab(self.curve, i18n.tr_text("平均频谱"))
         layout.addWidget(self.tabs, 1)
 
-        self.reason_card = Card("判定依据", "", theme.CYAN)
-        self.reason_label = QLabel("正在解码分析…")
+        self.reason_card = Card(i18n.tr_text("判定依据"), "", theme.CYAN)
+        self.reason_label = QLabel(i18n.tr_text("正在解码分析…"))
         self.reason_label.setWordWrap(True)
         self.reason_label.setObjectName("hint")
         self.reason_card.add_widget(self.reason_label)
@@ -543,7 +556,7 @@ class SpectrumDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         close_btn = buttons.button(QDialogButtonBox.Close)
-        close_btn.setText("关闭")
+        close_btn.setText(i18n.tr_text("关闭"))
         close_btn.setObjectName("ghost")
         close_btn.setCursor(Qt.PointingHandCursor)
         buttons.rejected.connect(self.reject)
@@ -570,18 +583,30 @@ class SpectrumDialog(QDialog):
                 is_dsd="DSD" in result.verdict,
             )
         else:
-            self.spectrogram.set_message("无法生成完整频谱（解码失败或文件过长）")
+            self.spectrogram.set_message(
+                i18n.tr_text("无法生成完整频谱（解码失败或文件过长）")
+            )
 
         color = VERDICT_COLORS.get(result.verdict, theme.FG_DIM)
-        self.verdict_pill.set_text(result.verdict, color)
+        self.verdict_pill.set_text(i18n.tr_verdict(result.verdict), color)
         if result.error and not result.reasons:
-            self.reason_label.setText(result.error)
+            self.reason_label.setText(i18n.tr_text(result.error))
         else:
-            lines = [f"· {r}" for r in result.reasons] or ["（无更多依据）"]
+            if i18n.current() in ("zh_CN", "zh_TW"):
+                lines = [f"· {r}" for r in result.reasons] or [i18n.tr_text("（无更多依据）")]
+            else:
+                # 判定依据是内核生成的中文长句；非中文界面显示结构化摘要，
+                # 避免整段中文混进译文界面
+                detail = i18n.tr_text(result.detail_text)
+                lines = [f"· {detail}"] if detail else []
             lines.append("")
             lines.append(
-                f"判定分数 {result.score:.2f} · 分析时长 {result.analyzed_seconds:.0f}s · "
-                f"采样 {result.nyquist_hz * 2 / 1000:.1f}kHz"
+                i18n.tr_format(
+                    "判定分数 {score} · 分析时长 {seconds}s · 采样 {rate}kHz",
+                    score=f"{result.score:.2f}",
+                    seconds=f"{result.analyzed_seconds:.0f}",
+                    rate=f"{result.nyquist_hz * 2 / 1000:.1f}",
+                )
             )
             self.reason_label.setText("\n".join(lines))
 

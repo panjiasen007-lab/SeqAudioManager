@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from ..core.authenticity import VERDICT_COLORS
 from ..core.model import Track
 from ..core.quarantine import human_size
-from . import theme
+from . import i18n, theme
 
 
 class InspectorPanel(QWidget):
@@ -173,17 +173,17 @@ class InspectorPanel(QWidget):
 
         auth = track.authenticity
         if auth is None:
-            self.verdict.setText("尚未进行真假无损鉴定")
+            self.verdict.setText(i18n.tr_text("尚未进行真假无损鉴定"))
             self.verdict.setStyleSheet(
                 f"padding:8px 10px; border:1px solid {theme.LINE_SOFT};"
                 f"border-radius:8px; color:{theme.FG_DIM}; background:{theme.BG_CARD};"
             )
             return
         color = VERDICT_COLORS.get(auth.verdict, theme.FG_DIM)
-        text = f"<b style='color:{color}'>{auth.verdict}</b>"
+        text = f"<b style='color:{color}'>{i18n.tr_verdict(auth.verdict)}</b>"
         detail = auth.detail_text
         if detail:
-            text += f"<br><span style='color:{theme.FG_DIM}'>{detail}</span>"
+            text += f"<br><span style='color:{theme.FG_DIM}'>{i18n.tr_text(detail)}</span>"
         self.verdict.setText(text)
         self.verdict.setStyleSheet(
             f"padding:8px 10px; border:1px solid {theme.LINE_SOFT};"
@@ -207,7 +207,7 @@ class InspectorPanel(QWidget):
                 )
                 return
         self.cover.setPixmap(QPixmap())
-        self.cover.setText("无封面")
+        self.cover.setText(i18n.tr_text("无封面"))
         self.cover.setStyleSheet(
             f"border:1px dashed {theme.LINE}; border-radius:10px;"
             f"color:{theme.FG_MUTE}; background:{theme.BG_CARD};"

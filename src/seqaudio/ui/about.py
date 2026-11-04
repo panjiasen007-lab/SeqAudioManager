@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, APP_NAME_EN, __version__
 from ..core import paths
-from . import theme
+from . import i18n, theme
 from .widgets import app_icon_pixmap
 
 LICENSE_NAME = "GNU General Public License v3.0"
@@ -97,7 +97,7 @@ def _license_text() -> str:
                 return found.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-    return (
+    return i18n.tr_text(
         "未能读取许可证文件。请访问 https://www.gnu.org/licenses/gpl-3.0.txt 获取\n"
         "GNU General Public License v3.0 全文。"
     )
@@ -105,9 +105,11 @@ def _license_text() -> str:
 
 def diagnostics() -> str:
     """可复制粘贴的诊断信息。"""
+    chinese = i18n.current() in ("zh_CN", "zh_TW")
+    name = APP_NAME if chinese else APP_NAME_EN
     lines = [
-        f"{APP_NAME} ({APP_NAME_EN}) v{__version__}",
-        f"系统: {platform.platform()}",
+        f"{name} ({APP_NAME_EN}) v{__version__}" if chinese else f"{name} v{__version__}",
+        f"{i18n.tr_text('系统')}: {platform.platform()}",
         f"Python: {sys.version.split()[0]}",
     ]
     try:
@@ -120,14 +122,14 @@ def diagnostics() -> str:
     try:
         from . import fonts
 
-        lines.append(f"字体: {fonts.describe()}")
+        lines.append(f"{i18n.tr_text('字体')}: {fonts.describe()}")
     except Exception:  # noqa: BLE001
         pass
     try:
         from ..core.authenticity import find_ffmpeg
 
         ffmpeg = find_ffmpeg()
-        lines.append(f"解码器: {ffmpeg or '未找到'}")
+        lines.append(f"{i18n.tr_text('解码器')}: {ffmpeg or i18n.tr_text('未找到')}")
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -136,13 +138,16 @@ def diagnostics() -> str:
         lines.append(f"mutagen: {mutagen.version_string}")
     except Exception:  # noqa: BLE001
         pass
-    for label, path in (("配置目录", paths.data_dir()), ("日志目录", paths.log_dir())):
+    for label, path in (
+        (i18n.tr_text("配置目录"), paths.data_dir()),
+        (i18n.tr_text("日志目录"), paths.log_dir()),
+    ):
         lines.append(f"{label}: {path}")
     screen = QGuiApplication.primaryScreen()
     if screen is not None:
         size = screen.size()
         ratio = screen.devicePixelRatio()
-        lines.append(f"屏幕: {size.width()}x{size.height()} @{ratio:g}x")
+        lines.append(f"{i18n.tr_text('屏幕')}: {size.width()}x{size.height()} @{ratio:g}x")
     return "\n".join(lines)
 
 
@@ -239,29 +244,12 @@ class AboutDialog(QDialog):
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
         browser.setHtml(
-            f"""
-            <div style="font-size:12px; line-height:180%; color:{theme.FG_DIM}">
-            <p><b style="color:{theme.FG}">这个软件做什么</b><br/>
-            把本地曲库里散乱的音频文件整理成干净可用的元数据：匹配专辑信息、
-            批量清理标签里的站点水印、内嵌或生成 LRC 歌词、按模板重命名，
-            并判断「无损」到底是真无损还是 MP3 转码伪装的。</p>
-
-            <p><b style="color:{theme.FG}">怎么做到不损坏文件</b><br/>
-            写入走三重保护：先备份 → 写影子副本 → 写后校验时长/采样率/声道 → 原子替换。
-            任何一步失败都会退回原文件。DFF 这类容器只追加 ID3 区块，
-            音频数据一字节不动。</p>
-
-            <p><b style="color:{theme.FG}">数据去哪了</b><br/>
-            全部留在本机。联网只用于查询 MusicBrainz / Cover Art Archive / LRCLIB
-            三个公开数据源，不上传任何音频或个人信息。离线模式可完全断开网络。</p>
-
-            <p><b style="color:{theme.FG}">字体</b><br/>
-            界面用 Noto Sans SC、数据列用 JetBrains Mono，均为 SIL OFL 1.1 授权并随包分发，
-            不需要你安装任何字体。</p>
-
-            <p style="color:{theme.FG_MUTE}; margin-top:14px">{DISCLAIMER}</p>
-            </div>
-            """
+            i18n.tr_html(
+                "about_intro",
+                fg=theme.FG,
+                mute=theme.FG_MUTE,
+                disclaimer=i18n.tr_html("disclaimer"),
+            )
         )
         return browser
 
@@ -275,8 +263,11 @@ class AboutDialog(QDialog):
         summary.setOpenExternalLinks(True)
         summary.setMaximumHeight(190)
         summary.setHtml(
-            LICENSE_SUMMARY.format(
-                app=APP_NAME, accent=theme.ACCENT, dim=theme.FG_MUTE
+            i18n.tr_html(
+                "license_summary",
+                app=APP_NAME_EN,
+                accent=theme.ACCENT,
+                dim=theme.FG_MUTE,
             )
         )
         layout.addWidget(summary)
@@ -299,7 +290,7 @@ class AboutDialog(QDialog):
             f"<tr>"
             f"<td style='padding:7px 10px; color:{theme.FG}'>{name}</td>"
             f"<td style='padding:7px 10px; color:{theme.CYAN}'>{lic}</td>"
-            f"<td style='padding:7px 10px; color:{theme.FG_DIM}'>{purpose}</td>"
+            f"<td style='padding:7px 10px; color:{theme.FG_DIM}'>{i18n.tr_purpose(purpose)}</td>"
             f"<td style='padding:7px 10px;'><a href='{url}' style='color:{theme.ACCENT}'>{url}</a></td>"
             f"</tr>"
             for name, lic, purpose, url in THIRD_PARTY
@@ -307,20 +298,18 @@ class AboutDialog(QDialog):
         browser.setHtml(
             f"""
             <div style="color:{theme.FG_DIM}; font-size:12px">
-            <p style="line-height:170%">本软件建立在以下开源项目之上，感谢它们的作者。
-            各处授权文本随安装包一并分发。</p>
+            <p style="line-height:170%">{i18n.tr_html("third_party_intro")}</p>
             <table width="100%" cellspacing="0" style="font-size:12px">
             <tr style="color:{theme.FG_MUTE}; font-size:11px">
-              <td style="padding:4px 10px">组件</td>
-              <td style="padding:4px 10px">授权</td>
-              <td style="padding:4px 10px">用途</td>
-              <td style="padding:4px 10px">主页</td>
+              <td style="padding:4px 10px">{i18n.tr_text("组件")}</td>
+              <td style="padding:4px 10px">{i18n.tr_text("授权")}</td>
+              <td style="padding:4px 10px">{i18n.tr_text("用途")}</td>
+              <td style="padding:4px 10px">{i18n.tr_text("主页")}</td>
             </tr>
             {rows}
             </table>
             <p style="color:{theme.FG_MUTE}; margin-top:12px; line-height:170%">
-            说明：PySide6 以 LGPLv3 授权动态链接使用；FFmpeg 二进制来自
-            imageio-ffmpeg（LGPL 构建），仅用于解码分析，不做再编码。</p>
+            {i18n.tr_html("third_party_note")}</p>
             </div>
             """
         )
@@ -336,7 +325,7 @@ class AboutDialog(QDialog):
 
     def _copy_diagnostics(self) -> None:
         QGuiApplication.clipboard().setText(diagnostics())
-        self.copy_btn.setText("已复制 ✓")
+        self.copy_btn.setText(i18n.tr_text("已复制 ✓"))
 
     def _open_log_dir(self) -> None:
         try:

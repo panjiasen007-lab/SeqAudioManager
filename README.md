@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.1-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -51,6 +51,10 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **中文目录 SACD 导入修复**：内置 `sacd_extract` 改用纯 ASCII 工作目录，
   解决在「音序管家-v1.5.1」这类中文文件夹下双击运行时导入失败；
   重新导入同路径镜像时，旧的失败/未展开记录会被新分轨自动替换。
+- **8 语言全界面覆盖**：简/繁/英/日/韩/俄/法/德切换后，主窗口、右侧参数页、
+  检查器、表格列头与提示、右键菜单、命令面板、全部对话框、曲库体检、清理/隔离区、
+  关于页与首次使用须知、运行时消息与状态摘要都只显示当前语言；
+  消息框标准按钮、输入框占位符、数值单位后缀、字体下拉提示也一并跟随。
 
 ### V1.5.0 更新摘要
 
@@ -304,8 +308,8 @@ python build.py --debug             # 保留控制台窗口，排查启动异常
 产物：
 
 ```
-dist/音序管家-v1.5.0-x86-x64.7z            便携绿色版（解压即用，约 100 MB）
-dist/音序管家-v1.5.0-x86-x64-Setup.exe     安装程序（约 192 MB）
+dist/音序管家-v1.5.1-x86-x64.7z            便携绿色版（解压即用，约 96 MB）
+dist/音序管家-v1.5.1-x86-x64-Setup.exe     安装程序（约 184 MB）
 ```
 
 **便携版**用 PyInstaller 的 onedir 模式再压成 7z。不用 onefile 的原因很实际：
@@ -566,7 +570,7 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 **P1+（已实现）**
 - 真假无损鉴定 ✅（转码/升采样/升位深三类独立判据：峰值-中位数双参考截止、扩展带数字静音、源码带宽台阶（噪声填充升频）、16bit 上限检查、频谱空洞与 sfb21；DSD 额外用「信号边界」帧间波动判据定位源码带宽，可识别有损/CD/48k/96k 四类转制；同批一致性按调制器指纹推定；多段中位数稳健判定）
 - 一键切换 11 套主题 ✅（深空/黑胶/春/夏/秋/冬/海岸/暮光/太极/纸白/黑白极简）
-- 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，首屏核心字符串已翻译）
+- 8 语言界面 ✅（简/繁/英/日/韩/俄/法/德，主窗口、设置、对话框、关于页与提示文案均已覆盖）
 - 多源数据自动切换 ✅（元数据 MusicBrainz→iTunes→网易云→QQ音乐；歌词 LRCLIB→网易云→QQ音乐；封面 CAA→远程）
 - 标题去序号清洗 ✅ / 封面批量导出 ✅
 - 批量标签编辑 ✅（字段打勾才修改，支持选中/全选曲目，可批量清空字段）
@@ -644,6 +648,12 @@ Advanced capabilities:
   reports how many tracks were completed.
 - **SACD import under Chinese paths** — subprocesses run with an ASCII working
   directory, fixing imports from folders such as `音序管家-v1.5.1`.
+- **Full 8-language interface** — Simplified/Traditional Chinese, English,
+  Japanese, Korean, Russian, French and German now cover the main window,
+  options panel, inspector, table headers and tooltips, context menus, command
+  palette, all dialogs, library health, cleanup/quarantine, about page, notice,
+  runtime messages and status summaries. Message-box buttons, placeholders,
+  numeric unit suffixes and font-picker tooltips follow the selected language too.
 
 ### V1.5.0 highlights
 
@@ -838,8 +848,8 @@ python build.py --debug             # keep a console window for debugging
 Artifacts:
 
 ```
-dist/音序管家-v1.5.0-x86-x64.7z            portable edition (extract-and-run, ~100 MB)
-dist/音序管家-v1.5.0-x86-x64-Setup.exe     installer (~192 MB)
+dist/音序管家-v1.5.1-x86-x64.7z            portable edition (extract-and-run, ~96 MB)
+dist/音序管家-v1.5.1-x86-x64-Setup.exe     installer (~184 MB)
 ```
 
 The **portable edition** uses PyInstaller's onedir mode packed into 7z. onefile is avoided for a practical reason: it extracts ~250 MB to a temp directory on every launch (3–5 s the first time), while onedir loads instantly. Portable usage is "extract to a USB drive and run", so a directory layout fits better.

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from ..core.model import MatchCandidate, Tags, Track
 from ..core.rename import RenamePlan
-from . import theme
+from . import i18n, theme
 from .widgets import Card
 
 
@@ -249,10 +249,16 @@ class TagEditDialog(QDialog):
                 edit.setText(value)
                 filled.append(label)
         if filled:
-            self.fill_hint.setText("已按文件名补全：" + "、".join(filled)
-                                   + "（仍需点「保存到列表」才生效）")
+            self.fill_hint.setText(
+                i18n.tr_format(
+                    "已按文件名补全：{fields}（仍需点「保存到列表」才生效）",
+                    fields="、".join(filled)
+                    if i18n.current() in ("zh_CN", "zh_TW")
+                    else ", ".join(filled),
+                )
+            )
         else:
-            self.fill_hint.setText("文件名里没有可用的新信息，字段保持原样")
+            self.fill_hint.setText(i18n.tr_text("文件名里没有可用的新信息，字段保持原样"))
         self.fill_hint.setVisible(True)
 
     def _render_cover(self) -> None:
@@ -273,11 +279,11 @@ class TagEditDialog(QDialog):
                 pix.scaled(102, 102, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         else:
-            self.cover_label.setText("无法预览")
+            self.cover_label.setText(i18n.tr_text("无法预览"))
 
     def _pick_cover(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择封面图片", "", "图片 (*.jpg *.jpeg *.png *.webp)"
+            self, i18n.tr_text("选择封面图片"), "", i18n.tr_text("图片 (*.jpg *.jpeg *.png *.webp)")
         )
         if not path:
             return
@@ -414,7 +420,7 @@ class BatchTagEditDialog(QDialog):
             return "（当前为空）"
         if len(values) == 1:
             return next(iter(values))[:48]
-        return "<多个值>"
+        return i18n.tr_text("<多个值>")
 
     def result_values(self) -> dict[str, str]:
         """返回勾选字段的目标值；未勾选的字段不出现在结果里。"""
@@ -488,11 +494,13 @@ class CommandPaletteDialog(QDialog):
         self._filtered = []
         last_group = ""
         for index, (group, name, shortcut, _) in enumerate(self._commands):
-            haystack = f"{group} {name} {shortcut}".lower()
+            display_group = i18n.tr_text(group)
+            display_name = i18n.tr_text(name)
+            haystack = f"{display_group} {display_name} {shortcut}".lower()
             if keyword and keyword not in haystack:
                 continue
-            if group != last_group:
-                header = QListWidgetItem(group)
+            if display_group != last_group:
+                header = QListWidgetItem(display_group)
                 header.setFlags(Qt.NoItemFlags)
                 header.setForeground(QBrush(QColor(theme.FG_DIM)))
                 header.setBackground(QBrush(QColor(theme.BG_CARD)))
@@ -501,8 +509,10 @@ class CommandPaletteDialog(QDialog):
                 header.setFont(font)
                 header.setSizeHint(QSize(0, 26))
                 self.list.addItem(header)
-                last_group = group
-            item = QListWidgetItem(f"{name}    {shortcut}" if shortcut else name)
+                last_group = display_group
+            item = QListWidgetItem(
+                f"{display_name}    {shortcut}" if shortcut else display_name
+            )
             item.setData(Qt.UserRole, index)
             item.setSizeHint(QSize(0, 30))
             self.list.addItem(item)
@@ -553,7 +563,10 @@ class CandidateDialog(QDialog):
         for cand in candidates:
             item = QListWidgetItem(
                 f"[{cand.confidence:.0%}] {cand.source}  |  {cand.label}"
-                + (f"   曲目 {cand.track}" if cand.track else "")
+                + (
+                    i18n.tr_format("  曲目 {number}", number=cand.track)
+                    if cand.track else ""
+                )
             )
             item.setData(Qt.UserRole, cand)
             self.list.addItem(item)
@@ -587,9 +600,13 @@ class RenamePreviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
         info = QLabel(
-            f"模板：{plan.template}    待改名 {len(plan.pending)} 项，"
-            f"跳过 {len(plan.items) - len(plan.pending) - len(plan.blocked)} 项，"
-            f"冲突 {len(plan.blocked)} 项"
+            i18n.tr_format(
+                "模板：{template}    待改名 {pending} 项，跳过 {skipped} 项，冲突 {conflicts} 项",
+                template=i18n.tr_template(plan.template),
+                pending=len(plan.pending),
+                skipped=len(plan.items) - len(plan.pending) - len(plan.blocked),
+                conflicts=len(plan.blocked),
+            )
         )
         info.setStyleSheet("color:#8b909a;")
         info.setWordWrap(True)
@@ -609,10 +626,10 @@ class RenamePreviewDialog(QDialog):
                 status = "改名"
             else:
                 status = "不变"
-            table.setItem(row, 0, QTableWidgetItem(status))
+            table.setItem(row, 0, QTableWidgetItem(i18n.tr_text(status)))
             table.setItem(row, 1, QTableWidgetItem(item.old_path.name))
             table.setItem(row, 2, QTableWidgetItem(
-                item.new_path.name if item.ok else item.reason
+                item.new_path.name if item.ok else i18n.tr_text(item.reason)
             ))
         table.resizeColumnsToContents()
         layout.addWidget(table, 1)

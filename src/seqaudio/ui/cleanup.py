@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 from ..core.model import Track
 from ..core.quarantine import QuarantineStore, human_size
 from ..core.authenticity import VERDICT_COLORS
-from . import theme
+from . import i18n, theme
 from .widgets import Card
 
 log = logging.getLogger(__name__)
@@ -85,13 +85,23 @@ class CleanupDialog(QDialog):
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(10)
 
-        title = QLabel(f"待清理 {len(tracks)} 个文件，合计 {human_size(total_bytes)}")
+        title = QLabel(
+            i18n.tr_format(
+                "待清理 {count} 个文件，合计 {size}",
+                count=len(tracks),
+                size=human_size(total_bytes),
+            )
+        )
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
         subtitle = QLabel(
-            f"其中确认假无损 {fake} 个，疑似假无损 / 升频 {suspect} 个。"
-            "建议先用频谱确认再删除 —— 双击任意一行可查看频谱。"
+            i18n.tr_format(
+                "其中确认假无损 {fake} 个，疑似假无损 / 升频 {suspect} 个。"
+                "建议先用频谱确认再删除 —— 双击任意一行可查看频谱。",
+                fake=fake,
+                suspect=suspect,
+            )
         )
         subtitle.setObjectName("hint")
         subtitle.setWordWrap(True)
@@ -104,11 +114,11 @@ class CleanupDialog(QDialog):
             auth = track.authenticity
             items = [
                 QTableWidgetItem(track.path.name),
-                QTableWidgetItem(auth.verdict if auth else ""),
+                QTableWidgetItem(i18n.tr_verdict(auth.verdict) if auth else ""),
                 QTableWidgetItem(track.info.fmt),
                 QTableWidgetItem(human_size(track.path.stat().st_size)
                                  if track.path.exists() else "-"),
-                QTableWidgetItem(track.working.title or track.path.stem),
+                QTableWidgetItem(i18n.tr_text(auth.detail_text) if auth else ""),
             ]
             items[1].setForeground(_color(VERDICT_COLORS.get(auth.verdict if auth else "", theme.FG_MUTE)))
             for column, item in enumerate(items):
@@ -174,7 +184,10 @@ class CleanupDialog(QDialog):
 
     def _refresh_buttons(self) -> None:
         dangerous = self.mode == MODE_DELETE
-        self.btn_ok.setText(f"彻底删除 {len(self.tracks)} 个文件" if dangerous else "开始清理")
+        self.btn_ok.setText(
+            i18n.tr_format("彻底删除 {count} 个文件", count=len(self.tracks))
+            if dangerous else i18n.tr_text("开始清理")
+        )
         self.btn_ok.setObjectName("dangerSolid" if dangerous else "primary")
         # 切换 objectName 后必须重新应用样式，否则 QSS 不会重算
         self.btn_ok.style().unpolish(self.btn_ok)
@@ -182,8 +195,11 @@ class CleanupDialog(QDialog):
         self.warning.setVisible(dangerous)
         if dangerous:
             self.warning.setText(
-                f"⚠ 这些文件将直接从磁盘移除，不进入回收站，也无法通过回收站还原。"
-                f"共 {len(self.tracks)} 个文件。"
+                i18n.tr_format(
+                    "⚠ 这些文件将直接从磁盘移除，不进入回收站，也无法通过回收站还原。"
+                    "共 {count} 个文件。",
+                    count=len(self.tracks),
+                )
             )
         self.btn_ok.setEnabled(not dangerous or self.confirm_check.isChecked())
 
@@ -261,7 +277,7 @@ class QuarantineDialog(QDialog):
         for row, entry in enumerate(self._entries):
             values = [
                 os.path.basename(entry.stored),
-                entry.verdict or "-",
+                i18n.tr_verdict(entry.verdict) if entry.verdict else "-",
                 entry.size_text,
                 entry.moved_at,
                 entry.original,
@@ -276,8 +292,12 @@ class QuarantineDialog(QDialog):
 
         total = sum(e.size for e in self._entries)
         self.title.setText(
-            f"隔离区 · {len(self._entries)} 个文件 · 占用 {human_size(total)}"
-            if self._entries else "隔离区 · 空"
+            i18n.tr_format(
+                "隔离区 · {count} 个文件 · 占用 {size}",
+                count=len(self._entries),
+                size=human_size(total),
+            )
+            if self._entries else i18n.tr_text("隔离区 · 空")
         )
         has_entries = bool(self._entries)
         self.btn_restore.setEnabled(has_entries)
@@ -298,7 +318,13 @@ class QuarantineDialog(QDialog):
                 ok += 1
             else:
                 log.warning("还原失败 %s：%s", entry.original, message)
-        QMessageBox.information(self, "还原完成", f"成功还原 {ok} / {len(entries)} 个文件。")
+        QMessageBox.information(
+            self,
+            i18n.tr_text("还原完成"),
+            i18n.tr_format(
+                "成功还原 {ok} / {total} 个文件。", ok=ok, total=len(entries)
+            ),
+        )
         self.reload()
 
     def purge_selected(self) -> None:
@@ -308,22 +334,29 @@ class QuarantineDialog(QDialog):
         # 隔离区里已经"删过一次"了，但这里仍是不可恢复操作，必须二次确认
         reply = QMessageBox.warning(
             self,
-            "彻底删除",
-            f"将从隔离区永久删除 {len(entries)} 个文件，无法恢复。\n\n继续？",
+            i18n.tr_text("彻底删除"),
+            i18n.tr_format(
+                "将从隔离区永久删除 {count} 个文件，无法恢复。\n\n继续？",
+                count=len(entries),
+            ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
         ok = sum(1 for entry in entries if self.store.purge(entry)[0])
-        QMessageBox.information(self, "完成", f"已永久删除 {ok} 个文件。")
+        QMessageBox.information(
+            self,
+            i18n.tr_text("完成"),
+            i18n.tr_format("已永久删除 {ok} 个文件。", ok=ok),
+        )
         self.reload()
 
     def open_folder(self) -> None:
         try:
             os.startfile(str(self.store.root))  # type: ignore[attr-defined]
         except OSError as exc:
-            QMessageBox.warning(self, "无法打开", str(exc))
+            QMessageBox.warning(self, i18n.tr_text("无法打开"), str(exc))
 
 
 def _color(hex_value: str):

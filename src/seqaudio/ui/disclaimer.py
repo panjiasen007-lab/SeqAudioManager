@@ -7,6 +7,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
+from . import i18n
 from .widgets import LogoMark
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -74,7 +75,7 @@ class DisclaimerDialog(QDialog):
         layout.addLayout(head)
 
         browser = QTextBrowser()
-        browser.setHtml(NOTICE)
+        browser.setHtml(i18n.tr_html("notice"))
         browser.setOpenExternalLinks(True)
         layout.addWidget(browser, 1)
 

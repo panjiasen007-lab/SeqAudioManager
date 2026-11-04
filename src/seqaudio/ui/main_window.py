@@ -569,7 +569,9 @@ class MainWindow(QMainWindow):
     def _toggle_log(self) -> None:
         visible = not self.log_view.isVisible()
         self.log_view.setVisible(visible)
-        self.btn_log_toggle.setText("收起" if visible else "展开")
+        self.btn_log_toggle.setText(
+            i18n.tr_text("收起") if visible else i18n.tr_text("展开")
+        )
 
     def _init_shortcuts(self) -> None:
         QShortcut(QKeySequence.Open, self, self.add_folder)
@@ -598,9 +600,9 @@ class MainWindow(QMainWindow):
     def add_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "选择音频文件",
+            i18n.tr_text("选择音频文件"),
             self.settings.last_folder or "",
-            AUDIO_FILE_FILTER,
+            i18n.tr_text(AUDIO_FILE_FILTER),
         )
         if files:
             self.settings.last_folder = str(Path(files[0]).parent)
@@ -608,7 +610,7 @@ class MainWindow(QMainWindow):
 
     def add_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "选择音乐文件夹", self.settings.last_folder or ""
+            self, i18n.tr_text("选择音乐文件夹"), self.settings.last_folder or ""
         )
         if folder:
             self.settings.last_folder = folder
@@ -619,10 +621,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "请稍候", "正在扫描上一批文件，请等待完成。")
             return
         self.brand_bar.set_status("扫描中", theme.CYAN)
-        self.status_hint.setText("正在扫描…")
+        self.status_hint.setText(i18n.tr_text("正在扫描…"))
         self.scan_worker = ScanWorker(paths, self.settings.recursive_scan)
         self.scan_worker.discovered.connect(
-            lambda n: self.status_hint.setText(f"正在扫描… 已发现 {n} 个音频")
+            lambda n: self.status_hint.setText(
+                i18n.tr_format("正在扫描… 已发现 {n} 个音频", n=n)
+            )
         )
         self.scan_worker.finishedScan.connect(self._on_scan_finished)
         self.scan_worker.failed.connect(self._on_scan_failed)
@@ -632,7 +636,7 @@ class MainWindow(QMainWindow):
         """扫描线程异常：日志 + 状态栏 + 明确弹窗，避免用户只看到空列表。"""
         self._append_log("ERROR", f"导入失败：{message}")
         self.brand_bar.set_status("导入失败", theme.BAD)
-        self.status_hint.setText(f"导入失败：{message}")
+        self.status_hint.setText(i18n.tr_format("导入失败：{message}", message=message))
         QMessageBox.warning(
             self,
             "导入失败",
@@ -644,7 +648,7 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, tracks: list[Track]) -> None:
         if not tracks:
             self._append_log("WARNING", "没有找到可导入的音频文件")
-            self.status_hint.setText("没有找到可导入的音频文件")
+            self.status_hint.setText(i18n.tr_text("没有找到可导入的音频文件"))
             self.brand_bar.set_status("就绪", theme.FG_DIM)
             return
         incoming = {str(t.path).lower() for t in tracks}
@@ -712,13 +716,22 @@ class MainWindow(QMainWindow):
             "「Track 01」「Unknown」这类占位内容，已按文件名自动对齐。"
             "当前只改列表显示，文件本身还没改动。"
         )
-        preview = "、".join(t.path.name for t in tracks[:3])
+        preview = (
+            "、".join(t.path.name for t in tracks[:3])
+            if i18n.current() in ("zh_CN", "zh_TW")
+            else ", ".join(t.path.name for t in tracks[:3])
+        )
         if len(tracks) > 3:
-            preview += f" 等 {len(tracks)} 个"
+            preview = i18n.tr_format(
+                "{names} 等 {count} 个", names=preview, count=len(tracks)
+            )
         box.setInformativeText(
-            f"示例：{preview}\n\n"
-            "「保存到文件」会把对齐后的歌名/歌手写入音频标签（写入前自动备份）；\n"
-            "「不保存」会还原为文件原有的占位符标签，列表恢复未对齐的样子。"
+            i18n.tr_format(
+                "示例：{preview}\n\n"
+                "「保存到文件」会把对齐后的歌名/歌手写入音频标签（写入前自动备份）；\n"
+                "「不保存」会还原为文件原有的占位符标签，列表恢复未对齐的样子。",
+                preview=preview,
+            )
         )
         save_btn = box.addButton("保存到文件", QMessageBox.AcceptRole)
         revert_btn = box.addButton("不保存，还原", QMessageBox.RejectRole)
@@ -771,7 +784,7 @@ class MainWindow(QMainWindow):
             return
         self._revert_targets = targets
         self.brand_bar.set_status("还原中", theme.CYAN)
-        self.status_hint.setText("正在重新读取原始标签…")
+        self.status_hint.setText(i18n.tr_text("正在重新读取原始标签…"))
         self.revert_scan_worker = ScanWorker(
             [t.path for t in targets], recursive=False, auto_align=False
         )
@@ -811,7 +824,9 @@ class MainWindow(QMainWindow):
         self._revert_targets = []
         self._refresh_stats()
         self.brand_bar.set_status("就绪", theme.FG_DIM)
-        self.status_hint.setText(f"已恢复 {updated} 个文件的原始标签")
+        self.status_hint.setText(
+            i18n.tr_format("已恢复 {updated} 个文件的原始标签", updated=updated)
+        )
         self._append_log(
             "INFO", f"已重新读取 {updated} 个文件，显示未对齐的原始标签"
         )
@@ -924,14 +939,17 @@ class MainWindow(QMainWindow):
         self.progress.setMaximum(len(targets))
         self.progress.setValue(0)
         if options.write_only:
-            self.mode_label.setText("确认保存")
+            self.mode_label.setText(i18n.tr_text("确认保存"))
             self._append_log("INFO", f"开始写入 {len(targets)} 首的标签变更")
         else:
-            self.mode_label.setText("联网模式" if options.match_online else "离线模式")
+            self.mode_label.setText(
+                i18n.tr_text("联网模式" if options.match_online else "离线模式")
+            )
             self._append_log(
                 "INFO",
-                f"开始处理 {len(targets)} 首（{'联网匹配' if options.match_online else '仅本地'}，"
-                f"覆盖策略：{self.settings.conflict()}）",
+                f"开始处理 {len(targets)} 首（"
+                f"{i18n.tr_text('联网匹配' if options.match_online else '仅本地')}，"
+                f"覆盖策略：{i18n.tr_text(self.settings.conflict())}）",
             )
 
         self.worker = ProcessorWorker(self.settings, targets, options)
@@ -988,40 +1006,55 @@ class MainWindow(QMainWindow):
             self._append_log("INFO", "当前没有正在运行的任务")
             return
         self.btn_stop.setEnabled(False)
-        self.status_hint.setText("正在停止…")
+        self.status_hint.setText(i18n.tr_text("正在停止…"))
         self._append_log(
             "WARNING",
-            f"已请求停止：{'、'.join(stopped)}；当前文件结束后退出",
+            i18n.tr_format(
+                "已请求停止：{tasks}；当前文件结束后退出",
+                tasks=(
+                    "、".join(i18n.tr_text(name) for name in stopped)
+                    if i18n.current() in ("zh_CN", "zh_TW")
+                    else ", ".join(i18n.tr_text(name) for name in stopped)
+                ),
+            ),
         )
 
     def _on_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
-        self.status_hint.setText(f"处理中 {index} / {total}")
+        self.status_hint.setText(
+            i18n.tr_format("处理中 {index} / {total}", index=index, total=total)
+        )
 
     def _on_write_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
-        self.status_hint.setText(f"写入标签 {index} / {total}")
+        self.status_hint.setText(
+            i18n.tr_format("写入标签 {index} / {total}", index=index, total=total)
+        )
 
     def _on_cover_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
-        self.status_hint.setText(f"生成文件夹封面 {index} / {total}")
+        self.status_hint.setText(
+            i18n.tr_format("生成文件夹封面 {index} / {total}", index=index, total=total)
+        )
 
     def _on_cover_summary(self, summary) -> None:
-        self.status_hint.setText(summary.text() if hasattr(summary, "text") else "")
+        text = i18n.tr_text(summary.text()) if hasattr(summary, "text") else ""
+        self.status_hint.setText(text)
 
     def _on_phase(self, name: str) -> None:
-        self.brand_bar.set_status(name, theme.CYAN)
+        self.brand_bar.set_status(i18n.tr_text(name), theme.CYAN)
         self.progress.setValue(0)
 
     def _on_finished(self, summary) -> None:
         self._set_running(False)
         self.model.refresh_all()
         self._refresh_stats()
-        self._append_log("INFO", summary.text())
-        self.status_hint.setText(summary.text())
+        text = i18n.tr_text(summary.text()) if hasattr(summary, "text") else str(summary)
+        self._append_log("INFO", text)
+        self.status_hint.setText(text)
         self.mode_label.setText("")
 
     # ------------------------------------------------------------ 行操作
@@ -1107,7 +1140,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "inspector", None) is not None:
             self.inspector.refresh()
         self._append_log("INFO", f"已撤销 {len(tracks)} 首的标签编辑")
-        self.status_hint.setText(f"已撤销 {len(tracks)} 首的标签编辑")
+        self.status_hint.setText(
+            i18n.tr_format("已撤销 {count} 首的标签编辑", count=len(tracks))
+        )
 
     def batch_edit_selected(self) -> None:
         """批量编辑选中曲目的标签：只有勾选的字段才会被修改（V1.1）。"""
@@ -1248,7 +1283,9 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QApplication
 
         QApplication.clipboard().setText(str(tracks[0].path))
-        self.status_hint.setText(f"已复制路径：{tracks[0].path.name}")
+        self.status_hint.setText(
+            i18n.tr_format("已复制路径：{name}", name=tracks[0].path.name)
+        )
 
     def revert_selected(self) -> None:
         for track in self._selected_tracks():
@@ -1291,30 +1328,32 @@ class MainWindow(QMainWindow):
             self.table.setCurrentIndex(index)
 
         menu = QMenu(self)
-        menu.addAction("编辑标签\tCtrl+E", self.edit_selected)
-        menu.addAction("批量编辑标签…", self.batch_edit_selected)
-        menu.addAction("查看候选匹配", self.show_candidates)
-        menu.addAction("确认匹配（采纳最佳候选）", self.confirm_selected)
-        menu.addAction("撤销标签编辑", self.undo_last_tag_edit)
-        menu.addAction("撤销本地修改", self.revert_selected)
+        menu.addAction(i18n.tr_text("编辑标签") + "\tCtrl+E", self.edit_selected)
+        menu.addAction(i18n.tr_text("批量编辑标签…"), self.batch_edit_selected)
+        menu.addAction(i18n.tr_text("查看候选匹配"), self.show_candidates)
+        menu.addAction(i18n.tr_text("确认匹配（采纳最佳候选）"), self.confirm_selected)
+        menu.addAction(i18n.tr_text("撤销标签编辑"), self.undo_last_tag_edit)
+        menu.addAction(i18n.tr_text("撤销本地修改"), self.revert_selected)
         menu.addSeparator()
-        menu.addAction("查看频谱", self.show_spectrum)
-        menu.addAction("分轨导出（CUE / SACD ISO）…", self.run_split_cue)
-        menu.addAction("移入隔离区", self._quarantine_selected)
-        menu.addAction("删除歌曲…", self.delete_selected)
+        menu.addAction(i18n.tr_text("查看频谱"), self.show_spectrum)
+        menu.addAction(i18n.tr_text("分轨导出（CUE / SACD ISO）…"), self.run_split_cue)
+        menu.addAction(i18n.tr_text("移入隔离区"), self._quarantine_selected)
+        menu.addAction(i18n.tr_text("删除歌曲…"), self.delete_selected)
         menu.addSeparator()
-        menu.addAction("打开所在文件夹", self.open_folder)
-        menu.addAction("复制完整路径", self.copy_path)
+        menu.addAction(i18n.tr_text("打开所在文件夹"), self.open_folder)
+        menu.addAction(i18n.tr_text("复制完整路径"), self.copy_path)
         menu.addSeparator()
-        menu.addAction("按标签重命名本目录…", self.rename_folder)
-        menu.addAction("仅处理选中项", self._run_selected)
+        menu.addAction(i18n.tr_text("按标签重命名本目录…"), self.rename_folder)
+        menu.addAction(i18n.tr_text("仅处理选中项"), self._run_selected)
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _on_selection_changed(self, *_) -> None:
         tracks = self._selected_tracks()
         self.selection_bar.setVisible(bool(tracks))
         if tracks:
-            self.selection_label.setText(f"已选 {len(tracks)} 首")
+            self.selection_label.setText(
+                i18n.tr_format("已选 {count} 首", count=len(tracks))
+            )
         self.inspector.set_track(tracks[0] if tracks else None)
 
     def _select_verdict_filter(self, key: str) -> None:
@@ -1449,7 +1488,9 @@ class MainWindow(QMainWindow):
                 self.model.refresh_row(track)
                 count += 1
         self._append_log("INFO", f"已去除 {count} 个标题的序号前缀")
-        self.status_hint.setText(f"去序号：{count} 个标题已更新")
+        self.status_hint.setText(
+            i18n.tr_format("去序号：{count} 个标题已更新", count=count)
+        )
 
     def _run_selected(self) -> None:
         tracks = self._selected_tracks()
@@ -1543,13 +1584,20 @@ class MainWindow(QMainWindow):
         if result.reasons:
             self._append_log(
                 "WARNING" if result.is_suspicious else "INFO",
-                f"{track.path.name} → {result.verdict}（{result.detail_text}）",
+                i18n.tr_format(
+                    "{name} → {verdict}（{detail}）",
+                    name=track.path.name,
+                    verdict=i18n.tr_verdict(result.verdict),
+                    detail=i18n.tr_text(result.detail_text),
+                ),
             )
 
     def _on_auth_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
-        self.status_hint.setText(f"鉴定中 {index} / {total}")
+        self.status_hint.setText(
+            i18n.tr_format("鉴定中 {index} / {total}", index=index, total=total)
+        )
 
     def _on_auth_finished(self, true_count: int, suspect: int, unknown: int) -> None:
         self._set_running(False)
@@ -1558,14 +1606,21 @@ class MainWindow(QMainWindow):
         # 扫描结束后统一刷新统计卡，把同批推定改判的结果也一并计入
         self._refresh_stats()
         if self._auth_stopped:
-            msg = (
-                f"鉴定已停止：已完成真无损 {true_count}，可疑 {suspect}，"
-                f"无法判定 {unknown}"
+            msg = i18n.tr_format(
+                "鉴定已停止：已完成真无损 {true}，可疑 {suspect}，无法判定 {unknown}",
+                true=true_count,
+                suspect=suspect,
+                unknown=unknown,
             )
             self._append_log("WARNING", msg)
             self._auth_stopped = False
         else:
-            msg = f"鉴定完成：真无损 {true_count}，可疑 {suspect}，无法判定 {unknown}"
+            msg = i18n.tr_format(
+                "鉴定完成：真无损 {true}，可疑 {suspect}，无法判定 {unknown}",
+                true=true_count,
+                suspect=suspect,
+                unknown=unknown,
+            )
             self._append_log("WARNING" if suspect else "INFO", msg)
             if suspect:
                 self._append_log("INFO", "已自动勾选「只看问题」，可从表格筛出可疑项")
@@ -1637,10 +1692,17 @@ class MainWindow(QMainWindow):
             removed = [t for t in self.model.tracks() if not t.path.exists()]
             self._append_log(
                 "WARNING",
-                f"已隔离 {len(created)} 个文件到 {store.root}，可在「隔离区管理」中还原",
+                i18n.tr_format(
+                    "已隔离 {count} 个文件到 {path}，可在「隔离区管理」中还原",
+                    count=len(created),
+                    path=store.root,
+                ),
             )
             for path, reason in failed:
-                self._append_log("ERROR", f"隔离失败 {path.name}：{reason}")
+                self._append_log(
+                    "ERROR",
+                    i18n.tr_format("隔离失败 {name}：{message}", name=path.name, message=reason),
+                )
         else:
             count, error = send_to_recycle_bin(paths)
             if count == 0:
@@ -1665,8 +1727,8 @@ class MainWindow(QMainWindow):
             self.model.remove_tracks(removed)
             self._refresh_stats()
         self.status_hint.setText(
-            f"清理完成：{len(removed)} 个文件已移出列表"
-            if removed else "清理未生效：文件仍存在，请检查权限"
+            i18n.tr_format("清理完成：{count} 个文件已移出列表", count=len(removed))
+            if removed else i18n.tr_text("清理未生效：文件仍存在，请检查权限")
         )
 
     def open_quarantine(self) -> None:
@@ -1754,7 +1816,7 @@ class MainWindow(QMainWindow):
         add("操作", "关于音序管家", "F1", self.show_about)
 
         for index, (title, _) in enumerate(("匹配", "歌词", "写入", "外观")):
-            add("设置", f"打开参数页：{title}", "", lambda i=index: self._show_settings_tab(i))
+            add("设置", f"打开参数页：{i18n.tr_text(title)}", "", lambda i=index: self._show_settings_tab(i))
         add("设置", "侧栏显示 / 隐藏", "Ctrl+P", self.toggle_settings_panel)
 
         add("筛选", "判定：全部", "", lambda: self._select_verdict_filter("all"))
@@ -1799,6 +1861,10 @@ class MainWindow(QMainWindow):
         i18n.set_locale(code)
         self.settings.language = code
 
+        # 先翻译整棵控件树（静态标签、页签、下拉项、菜单、提示），
+        # 再用 key 更新工具栏与统计卡，最后刷新表格头。
+        for widget in QApplication.topLevelWidgets():
+            i18n.localize_tree(widget)
         for btn, key in self._i18n_buttons.items():
             btn.setText(i18n.tr(key))
         for key, title_key in self._i18n_stat_keys.items():
@@ -1818,6 +1884,8 @@ class MainWindow(QMainWindow):
             action.blockSignals(blocked)
 
         self.model.refresh_all()
+        if getattr(self, "inspector", None) is not None:
+            self.inspector.refresh()
         try:
             self.settings.save()
         except OSError:
@@ -1833,7 +1901,9 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setFont(fonts.ui_font(13))
         self.apply_theme(self.settings.theme, persist=False, quiet=True)
-        self.status_hint.setText("字体已预览，点击「保存参数」后生效")
+        self.status_hint.setText(
+            i18n.tr_text("字体已预览，点击「保存参数」后生效")
+        )
 
     def apply_theme(self, name: str, *, persist: bool = True, quiet: bool = False) -> None:
         if name not in theme.THEMES:
@@ -1871,7 +1941,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
         if not quiet:
-            self._append_log("INFO", f"主题已切换：{name}")
+            self._append_log("INFO", i18n.tr_format("主题已切换：{name}", name=i18n.tr_theme(name)))
 
     def _update_verdict_chips(self) -> None:
         for label_key, key in self._verdict_filter_items:
@@ -1997,10 +2067,12 @@ class MainWindow(QMainWindow):
     def _on_split_progress(self, index: int, total: int) -> None:
         self.progress.setMaximum(max(1, total))
         self.progress.setValue(index)
-        self.status_hint.setText(f"分轨导出 {index} / {total}")
+        self.status_hint.setText(
+            i18n.tr_format("分轨导出 {index} / {total}", index=index, total=total)
+        )
 
     def _on_split_summary(self, summary) -> None:
-        self.status_hint.setText(summary.text())
+        self.status_hint.setText(i18n.tr_text(summary.text()))
 
     def _on_split_finished(self) -> None:
         if self._split_stopped:
@@ -2016,7 +2088,7 @@ class MainWindow(QMainWindow):
         if not tracks:
             QMessageBox.information(self, "没有曲目", "请先添加音频文件。")
             return
-        self._run_rename(tracks, scope="列表全部曲目")
+        self._run_rename(tracks, scope=i18n.tr_text("列表全部曲目"))
 
     def rename_folder(self) -> None:
         """按标签统一重命名「选中项所在目录」的全部曲目。
@@ -2034,10 +2106,18 @@ class MainWindow(QMainWindow):
             if t.path.parent in folders and t.status is not TrackStatus.UNSUPPORTED
         ]
         if not tracks:
-            QMessageBox.information(self, "没有曲目", "所选目录下没有可重命名的曲目。")
+            QMessageBox.information(
+                self, i18n.tr_text("没有曲目"),
+                i18n.tr_text("所选目录下没有可重命名的曲目。"),
+            )
             return
-        name = next(iter(folders)).name if len(folders) == 1 else f"{len(folders)} 个目录"
-        self._run_rename(tracks, scope=f"{name}（{len(tracks)} 首）")
+        name = next(iter(folders)).name if len(folders) == 1 else i18n.tr_format(
+            "{count} 个目录", count=len(folders)
+        )
+        self._run_rename(
+            tracks,
+            scope=i18n.tr_format("{name}（{count} 首）", name=name, count=len(tracks)),
+        )
 
     def _run_rename(self, tracks: list[Track], scope: str) -> None:
         """按当前模板生成计划 → 预览 → 执行。"""
@@ -2096,19 +2176,22 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self) -> None:
         # 参数修改只标记「未保存」，不再自动落盘；用户点「保存参数」才生效
-        self.status_hint.setText("参数已修改，点击右侧「保存参数」才会生效")
+        self.status_hint.setText(
+            i18n.tr_text("参数已修改，点击右侧「保存参数」才会生效")
+        )
 
     def _on_settings_saved(self) -> None:
-        self.status_hint.setText("参数已保存")
+        self.status_hint.setText(i18n.tr_text("参数已保存"))
 
     # ------------------------------------------------------------ 日志与状态
 
     def _append_log(self, level: str, message: str) -> None:
         color = LEVEL_COLORS.get(level.upper(), theme.FG_DIM)
         stamp = datetime.now().strftime("%H:%M:%S")
+        text = i18n.tr_text(str(message))
         self.log_view.appendHtml(
             f'<span style="color:{theme.FG_MUTE}">{stamp}</span>'
-            f'<span style="color:{color}">&nbsp;&nbsp;{_escape(message)}</span>'
+            f'<span style="color:{color}">&nbsp;&nbsp;{_escape(text)}</span>'
         )
         bar = self.log_view.verticalScrollBar()
         bar.setValue(bar.maximum())
@@ -2156,14 +2239,20 @@ class MainWindow(QMainWindow):
 
         self.empty_state.setVisible(not tracks)
         if not tracks:
-            self.status_hint.setText("拖入音频文件，或点击「添加文件夹」")
+            self.status_hint.setText(
+                i18n.tr_text("拖入音频文件，或点击「添加文件夹」")
+            )
         else:
-            hint = (
-                f"共 {len(tracks)} 首 · 无损 {lossless} · 完成 {values['done']}"
-                f" · 待确认 {values['review']} · 失败 {values['failed']}"
+            hint = i18n.tr_format(
+                "共 {total} 首 · 无损 {lossless} · 完成 {done} · 待确认 {review} · 失败 {failed}",
+                total=len(tracks),
+                lossless=lossless,
+                done=values["done"],
+                review=values["review"],
+                failed=values["failed"],
             )
             if suspect:
-                hint += f" · 假无损 {suspect}"
+                hint += i18n.tr_format(" · 假无损 {suspect}", suspect=suspect)
             self.status_hint.setText(hint)
 
     def _on_stat_clicked(self, key: str) -> None:
@@ -2214,7 +2303,7 @@ class MainWindow(QMainWindow):
             box = QMessageBox(self)
             box.setWindowTitle("有未保存的参数")
             box.setIcon(QMessageBox.Question)
-            box.setText("参数面板有未保存的修改，退出前要保存吗？")
+            box.setText(i18n.tr_text("参数面板有未保存的修改，退出前要保存吗？"))
             save_btn = box.addButton("保存并退出", QMessageBox.AcceptRole)
             box.addButton("不保存", QMessageBox.DestructiveRole)
             cancel_btn = box.addButton("取消", QMessageBox.RejectRole)

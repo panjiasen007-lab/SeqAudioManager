@@ -32,11 +32,15 @@ def _install_excepthook(app: QApplication) -> None:
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         log.critical("未捕获异常：\n%s", text)
         try:
+            from .ui import i18n
+
             QMessageBox.critical(
                 None,
-                "程序遇到问题",
-                f"发生了未预期的错误，操作已中止。\n\n{exc_value}\n\n"
-                "详细信息已写入日志，可在「帮助 → 打开日志目录」中查看。",
+                i18n.tr_text("程序遇到问题"),
+                i18n.tr_format(
+                    "发生了未预期的错误，操作已中止。\n\n{error}\n\n详细信息已写入日志，可在「帮助 → 打开日志目录」中查看。",
+                    error=str(exc_value),
+                ),
             )
         except Exception:
             pass
@@ -66,11 +70,12 @@ def create_app(argv: list[str] | None = None) -> QApplication:
 
     # 先注册随包的开源字体（Noto Sans SC / JetBrains Mono），
     # 再设默认字体 —— 顺序反了会拿到系统默认字体，QSS 里写的族名也就白写了
-    from .ui import fonts
+    from .ui import fonts, i18n
 
     fonts.load_application_fonts()
     app.setFont(fonts.ui_font(13))
     app.setStyleSheet(QSS)
+    i18n.install_localizer(app)
 
     from .core.paths import asset_path
 
@@ -301,6 +306,10 @@ def main(argv: list[str] | None = None) -> int:
     _install_excepthook(app)
 
     settings = Settings.load()
+    # 语言要在任何窗口（免责声明/主窗口）出现前生效，否则首屏会残留上一次语言
+    from .ui import i18n
+
+    i18n.set_locale(getattr(settings, "language", "zh_CN") or "zh_CN")
     # 免责声明/首个窗口出现前就套用用户选择的字体与主题
     fonts.configure(settings.ui_font, settings.mono_font, settings.font_scale)
     app.setFont(fonts.ui_font(13))

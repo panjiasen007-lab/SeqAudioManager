@@ -49,25 +49,25 @@ UI_CHOICES: tuple[FontChoice, ...] = (
     FontChoice("smiley", "得意黑", "Smiley Sans", "中文展示"),
     FontChoice("mashan", "马善政毛笔楷书", "Ma Shan Zheng", "中文书法"),
     FontChoice("zcool_qk", "站酷庆科黄油体", "ZCOOL QingKe HuangYou", "中文展示"),
-    FontChoice("inter", "Inter", "Inter", "西文 UI", cjk=False),
-    FontChoice("plex_sans", "IBM Plex Sans", "IBM Plex Sans", "西文 UI", cjk=False),
-    FontChoice("source_sans", "Source Sans 3", "Source Sans 3", "西文 UI", cjk=False),
-    FontChoice("fira_sans", "Fira Sans", "Fira Sans", "西文 UI", cjk=False),
-    FontChoice("public_sans", "Public Sans", "Public Sans", "西文 UI", cjk=False),
-    FontChoice("manrope", "Manrope", "Manrope", "西文 UI", cjk=False),
-    FontChoice("work_sans", "Work Sans", "Work Sans", "西文 UI", cjk=False),
-    FontChoice("rubik", "Rubik", "Rubik", "西文 UI", cjk=False),
-    FontChoice("lato", "Lato", "Lato", "西文 UI", cjk=False),
-    FontChoice("noto_sans", "Noto Sans", "Noto Sans", "西文 UI", cjk=False),
+    FontChoice("inter", "Inter", "Inter", "UI", cjk=False),
+    FontChoice("plex_sans", "IBM Plex Sans", "IBM Plex Sans", "UI", cjk=False),
+    FontChoice("source_sans", "Source Sans 3", "Source Sans 3", "UI", cjk=False),
+    FontChoice("fira_sans", "Fira Sans", "Fira Sans", "UI", cjk=False),
+    FontChoice("public_sans", "Public Sans", "Public Sans", "UI", cjk=False),
+    FontChoice("manrope", "Manrope", "Manrope", "UI", cjk=False),
+    FontChoice("work_sans", "Work Sans", "Work Sans", "UI", cjk=False),
+    FontChoice("rubik", "Rubik", "Rubik", "UI", cjk=False),
+    FontChoice("lato", "Lato", "Lato", "UI", cjk=False),
+    FontChoice("noto_sans", "Noto Sans", "Noto Sans", "UI", cjk=False),
 )
 
 #: 可选的等宽字体（数据列/路径/规格）。
 MONO_CHOICES: tuple[FontChoice, ...] = (
-    FontChoice("jetbrains", "JetBrains Mono", "JetBrains Mono", "等宽", cjk=False),
-    FontChoice("fira_code", "Fira Code", "Fira Code", "等宽连字", cjk=False),
-    FontChoice("plex_mono", "IBM Plex Mono", "IBM Plex Mono", "等宽", cjk=False),
-    FontChoice("source_code_pro", "Source Code Pro", "Source Code Pro", "等宽", cjk=False),
-    FontChoice("cascadia", "Cascadia Code", "Cascadia Code", "等宽连字", cjk=False),
+    FontChoice("jetbrains", "JetBrains Mono", "JetBrains Mono", "Mono", cjk=False),
+    FontChoice("fira_code", "Fira Code", "Fira Code", "Mono ligatures", cjk=False),
+    FontChoice("plex_mono", "IBM Plex Mono", "IBM Plex Mono", "Mono", cjk=False),
+    FontChoice("source_code_pro", "Source Code Pro", "Source Code Pro", "Mono", cjk=False),
+    FontChoice("cascadia", "Cascadia Code", "Cascadia Code", "Mono ligatures", cjk=False),
 )
 
 DEFAULT_UI = "noto"
@@ -233,9 +233,13 @@ def mono_font(pixel_size: int = 12, bold: bool = False) -> QFont:
 def describe() -> str:
     """一行摘要，供「关于」对话框显示。"""
     from ..core import paths
+    from . import i18n
 
-    return (
-        f"{_ui_choice.name}（{_ui_choice.license}） · "
-        f"等宽 {_mono_choice.name} · 字号 {_scale:.0%} · "
-        f"字体目录 {paths.asset_path('fonts') or '-'}"
+    return i18n.tr_format(
+        "{name}（{license}） · 等宽 {mono} · 字号 {scale} · 字体目录 {path}",
+        name=i18n.tr_text(_ui_choice.name),
+        license=_ui_choice.license,
+        mono=i18n.tr_text(_mono_choice.name),
+        scale=f"{_scale:.0%}",
+        path=paths.asset_path("fonts") or "-",
     )
