@@ -46,6 +46,10 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
   320k 档再结合「断崖之上的残余能量」，有模拟底噪时按母带低通放行；
 - **立体声频谱**：左右声道按频点取较大功率，不再只看左声道，也不会因
   下混反相抵消误读「高频被砍」；位深与 DSD 边界统计取电平更高的声道；
+- **分析时长增加到 16 秒（DSD 12 秒）**：原先 4 段 × 2 秒 = 8 秒；实测 PCM
+  判定在 8/16/24 秒下结论一致，但 16 秒的截止与断崖测量更稳，不易被前奏、
+  淡出或单句内容带偏。DSD 边界统计改为跨 4 个取样段累积帧，不再只取最响的
+  一段，边界不再在 26~28kHz 之间跳。单曲耗时约增加 0.2~1 秒。
 - **确认配色不影响结论**：所有判据都在 dB 域用 numpy 计算，界面调色板
   只做 dB→RGB 映射；新增回归测试锁定「算法源码不得出现颜色/像素依赖」；
 - 样本回归：128k 假无损、44.1k→96k 升频、真 24/96、真 DSD 判定保持不变；
@@ -665,6 +669,12 @@ Advanced capabilities:
 - **Stereo spectrum** — per-bin maximum power of L/R instead of left-channel only;
   avoids both missing right-channel-only ultrasonic content and phase-cancellation
   from downmixing. Bit-depth and DSD edge statistics use the louder channel.
+- **Longer analysis window — 16 s for PCM, 12 s for DSD** — the previous budget
+  was 4 × 2 s = 8 s. PCM verdicts are unchanged at 8/16/24 s, but 16 s gives a
+  steadier cutoff and wall measurement, less influenced by intros, fades or a
+  single quiet passage. DSD edge statistics now accumulate frames across all
+  four windows instead of only the loudest one, so the edge no longer jumps
+  between 26 and 28 kHz. Cost is roughly 0.2–1 s extra per track.
 - **Colour independence confirmed** — every decision is computed in the dB domain
   with numpy; the UI palette only maps dB to RGB. A regression test now forbids
   colour/pixel dependencies in the algorithm source.

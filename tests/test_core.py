@@ -3043,6 +3043,17 @@ class TestWallStepAndStereo(unittest.TestCase):
         self.assertTrue(np.allclose(mono_f, st_f))
         self.assertTrue(np.allclose(mono_db, st_db, atol=1e-6))
 
+    def test_analysis_window_extended(self) -> None:
+        """V1.5.2：总分析时长 PCM 16s / DSD 12s，不能退回 8s。"""
+        from seqaudio.core import authenticity
+
+        self.assertGreaterEqual(
+            authenticity.SEGMENT_SECONDS * len(authenticity.SAMPLE_POSITIONS), 16.0
+        )
+        self.assertGreaterEqual(
+            authenticity.DSD_SEGMENT_SECONDS * len(authenticity.SAMPLE_POSITIONS), 12.0
+        )
+
     def test_algorithm_has_no_color_dependency(self) -> None:
         """判据必须在 dB 域算，不能读界面配色/像素。"""
         from seqaudio.core import authenticity

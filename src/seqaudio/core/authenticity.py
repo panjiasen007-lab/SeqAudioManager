@@ -55,8 +55,13 @@ from .model import AudioInfo
 
 log = logging.getLogger(__name__)
 
-#: 每段分析时长（秒）。太短频率分辨率不够，太长浪费时间
-SEGMENT_SECONDS = 2.0
+#: 每段分析时长（秒）。太短频率分辨率不够，太长浪费时间。
+#: V1.5.2：4 个取样点 × 4s = 16s。实测 PCM 判定在 8s/16s/24s 下结论一致，
+#: 但 16s 的截止/断崖测量更稳（短段受前奏、淡出、单句内容影响更大）。
+SEGMENT_SECONDS = 4.0
+#: DSD 单独取 3s：DSD 解码本身慢（DSD64 约 2.5s/文件/8s），12s 总时长在
+#: 判定不变的前提下把信号边界统计的帧数翻倍。
+DSD_SEGMENT_SECONDS = 3.0
 #: 取样位置（占整曲的比例），避开前奏静音与结尾淡出
 SAMPLE_POSITIONS = (0.15, 0.35, 0.55, 0.75)
 #: FFT 点数，44.1kHz 下频率分辨率约 5.4Hz
@@ -1834,7 +1839,7 @@ def analyze(
     info: Optional[AudioInfo] = None,
     *,
     positions: tuple[float, ...] = SAMPLE_POSITIONS,
-    segment_seconds: float = SEGMENT_SECONDS,
+    segment_seconds: Optional[float] = None,
 ) -> AuthenticityResult:
     """分析单个文件的真假无损。"""
     path = Path(path)
@@ -1891,26 +1896,29 @@ def analyze(
         result.error = "时长过短，无法分析"
         return result
 
+    # 每段时长：PCM 4s（共 16s），DSD 3s（共 12s）。调用方仍可显式指定。
+    segment = float(segment_seconds) if segment_seconds else (
+        DSD_SEGMENT_SECONDS if is_dsd else SEGMENT_SECONDS
+    )
+
     spectra: list[tuple[np.ndarray, np.ndarray]] = []
     deepest_depth = 0
     analyzed = 0.0
     above_16 = False
     peak_dbfs = -200.0
-    # DSD 的「信号边界」判据要保留整段样本做分帧统计，取能量最大的一段
-    # （前奏/淡出段内容少，波动曲线会失真）
-    edge_samples: Optional[np.ndarray] = None
-    edge_rate = 0
-    edge_peak = 0.0
-    # PCM 的采样率用文件头声明值：截断文件解码样本数不足时，反推会算错 Nyquist
+    # DSD 的「信号边界」判据要保留整段样本做分帧统计；V1.5.2 改为累积所有
+    # 取样段的帧（原先只取最响的一段，长段/短段的边界会在 26~28kHz 之间跳）
+    edge_rows: list[np.ndarray] = []
+    edge_freqs: Optional[np.ndarray] = None
     sr_hint = 0 if is_dsd else int(info.sample_rate or 0)
     fail_count = 0
     first_start: Optional[float] = None
     for position in positions:
-        start = max(1.0, duration * position - segment_seconds / 2)
-        if start + segment_seconds > duration:
-            start = max(0.0, duration - segment_seconds)
+        start = max(1.0, duration * position - segment / 2)
+        if start + segment > duration:
+            start = max(0.0, duration - segment)
         decoded = _decode_segment(
-            ffmpeg, path, start, segment_seconds, sample_rate_hint=sr_hint
+            ffmpeg, path, start, segment, sample_rate_hint=sr_hint
         )
         if decoded is None:
             fail_count += 1
@@ -1923,7 +1931,7 @@ def analyze(
         samples = left
         if right.size and float(np.max(np.abs(right))) > float(np.max(np.abs(left))):
             samples = right
-        analyzed += segment_seconds
+        analyzed += segment
         if effective_sr:
             sample_rate = effective_sr
             result.nyquist_hz = sample_rate // 2
@@ -1936,9 +1944,15 @@ def analyze(
         above_16 = above_16 or seg_above16
         peak_dbfs = max(peak_dbfs, seg_dbfs)
         if is_dsd:
-            seg_peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-            if seg_peak > edge_peak:
-                edge_samples, edge_rate, edge_peak = samples, sample_rate, seg_peak
+            rows, row_freqs = _frame_spectra(samples, sample_rate)
+            if rows.size:
+                # 每段先减去自己的基带参考再拼接，避免不同段落的整体电平差
+                # 被当成「内容波动」抬高噪声基准
+                ref = (row_freqs >= 300) & (row_freqs <= 3000)
+                if np.any(ref):
+                    rows = rows - float(np.median(np.median(rows[:, ref], axis=1)))
+                edge_rows.append(rows)
+                edge_freqs = row_freqs
 
     if not spectra:
         if info.fmt == "WMA Lossless":
@@ -2025,12 +2039,12 @@ def analyze(
         # PCM 转制的带宽断崖（44.1/48/96/192k 源码通用）+ 噪声整形基底
         pcm_source, pcm_step, pcm_above = _pcm_source_cliff(freqs, db, nyq)
         ultra_body = _band_energy(freqs, db, 30000, min(40000, nyq))
-        # 信号边界：内容消失在哪个频率（不看电平，只看波动）
-        if edge_samples is not None and edge_rate:
-            rows, row_freqs = _frame_spectra(edge_samples, edge_rate)
-            edge_hz, edge_std, edge_floor = _variation_edge(
-                rows, row_freqs, float(edge_rate) / 2.0
-            )
+        # 信号边界：内容消失在哪个频率（不看电平，只看波动）。
+        # 用全部取样段拼接后的帧，短段/长段不会再让边界在 26~28kHz 之间跳。
+        if edge_rows and edge_freqs is not None:
+            rows = np.vstack(edge_rows)
+            row_freqs = edge_freqs
+            edge_hz, edge_std, edge_floor = _variation_edge(rows, row_freqs, nyq)
             # 边界之上的基带内容：判断这个「边界」是不是真的内容截止。
             # 起点用 +500Hz 而不是 +1kHz：44.1k 源转 DSD 的边界在 22kHz，
             # 到 24kHz 只剩 1kHz，在 176.4kHz/8192 点 FFT 下只有约 23 个频点，
@@ -2066,7 +2080,7 @@ def analyze(
     if not is_dsd:
         if 20 <= declared_depth <= 24 and first_start is not None:
             pad_ratio, prof_depth = _bit_depth_profile(
-                ffmpeg, path, first_start, segment_seconds
+                ffmpeg, path, first_start, segment
             )
             eff_depth = prof_depth or declared_depth
         elif declared_depth:
