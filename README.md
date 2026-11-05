@@ -50,6 +50,18 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
   判定在 8/16/24 秒下结论一致，但 16 秒的截止与断崖测量更稳，不易被前奏、
   淡出或单句内容带偏。DSD 边界统计改为跨 4 个取样段累积帧，不再只取最响的
   一段，边界不再在 26~28kHz 之间跳。单曲耗时约增加 0.2~1 秒。
+- **DSD 边界判据加固**：部分 DSD 母带的帧间波动本底本身就有 3~5dB，
+  旧版把噪声基准封顶到 2dB，导致边界永远找不到；现改为 `1.25×本底 +
+  连续 4 档确认`。「平缓延续」保护从 −20dB 收紧到 −12dB，
+  只保护真正只掉几个 dB 的老录音；同批推定把 18~20kHz（低于 CD 带宽）
+  的边界也计入证据。李烁《花间梦》12 首此前全部判「真 DSD」，
+  优化后 12 首均判「疑似假 DSD」（内容边界 18~24kHz）。
+- **跨格式转码审计**：用 AAC（96~256k）/Opus（64~128k）/Vorbis（q2~q8）/WMA
+  （128/192k）/MP3 转回 FLAC 实测，发现 Vorbis q5、WMA 192 的低通是缓坡
+  （250Hz 内只掉 5~8dB），够不上「墙」判据，旧版走「平滑滚降」分支误判真无损。
+  现将「截止之上数字静音」阈值从 −95dB 放宽到 −88dB（真母带/磁带的模拟底噪
+  实测 −73~−76dB），软滚降的 Vorbis/WMA 改判疑似/假；AAC 256k、Vorbis q8
+  属透明码率的天然重叠区，保留为已知盲区；
 - **确认配色不影响结论**：所有判据都在 dB 域用 numpy 计算，界面调色板
   只做 dB→RGB 映射；新增回归测试锁定「算法源码不得出现颜色/像素依赖」；
 - 样本回归：128k 假无损、44.1k→96k 升频、真 24/96、真 DSD 判定保持不变；
@@ -374,7 +386,7 @@ Visual Studio Build Tools。
 | **源码带宽台阶** | 44.1k→48k 升采样后 22.05kHz 处有 ≥18dB 台阶；有些工具加 dither 把台阶填成噪声伪装成内容，但台阶本身仍在 | 升采样（噪声填充型） |
 | **谐波相干性（扩展带平坦度）** | 真实乐器的超声内容是离散谐波峰（平坦度→0），dither 填充是平坦白噪声（→1）；dither 加到把台阶填平（<18dB）时台阶判据失效，但"噪声本质"藏不住 | 升采样（噪声填充型兜底） |
 | **最低字节零比例** | 16bit 内容零填充成 24bit 后，s24 解码的最低 8 位恒为零；真 24bit 只有约 0.4% 的样本恰为零 | 升位深 |
-| 截止之上是否数字静音 | 编码器砍完高频留下数字空白（-100dB）；磁带/母带总有模拟底噪（-70~-85dB） | 转码 |
+| 截止之上是否数字静音 | 编码器砍完高频留下数字空白（−88dB 以下）；Vorbis/WMA 的缓坡低通（250Hz 内只掉 5~8dB）同样适用；磁带/母带总有模拟底噪（−70~−85dB） | 转码 |
 | 截止位置 + 陡度 | 128k≈16kHz、192k≈18.5kHz、320k≈20kHz、CD≈22.05kHz | 转码分档 |
 | 陡度（dB/oct） | 编码器 >60dB/oct，话筒/磁带更平缓 | 辅助 |
 | 频谱空洞 / sfb21 凹陷 | 低码率编码器「位不够」留下的窄凹，MP3 在 16kHz 有特征凹陷 | 辅助证据 |
@@ -536,8 +548,13 @@ Taylor Cornelia.dsf   → 疑似假 DSD  边界 48kHz（96k 源），22kHz 处�
 - **「边界之上有谐波」保护加下限**：只在边界 ≥21.5kHz（CD 带宽）时才允许辩护。低于这个位置说明内容连 CD 都不如（128k/192k 低通就在 16~19kHz），必是有损源；而且边界越低、之上可测带宽越宽，越容易被误判成"有谐波"，逻辑是反的（实测张国荣某目录 13 首里 edge 20~26k 的 11 首都判假，唯独 edge=18k 那 2 首被判真）；
 - **逐帧集中度识别扫频**：整段平均频谱下，扫频的能量会摊到整条频率轴（实测集中度仅 0.20），看起来像普通音乐；但扫频在每一帧内仍是纯音（逐帧集中度中位数 1.00）。把逐帧集中度并入单音判据后，D64/D128 扫频测试信号恢复「真 DSD」，真实电子乐（0.80~0.84）不受影响。
 
-**已知盲区**：Opus 与透明码率（Vorbis q8+）本来就没有低通墙，任何基于频谱的方法都
-判不出来；要抓这类只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
+**已知盲区**：透明码率（AAC 256k、Vorbis q8、AAC VBR-0）会保留接近满值的带宽，
+截止之上也仍有低电平噪声，频谱上与真无损天然重叠（ACM MM&Sec 2009 也指出
+256k CBR 与 VBR-0 是唯一天然重叠区）。实测 AAC 256k 转 FLAC 截止 21.95kHz、
+带宽 99.5%，Vorbis q8 截止 20.54kHz、之上 −76dB，这两类仍判「真无损」；
+要抓只能靠 Derrien 的量化格点检测（单首约数秒，暂未集成）。
+Opus 不在盲区：fullband 上限就是 20kHz，截止 20.05kHz、之上 −96dB，
+按「数字静音」判「假无损」（64/96/128k 实测一致）。
 边界落在 28~38kHz 的文件会保留为「真 DSD」—— 那既可能是模拟母带转录的真实 DSD，
 也可能是极慢滤波的 PCM 转换，现有信息不足以区分，所以不做断言。
 所有「假」结论一律标为「疑似」。
@@ -675,6 +692,14 @@ Advanced capabilities:
   single quiet passage. DSD edge statistics now accumulate frames across all
   four windows instead of only the loudest one, so the edge no longer jumps
   between 26 and 28 kHz. Cost is roughly 0.2–1 s extra per track.
+- **Hardened DSD edge test** — some DSD masters have a 3–5 dB frame-variation
+  noise floor; the old code capped the floor at 2 dB, so no edge was ever found.
+  It now uses `1.25× floor + four consecutive bands`. The “gentle roll-off”
+  guard was tightened from −20 dB to −12 dB so it only protects genuine old
+  recordings that really lose just a few dB; batch consensus also counts
+  18–20 kHz edges (below CD bandwidth) as evidence. Sample: all 12 tracks of
+  李烁《花间梦》 were previously “true DSD” and are now flagged as suspected
+  fake DSD (content edges 18–24 kHz).
 - **Colour independence confirmed** — every decision is computed in the dB domain
   with numpy; the UI palette only maps dB to RGB. A regression test now forbids
   colour/pixel dependencies in the algorithm source.

@@ -1591,6 +1591,16 @@ class TestDsdJudgement(unittest.TestCase):
         self.assertEqual(verdict, "真 DSD", reasons)
         self.assertTrue(any("只跌落" in r for r in reasons))
 
+    def test_deep_noise_floor_not_shallow(self) -> None:
+        """噪声底已掉到 -54dB，不是「平缓延续」，边界判据要生效。"""
+        from seqaudio.core.authenticity import _judge_dsd
+
+        verdict, _, reasons = _judge_dsd(
+            22.0, -16.0, 24000.0, 5.0, -54.0,
+            edge_hz=22000.0, edge_above_db=-40.0, edge_above_flat=1.0,
+        )
+        self.assertEqual(verdict, "疑似假 DSD", reasons)
+
     def test_edge_requires_drop_for_fake(self) -> None:
         """边界处跌了 60dB（真切断）→ 边界判据照常生效。"""
         from seqaudio.core.authenticity import _judge_dsd
@@ -1852,6 +1862,42 @@ class TestAuthenticityV13(unittest.TestCase):
 
         verdict, _, reasons = _judge(
             self.info16, 18500.0, 15.0, -70.0, 16, edge_db=-75.0, ratio=0.84
+        )
+        self.assertEqual(verdict, "真无损", reasons)
+
+    def test_soft_rolloff_codec_silence_is_not_natural(self) -> None:
+        """软滚降 + 截止之上数字静音 → 仍是编码器低通（Vorbis / WMA）。
+
+        回归（V1.5.2.1）：Vorbis q5（~160k）在 19.1kHz 的 250Hz 内只掉 7.5dB、
+        WMA 192 在 17.7kHz 只掉 5.4dB，都够不上 12dB 的「墙」判据，旧版因此
+        走「平滑滚降」分支判真；但两者截止之上实测 -92.4 / -94.2dB，没有
+        模拟底噪，本质仍是编码器砍掉的数字空白。
+        """
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 17697.0, 7.2, -72.8, 16,
+            edge_db=-94.2, ratio=0.80, wall_step=5.4, steep_oct=84.1,
+        )
+        self.assertIn(verdict, ("假无损", "疑似假无损"), reasons)
+
+        verdict2, _, reasons2 = _judge(
+            self.info16, 19078.0, 10.8, -71.1, 16,
+            edge_db=-92.4, ratio=0.87, wall_step=7.5, steep_oct=136.5,
+        )
+        self.assertIn(verdict2, ("假无损", "疑似假无损"), reasons2)
+
+    def test_real_master_noise_above_cutoff_kept_true(self) -> None:
+        """真 48k/24 母带：截止在 16kHz，但之上有 -74dB 模拟底噪 → 真无损。
+
+        实测《碟中谍7》原声三轨：cutoff 15533 / 16016 / 16168，
+        截止之上 -76.5 / -74.3 / -73.1dB。降低数字静音阈值不能误伤这类文件。
+        """
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info24, 16016.0, 0.8, -70.0, 24,
+            edge_db=-74.3, ratio=0.67, wall_step=1.8, steep_oct=20.0,
         )
         self.assertEqual(verdict, "真无损", reasons)
 
@@ -2432,6 +2478,19 @@ class TestBatchConsensus(unittest.TestCase):
         pairs = [(Path(f"/a/t{i}.dsf"), self._result("疑似假 DSD", 43.6, edge_hz=e))
                  for i, e in enumerate(edges)]
         self.assertEqual(apply_batch_consensus(pairs), [])
+
+    def test_sub_cd_edges_count_as_batch_evidence(self) -> None:
+        """低于 CD 带宽的边界（18/20kHz）也是整批转制的证据。"""
+        from seqaudio.core.authenticity import apply_batch_consensus
+
+        edges = [0, 18_000, 20_000]
+        pairs = [
+            (Path(f"/c/t{i}.dsf"), self._result("真 DSD" if i == 0 else "疑似假 DSD", 21.3, edge_hz=e))
+            for i, e in enumerate(edges)
+        ]
+        changed = apply_batch_consensus(pairs)
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(pairs[0][1].verdict, "疑似假 DSD")
 
     def test_mixed_pcm_grids_still_concentrated(self) -> None:
         """44.1k 源（22k）与 48k 源（24k）混在一批 → 仍算集中，整批判假。

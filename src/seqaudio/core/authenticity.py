@@ -178,6 +178,10 @@ DSD_SUB_CD_EDGE_HZ = 21_500.0
 #: 调制器噪声底，实测 -41 ~ -71dB。要求至少掉 20dB，才不会把
 #: 「高频平缓的老录音」误判成 PCM 转制。
 DSD_EDGE_MIN_DROP_DB = 20.0
+#: 判定「平缓延续」的最大跌落（dB）。只有真正只掉几个 dB 的老录音才受保护；
+#: 原先把门槛放到 -20dB，会把调制噪声已经掉到 -54dB 的 PCM 转制也放行
+#: （李烁《花间梦》实测 -54 ~ -59dB，却被当成「平缓延续」）。
+DSD_EDGE_SHALLOW_MAX_DB = 12.0
 #: 「单音测试信号」的基带能量集中度阈值（前 5 个频点占总能量的比例）。
 #: 只有纯音/扫频才会达到 0.97 以上；真实音乐实测 0.31~0.92（流行乐低频能量
 #: 本就集中），阈值定低了会把普通歌曲误当测试信号放行。
@@ -218,7 +222,13 @@ W320_RESIDUAL_DB = -85.0
 UPSAMPLE_RATIO = 0.96
 UPSAMPLE_EDGE_DB = -95.0
 #: 「截止之上是数字静音」的阈值：低于它说明那里没有模拟底噪，只剩编码器空白
-DIGITAL_SILENCE_EDGE_DB = -95.0
+#: （V1.5.2.1）原值 -95dB 只覆盖 MP3/Opus 这类「断崖式」低通，漏掉了低通更缓的
+#: 编码器：Vorbis q5（约 160k）在 19.1kHz 是软滚降（250Hz 内仅 7.5dB），WMA 192
+#: 在 17.7kHz 仅 5.4dB —— 它们不会在某个 250Hz 格内留下断崖，会被「平滑滚降」
+#: 分支当成老录音放行，而截止之上其实只有 -92 ~ -94dB 的编码器空白。
+#: 真实母带/磁带/24bit 录音在截止之上的模拟底噪实测 -73 ~ -76dB（《碟中谍7》
+#: 48k/24 三轨为 -73.1 / -74.3 / -76.5），取 -88dB 仍留 12dB 余量。
+DIGITAL_SILENCE_EDGE_DB = -88.0
 #: 扩展带起点相对截止的偏移，跳过过渡带
 UPSAMPLE_EDGE_OFFSET_HZ = 1000.0
 
@@ -993,19 +1003,35 @@ def _variation_edge(
         return 0.0, 0.0, 0.0
 
     # 噪声基准取 40kHz 以上各段波动的最小值：真 DSD 的整形噪声与 PCM 之上的
-    # 调制器噪声都不随音乐起伏，标准差都趋近 1dB，最小值最能代表「纯噪声」。
-    # 但要**封顶**：若整条频谱都在起伏（内容一路延伸上去），最小值也会很高，
-    # 阈值跟着抬高就会把「处处是内容」误判成「处处是边界」。
+    # 调制器噪声都不随音乐起伏。
+    #
+    # V1.5.2：不再把 floor 封顶到 2dB。部分 DSD 母带的调制噪声帧间波动本身
+    # 就有 3~5dB（李烁《花间梦》实测 3.5~4.9dB），封顶会让阈值低于噪声自身
+    # 的抖动，边界永远找不到。改用 1.25×floor + 连续 4 档确认，既能在高噪声
+    # 母带上找到边界，也不会把自然衰减中的单个低点当成边界。
     above = [std for freq, std in bands if freq >= 40_000.0]
     floor = min(above) if above else min(std for _, std in bands)
-    floor = min(floor, DSD_EDGE_VARIATION_DB)
-    threshold = max(DSD_EDGE_VARIATION_DB, floor * 1.8)
+    threshold = max(DSD_EDGE_VARIATION_DB, floor * 1.25)
+    max_std = max(std for _, std in bands)
 
-    # 从低往高扫：第一个「它自己以及它之上全部不超过阈值」的频段就是边界。
-    # 必须要求「之上全部」都低，否则会把某段安静的乐句误当成边界。
+    # 从低往高扫：第一个「连续 4 档都 ≤ 阈值」的位置就是内容边界。
+    # 用连续 4 档（约 8kHz）而不是「之上全部」，是为了容忍真 DSD 在
+    # 26~32kHz 的自然滚降中偶尔回升 0.1~0.3dB。
+    #
+    # 还要要求内容区确实比边界区起伏更大（≥1.4 倍）：若整条频谱直到扫描上限
+    # 都在起伏，floor 本身就是内容波动，阈值再高也会「处处低于阈值」，
+    # 那种情况说明内容一路延伸，不该报边界。
+    run = 0
     for index, (freq, std) in enumerate(bands):
-        if std <= threshold and all(s <= threshold for _, s in bands[index:]):
-            return freq, std, floor
+        if std <= threshold:
+            run += 1
+            if run >= 4:
+                start = bands[index - 3]
+                if start[1] > 0 and max_std >= start[1] * 1.4:
+                    return start[0], start[1], floor
+                run = 0
+        else:
+            run = 0
     return 0.0, 0.0, floor
 
 
@@ -1341,7 +1367,7 @@ def _judge_dsd(
     shallow_edge = bool(
         edge_hz >= 12_000.0
         and base_silence < 0.0
-        and base_silence > -DSD_EDGE_MIN_DROP_DB
+        and base_silence > -DSD_EDGE_SHALLOW_MAX_DB
     )
     edge_unreliable = harmonic_above or shallow_edge
     if harmonic_above:
@@ -1614,9 +1640,13 @@ def _judge(
     #
     # 陡度分不开「编码器低通」与「母带自然滚降」—— 实测 192k/320k 转码的
     # 陡度只有 16dB/kHz，与模拟母带转录（14~16dB/kHz）完全重叠。
-    # 但两者的**噪声性质**不同：编码器砍掉高频后上面是数字空白（-100dB 以下），
+    # 但两者的**噪声性质**不同：编码器砍掉高频后上面是数字空白（-90dB 以下），
     # 磁带/话筒/母带在截止之上总有模拟底噪（-70 ~ -85dB）。
     # 所以「带宽不足 + 截止之上是数字静音」比陡度可靠得多。
+    #
+    # 这条不要求「断崖」：Vorbis/WMA 的低通是缓坡，250Hz 内只掉几个 dB，
+    # 若只让「墙」判据出手，它们会被下面的「平滑滚降」分支误当成老录音。
+    # 决定性的仍然是「截止之上有没有模拟底噪」，与滚降快慢无关。
     if (
         0 < cutoff < nyquist * 0.95
         and -195.0 < edge_db < DIGITAL_SILENCE_EDGE_DB
@@ -2421,7 +2451,13 @@ def apply_batch_consensus(
             if r.signal_edge_hz > 0:
                 edge = int(r.signal_edge_hz)
                 edge_counts[edge] = edge_counts.get(edge, 0) + 1
-                if _on_pcm_grid(r.signal_edge_hz):
+                # 落在 PCM 网格上，或连 CD 带宽都不到（<21.5kHz），
+                # 都说明源码带宽被限制过。后者单独看是「有损转 DSD」，
+                # 同样应计入整批统一的证据（李烁《花间梦》11 首里
+                # 3 首边界 18~20kHz，若只数网格命中会低于 60% 门槛）。
+                if _on_pcm_grid(r.signal_edge_hz) or (
+                    r.signal_edge_hz < DSD_SUB_CD_EDGE_HZ
+                ):
                     grid_hits += 1
         if not edge_counts:
             continue
