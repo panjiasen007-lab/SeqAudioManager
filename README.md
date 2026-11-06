@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.2-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.4-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,28 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.4 更新摘要
+
+安装器与卸载链路的一轮加固，四个问题都有可复现的现场。
+
+- **拒绝降级安装**：装了 v1.5.3 之后再去双击 v1.4.x 的安装包，以前会把程序文件盖回旧版，
+  注册表 `DisplayVersion` 跟着变低，「应用和功能」里显示的版本就再也不对了。现在会弹框
+  「已安装更高版本」并退出（静默模式返回码 **3**），不碰任何文件；
+- **静默升级沿用原安装路径**：GUI 一直是对的，但 `--silent` 直接用传入的目录 —— 用户把
+  程序装在 D 盘时，静默升级会在 `%LOCALAPPDATA%\Programs` 下**装出第二份**，旧版原地不动。
+  现在默认以注册表 `InstallLocation` 为准，只有 `--force-dir` 才听传参；
+- **卸载不再残留桌面/开始菜单图标**：根因有三层 —— 主进程没退完就删（文件占用）、
+  `Remove-Item` 被重定向到回收站后 fail-closed、以及某些环境对受保护位置**允许重命名但
+  拒绝删除**。现在快捷方式与注册表由主进程直接清（`DeleteFileW` → 改名 `*.deleted` 三级降级），
+  只有「删安装目录」交给外部进程延时执行；
+- **卸载保留的 data 重装后能读回来**：以前 data 被挪到 `%APPDATA%\SeqAudioManager`，
+  而运行时不认那个位置，重装等于从零开始 —— 「保留数据，以后重装还能接着用」是句空话。
+  现在首次启动会自动搬回安装目录；
+- 新增 `--uninstall --silent [--purge]` 无人值守卸载（企业部署、脚本卸载、自动化验收都用得上）；
+  `--selftest` 顺带输出 `data_dir`。
+
+安装器验收从 33 项扩到 **39 项**（新增降级拒绝 6 项），全部通过。
 
 ### V1.5.3 更新摘要
 
@@ -682,6 +704,34 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.4 highlights
+
+Hardening for the installer and the uninstall path. Four bugs, each with a reproducible symptom.
+
+- **Downgrade installs are refused**: running a v1.4.x installer on a machine with v1.5.3
+  used to overwrite the program files with the older build and lower the registry
+  `DisplayVersion` — after which "Apps & features" reports the wrong version forever.
+  Now it shows "a newer version is already installed" and exits (exit code **3** in silent
+  mode) without touching anything;
+- **Silent upgrades reuse the original install path**: the GUI always did this, but
+  `--silent` trusted the directory passed on the command line. With the program installed on
+  drive D, a silent upgrade would install a **second copy** under
+  `%LOCALAPPDATA%\Programs`, leaving the old one untouched. It now defaults to the registry
+  `InstallLocation`; only `--force-dir` overrides it;
+- **No more leftover desktop/Start-menu icons**: three layers of root cause — the process
+  had not exited yet (files locked), `Remove-Item` was redirected to the Recycle Bin and
+  failed closed, and some environments **allow renaming but deny deletion** in protected
+  locations. Shortcuts and the registry are now removed by the main process directly
+  (`DeleteFileW`, falling back to renaming to `*.deleted`); only deleting the install
+  directory is delegated to an external process;
+- **Data kept on uninstall is now readable after reinstall**: `data/` was moved to
+  `%APPDATA%\SeqAudioManager`, which the app never reads — so "keep your data, it will
+  still be there after reinstall" was simply untrue. It is now restored on first launch;
+- New `--uninstall --silent [--purge]` for unattended uninstalls; `--selftest` now reports
+  `data_dir`.
+
+Installer acceptance tests went from 33 to **39** checks (6 new for downgrade refusal), all passing.
 
 ### V1.5.2 highlights
 
