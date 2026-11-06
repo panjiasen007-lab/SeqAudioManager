@@ -222,13 +222,17 @@ W320_RESIDUAL_DB = -85.0
 UPSAMPLE_RATIO = 0.96
 UPSAMPLE_EDGE_DB = -95.0
 #: 「截止之上是数字静音」的阈值：低于它说明那里没有模拟底噪，只剩编码器空白
-#: （V1.5.2.1）原值 -95dB 只覆盖 MP3/Opus 这类「断崖式」低通，漏掉了低通更缓的
+#: （V1.5.3）原值 -95dB 只覆盖 MP3/Opus 这类「断崖式」低通，漏掉了低通更缓的
 #: 编码器：Vorbis q5（约 160k）在 19.1kHz 是软滚降（250Hz 内仅 7.5dB），WMA 192
-#: 在 17.7kHz 仅 5.4dB —— 它们不会在某个 250Hz 格内留下断崖，会被「平滑滚降」
-#: 分支当成老录音放行，而截止之上其实只有 -92 ~ -94dB 的编码器空白。
-#: 真实母带/磁带/24bit 录音在截止之上的模拟底噪实测 -73 ~ -76dB（《碟中谍7》
-#: 48k/24 三轨为 -73.1 / -74.3 / -76.5），取 -88dB 仍留 12dB 余量。
-DIGITAL_SILENCE_EDGE_DB = -88.0
+#: 在 17.7kHz 仅 5.4dB。放宽到 -90dB 可覆盖它们，但**必须同时**用相对音乐主体
+#: 的能量否决，否则会误伤老录音（见 ANALOG_FLOOR_MAX_DB）。
+DIGITAL_SILENCE_EDGE_DB = -90.0
+#: 截止之上的能量相对音乐主体（300Hz~3kHz 中位数）的阈值。
+#: 「相对峰值」会随低频峰高低漂移：老录音《今宵多珍重》峰值比主体高 31.6dB，
+#: 底噪相对主体仅 -55dB，换算成相对峰值是 -86.6dB，旧阈值会把它当成数字静音。
+#: 真正的编码器空白相对主体通常低于 -66dB；磁带/模拟底噪实测 -45 ~ -58dB
+#: （《碟中谍7》48k/24 母带 -45 ~ -65dB）。低于 -64dB 才允许判「数字静音」。
+ANALOG_FLOOR_MAX_DB = -64.0
 #: 扩展带起点相对截止的偏移，跳过过渡带
 UPSAMPLE_EDGE_OFFSET_HZ = 1000.0
 
@@ -279,6 +283,7 @@ class AuthenticityResult:
     wall_step_db: float = 0.0          # 截止处 250Hz 内的最大落差（墙 vs 斜坡）
     peak_db: float = 0.0               # 轨道频谱峰值（绝对 dB），判据的参考点
     edge_energy_db: float = 0.0        # 截止之上到 Nyquist 的能量（相对峰值）
+    edge_body_db: float = 0.0          # 截止之上的能量（相对 300Hz~3kHz 主体）
     bandwidth_ratio: float = 0.0       # 截止 / Nyquist
     spectral_holes: float = 0.0        # 每帧平均频谱空洞数（4~16kHz 窄凹）
     sfb21_notch_db: float = 0.0        # 15.5~16.8kHz 凹陷深度（MP3 特征）
@@ -1460,6 +1465,7 @@ def _judge(
     steep_oct: float = 0.0,
     wall_step: float = 0.0,
     edge_db: float = 0.0,
+    edge_body: float = -120.0,
     ratio: float = 0.0,
     holes: float = 0.0,
     sfb21: float = 0.0,
@@ -1647,9 +1653,14 @@ def _judge(
     # 这条不要求「断崖」：Vorbis/WMA 的低通是缓坡，250Hz 内只掉几个 dB，
     # 若只让「墙」判据出手，它们会被下面的「平滑滚降」分支误当成老录音。
     # 决定性的仍然是「截止之上有没有模拟底噪」，与滚降快慢无关。
+    #
+    # 但「相对峰值」会随低频峰高低漂移（V1.5.3 回归：《今宵多珍重》峰值比主体
+    # 高 31.6dB，模拟底噪算出来只有 -86.6dB，被误判成数字静音）。所以再加一条
+    # 相对音乐主体的否决：真正的编码器空白要低于 -64dB，否则就是模拟底噪。
     if (
         0 < cutoff < nyquist * 0.95
         and -195.0 < edge_db < DIGITAL_SILENCE_EDGE_DB
+        and edge_body < ANALOG_FLOOR_MAX_DB
     ):
         reasons.append(
             f"内容在 {cutoff / 1000:.1f}kHz 结束（带宽 {ratio:.0%}），"
@@ -2123,6 +2134,13 @@ def analyze(
     nyq = float(result.nyquist_hz or 0)
     bandwidth = (cutoff / nyq) if nyq else 0.0
     edge_db = _edge_energy(freqs, db, cutoff, nyq, peak) if nyq else 0.0
+    # 截止之上的能量，换成相对音乐主体（300Hz~3kHz）的参考系。
+    # 「相对峰值」会随低频峰高低漂移，单靠它会误伤峰值突出的老录音。
+    edge_body = -120.0
+    if nyq and 0 < cutoff < nyq * 0.95:
+        edge_body = _band_energy(
+            freqs, db, cutoff + UPSAMPLE_EDGE_OFFSET_HZ, nyq * 0.98
+        )
     # PCM 升采样：声明 hi-res，但内容停在更低的 PCM 采样率边界。
     # 噪声填充会把台阶之上填到 -50~-70dB，所以单看 edge_db 会漏；
     # 这里直接测「台阶本身」，再补一条「截止正好落在 22.05k」。
@@ -2164,6 +2182,7 @@ def analyze(
     )
     result.peak_db = peak
     result.edge_energy_db = edge_db
+    result.edge_body_db = edge_body
     result.bandwidth_ratio = bandwidth
     result.spectral_holes = holes
     result.sfb21_notch_db = notch
@@ -2188,6 +2207,7 @@ def analyze(
         steep_oct=steep_oct,
         wall_step=wall_step,
         edge_db=edge_db,
+        edge_body=edge_body,
         ratio=bandwidth,
         holes=holes,
         sfb21=notch,

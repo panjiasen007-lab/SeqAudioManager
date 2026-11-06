@@ -1870,22 +1870,45 @@ class TestAuthenticityV13(unittest.TestCase):
 
         回归（V1.5.2.1）：Vorbis q5（~160k）在 19.1kHz 的 250Hz 内只掉 7.5dB、
         WMA 192 在 17.7kHz 只掉 5.4dB，都够不上 12dB 的「墙」判据，旧版因此
-        走「平滑滚降」分支判真；但两者截止之上实测 -92.4 / -94.2dB，没有
-        模拟底噪，本质仍是编码器砍掉的数字空白。
+        走「平滑滚降」分支判真；但两者截止之上相对主体仅 -69.5 / -71.7dB，
+        没有模拟底噪，本质仍是编码器砍掉的数字空白。
         """
         from seqaudio.core.authenticity import _judge
 
         verdict, _, reasons = _judge(
             self.info16, 17697.0, 7.2, -72.8, 16,
-            edge_db=-94.2, ratio=0.80, wall_step=5.4, steep_oct=84.1,
+            edge_db=-94.2, edge_body=-71.7, ratio=0.80, wall_step=5.4, steep_oct=84.1,
         )
         self.assertIn(verdict, ("假无损", "疑似假无损"), reasons)
 
         verdict2, _, reasons2 = _judge(
             self.info16, 19078.0, 10.8, -71.1, 16,
-            edge_db=-92.4, ratio=0.87, wall_step=7.5, steep_oct=136.5,
+            edge_db=-92.4, edge_body=-69.5, ratio=0.87, wall_step=7.5, steep_oct=136.5,
         )
         self.assertIn(verdict2, ("假无损", "疑似假无损"), reasons2)
+
+    def test_peak_relative_silence_with_analog_floor_is_true(self) -> None:
+        """相对峰值很低的「截止之上」若是模拟底噪，不能判数字静音。
+
+        回归（V1.5.3，《今宵多珍重》）：老录音峰值比主体高 31.6dB，底噪相对
+        主体仅 -54.5dB，换算成相对峰值是 -88.8dB。只看峰值参考会把它判成
+        「有损转码」；改用主体参考后应回到「平滑滚降的老录音」。
+        """
+        from seqaudio.core.authenticity import _judge
+
+        verdict, _, reasons = _judge(
+            self.info16, 18600.0, 5.0, -60.0, 16,
+            edge_db=-88.8, edge_body=-54.5, ratio=0.84, wall_step=3.9,
+        )
+        self.assertEqual(verdict, "真无损", reasons)
+        self.assertTrue(any("老录音" in reason for reason in reasons), reasons)
+
+        # 即便相对峰值跌破 -90dB，只要相对主体仍高于 -64dB，就是模拟底噪
+        verdict2, _, reasons2 = _judge(
+            self.info16, 18600.0, 5.0, -60.0, 16,
+            edge_db=-91.0, edge_body=-54.5, ratio=0.84, wall_step=3.9,
+        )
+        self.assertEqual(verdict2, "真无损", reasons2)
 
     def test_real_master_noise_above_cutoff_kept_true(self) -> None:
         """真 48k/24 母带：截止在 16kHz，但之上有 -74dB 模拟底噪 → 真无损。

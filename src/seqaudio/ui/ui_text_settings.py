@@ -113,6 +113,10 @@ ROWS: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("频谱分析失败", "頻譜分析失敗", "Spectrum analysis failed", "スペクトル分析失敗", "스펙트럼 분석 실패", "Ошибка спектрального анализа", "Échec de l’analyse spectrale", "Spektralanalyse fehlgeschlagen"),
     ("分析失败：{message}", "分析失敗：{message}", "Analysis failed: {message}", "分析失敗：{message}", "분석 실패: {message}", "Ошибка анализа: {message}", "Échec de l’analyse : {message}", "Analyse fehlgeschlagen: {message}"),
     ("完整频谱提取失败", "完整頻譜擷取失敗", "Full spectrogram extraction failed", "全体スペクトル抽出失敗", "전체 스펙트로그램 추출 실패", "Не удалось извлечь полную спектрограмму", "Échec de l’extraction du spectrogramme complet", "Vollständige Spektrogramm-Extraktion fehlgeschlagen"),
+    ("放大", "放大", "Zoom in", "拡大", "확대", "Увеличить", "Zoomer", "Vergrößern"),
+    ("缩小", "縮小", "Zoom out", "縮小", "축소", "Уменьшить", "Dézoomer", "Verkleinern"),
+    ("复位", "復位", "Reset", "リセット", "재설정", "Сбросить", "Réinitialiser", "Zurücksetzen"),
+    ("滚轮缩放 · 拖动平移 · 双击复位", "滾輪縮放 · 拖曳平移 · 雙擊復位", "Wheel to zoom · drag to pan · double-click to reset", "ホイールで拡大縮小 · ドラッグで移動 · ダブルクリックでリセット", "스크롤로 확대/축소 · 끌어서 이동 · 두 번 클릭으로 초기화", "Колесо — масштаб · перетаскивание — панорама · двойной щелчок — сброс", "Molette pour zoomer · glisser pour déplacer · double-clic pour réinitialiser", "Rad zum Zoomen · Ziehen zum Verschieben · Doppelklick zum Zurücksetzen"),
 
     # 动态摘要
     ("已选 {count} 首", "已選 {count} 首", "{count} selected", "{count} 曲を選択", "{count}곡 선택", "Выбрано: {count}", "{count} sélectionné(s)", "{count} ausgewählt"),
