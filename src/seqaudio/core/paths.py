@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def app_dir() -> Path:
@@ -48,13 +52,49 @@ def asset_path(name: str) -> Path | None:
     return None
 
 
+def _kept_data_dir() -> Path:
+    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+    return (Path(base) if base else Path(tempfile.gettempdir())) / "SeqAudioManager"
+
+
+def _restore_kept_data(portable: Path) -> None:
+    """把卸载时移走的数据搬回安装目录。
+
+    卸载对话框承诺「保留数据，以后重装还能接着用」，但 data 是被挪到
+    ``%APPDATA%/SeqAudioManager`` 的，而运行时只认安装目录下的 ``data/`` ——
+    不搬回来，用户重装后看到的就是一份全新配置，备份也「不见」了。
+
+    只在安装目录的 ``data/`` **原本不存在**时执行（即刚重装完、程序第一次
+    启动），且必须存在 ``config.json`` 才认作可迁移的数据，避免把别处的
+    残渣（例如绿色版与安装版并存）拖进来。复制而不是移动：万一迁移失败，
+    ``%APPDATA%`` 那份还在。
+    """
+    source = _kept_data_dir()
+    config = source / "config.json"
+    if not config.exists():
+        return
+    try:
+        for item in source.iterdir():
+            destination = portable / item.name
+            if item.is_dir():
+                shutil.copytree(item, destination, dirs_exist_ok=True)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+        log.info("已把卸载时保留的数据恢复到 %s", portable)
+    except OSError as exc:
+        log.warning("恢复保留数据失败（继续用新配置）：%s", exc)
+
+
 def data_dir() -> Path:
     """配置与缓存根目录。绿色优先：程序目录可写就用它，否则用 AppData。"""
     portable = app_dir() / "data"
+    existed = portable.exists()
     if _writable(portable):
+        if not existed:
+            _restore_kept_data(portable)
         return portable
-    base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
-    fallback = (Path(base) if base else Path(tempfile.gettempdir())) / "SeqAudioManager"
+    fallback = _kept_data_dir()
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 

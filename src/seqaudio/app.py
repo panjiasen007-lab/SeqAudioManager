@@ -127,6 +127,16 @@ def _selftest() -> int:
         report["sacd_extract_exists"] = bool(tool and Path(tool).exists())
     except Exception as exc:  # noqa: BLE001
         report["sacd_error"] = str(exc)
+    # 数据目录：顺带确认可写，并在「卸载时保留过数据」的情况下完成回迁。
+    # 排查用户问题时第一句总是问「你的 data 在哪」，自检里直接给出来。
+    try:
+        from .core.paths import data_dir
+
+        folder = data_dir()
+        report["data_dir"] = str(folder)
+        report["data_dir_exists"] = folder.exists()
+    except Exception as exc:  # noqa: BLE001
+        report["data_dir_error"] = str(exc)
 
     target = Path(tempfile.gettempdir()) / "seqaudio_selftest.json"
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -219,16 +229,28 @@ def _selftest_scan(target: str) -> int:
     return 0
 
 
-def _uninstall_flow() -> int:
+def _uninstall_flow(silent: bool = False, keep_data: bool = True) -> int:
     """`--uninstall`：由「应用和功能」或开始菜单调用。
 
     两段询问：先确认要卸载，再单独问 data/ 怎么处理 —— 备份目录里可能是用户
     唯一的母带副本，绝不能在"卸载程序"这一步顺手删掉。
+
+    ``--uninstall --silent`` 走无人值守：不弹任何窗口，按 ``--purge`` 决定
+    data/ 去留（默认保留）。企业部署、脚本卸载和自动化验收都用这条路径 ——
+    GUI 版本没法在测试里点按钮，静默入口同时也让卸载可被断言验证。
     """
     from PySide6.QtWidgets import QMessageBox as Box
 
     from .core.paths import app_dir
     from .core.uninstall import install_dir_from_registry, run_uninstall
+
+    if silent:
+        install_dir = install_dir_from_registry() or app_dir()
+        ok = run_uninstall(install_dir, keep_data=keep_data)
+        log.info(
+            "静默卸载：%s（保留数据=%s，成功=%s）", install_dir, keep_data, ok
+        )
+        return 0 if ok else 1
 
     app = create_app([])
     install_dir = install_dir_from_registry() or app_dir()
@@ -297,7 +319,10 @@ def main(argv: list[str] | None = None) -> int:
         return _selftest_scan(target)
     if "--uninstall" in args:
         setup_logging()
-        return _uninstall_flow()
+        return _uninstall_flow(
+            silent="--silent" in args,
+            keep_data="--purge" not in args,
+        )
 
     setup_logging()
     log.info("启动 %s v%s", APP_NAME, __version__)

@@ -167,15 +167,26 @@ def stop_app(proc: subprocess.Popen) -> None:
 
 
 def run_uninstall_script(target: Path, *, keep_data: bool) -> None:
-    from seqaudio.core.uninstall import build_uninstall_script
+    """走与产品一致的卸载路径：主进程清快捷方式+注册表，PowerShell 删目录。
 
+    产品里 ``run_uninstall`` 会给脚本传 ``wait_pid`` 等自己退出；测试进程还活着，
+    这里不传，直接用 EncodedCommand 同步执行，其余逻辑与产品完全相同。
+    """
+    from seqaudio.core.uninstall import (
+        build_uninstall_script,
+        remove_shortcuts_and_registry,
+        script_command,
+    )
+
+    for item in remove_shortcuts_and_registry():
+        print(f"    [主进程] {item}")
     script = build_uninstall_script(target, keep_data=keep_data)
-    # 真实脚本要等主进程退出才动手，测试里没有待退出的进程，缩短等待
-    script = script.replace("Start-Sleep -Milliseconds 1500", "Start-Sleep -Milliseconds 200")
-    path = Path(tempfile.gettempdir()) / "seqaudio_e2e_uninstall.ps1"
-    path.write_text(script, encoding="utf-8-sig")
+    # 真实脚本要等主进程退出才动手，测试里没有待退出的进程，缩短起始等待
+    script = script.replace("Start-Sleep -Milliseconds 600", "Start-Sleep -Milliseconds 200")
+    # 与产品同一条路径：-EncodedCommand 传脚本，避免临时 .ps1 被 ANSI 代码页
+    # 解释成乱码导致中文 lnk 路径匹配不上
     proc = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(path)],
+        script_command(script),
         capture_output=True,
         timeout=180,
     )
@@ -185,6 +196,21 @@ def run_uninstall_script(target: Path, *, keep_data: bool) -> None:
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", "replace").strip()
         print(f"    [卸载脚本退出码 {proc.returncode}] {err[:300]}")
+
+
+def wait_until(predicate, seconds: float = 40.0, step: float = 0.4) -> bool:
+    """轮询等待条件成立。
+
+    卸载是「先删 300MB 目录、再删注册表、最后删快捷方式」的顺序执行，固定
+    ``sleep(1.5)`` 会在目录还没删完时就去检查快捷方式，三项断言必然抢跑报错
+    （不是产品问题，是测试等太短）。
+    """
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(step)
+    return predicate()
 
 
 def find_setup() -> Path:
@@ -252,6 +278,26 @@ def main() -> int:
         check((sandbox / EXE_NAME).stat().st_size > 1_000_000, "损坏的主程序被重新铺好")
         check(sentinel.exists() and "keep-me" in sentinel.read_text(encoding="utf-8"), "data/config.json 未被清除")
 
+        # ------------------------------------------------------ 2.5 降级拒绝
+        print("\n[2.5] 已装更高版本时拒绝安装")
+        current = snapshot_registry() or {}
+        current["DisplayVersion"] = ("9.9.9", winreg.REG_SZ)
+        write_registry_values(current)
+        exe_size_before = (sandbox / EXE_NAME).stat().st_size
+        code, report = run_setup(setup, sandbox)
+        check(code == 3, "返回码 3（拒绝降级的专用码）", f"实际 {code}")
+        check(report.get("error") == "installed_version_newer", "报告 installed_version_newer",
+              str(report.get("error") or ""))
+        check(report.get("mode") == "downgrade", "识别为 downgrade", f"实际 {report.get('mode')}")
+        check(
+            "9.9.9" in (report.get("message") or "") and version in (report.get("message") or ""),
+            "提示文案写明两个版本号",
+            (report.get("message") or "").replace("\n", " ")[:60],
+        )
+        check(read_registry().get("DisplayVersion") == "9.9.9", "注册表版本未被改动",
+              f"{read_registry().get('DisplayVersion')}")
+        check((sandbox / EXE_NAME).stat().st_size == exe_size_before, "程序文件未被降级覆盖")
+
         # ---------------------------------------------------------- 3 升级安装
         print("\n[3] 升级安装（模拟已装 1.0.0）")
         # 注意格式：snapshot_registry 的每项是 (值, 类型)，不能直接塞字符串
@@ -286,7 +332,8 @@ def main() -> int:
         # ---------------------------------------------------------- 5 卸载
         print("\n[5] 卸载")
         run_uninstall_script(sandbox, keep_data=False)
-        time.sleep(1.5)
+        wait_until(lambda: not sandbox.exists())
+        wait_until(lambda: not desktop_lnk().exists(), 15)
         check(not sandbox.exists(), "安装目录已删除")
         check(not registry_exists(), "注册表项已删除")
         check(not desktop_lnk().exists(), "桌面快捷方式已删除")

@@ -197,15 +197,36 @@ def detect_installed() -> tuple[str, Optional[Path]]:
 def install_mode(installed_version: str) -> str:
     """根据已安装版本判断安装模式。
 
-    * ``fresh``   —— 未安装，全新安装；
-    * ``repair``  —— 已装同版本，修复安装（覆盖程序文件，保留配置与备份）；
-    * ``upgrade`` —— 已装其它版本，升级安装（保留配置与备份）。
+    * ``fresh``     —— 未安装，全新安装；
+    * ``repair``    —— 已装同版本，修复安装（覆盖程序文件，保留配置与备份）；
+    * ``upgrade``   —— 已装较低版本，升级安装（保留配置与备份）；
+    * ``downgrade`` —— 已装**更高**版本，拒绝安装。
+
+    为什么必须有 ``downgrade``：用户手上有多个安装包时（网盘里翻出旧的、
+    或者回滚试验），双击低版本会把新版本的文件盖掉 —— 程序回退、配置格式
+    可能不兼容，而且注册表里的 DisplayVersion 会跟着变低，之后「应用和功能」
+    里显示的版本就再也不对了。宁可明确拒绝，也不做静默降级。
     """
     if not installed_version:
         return "fresh"
-    if _parse_version(installed_version) == _parse_version(VERSION):
+    installed = _parse_version(installed_version)
+    current = _parse_version(VERSION)
+    if installed == current:
         return "repair"
+    if installed > current:
+        return "downgrade"
     return "upgrade"
+
+
+def downgrade_message(installed_version: str) -> str:
+    """降级被拒时给用户看的说明（GUI 与静默模式共用同一段文案）。"""
+    return (
+        f"本机已安装 {APP_NAME} v{installed_version}，比当前安装包的 v{VERSION} 更新。\n\n"
+        f"继续安装会把程序降级回 v{VERSION}，配置与数据可能出现不兼容，"
+        f"因此已中止安装。\n\n"
+        f"如果确实要回到 v{VERSION}：请先在「设置 → 应用」里卸载 v{installed_version}"
+        f"（卸载会保留 data 目录），再运行本安装包。"
+    )
 
 
 def running_instances(exe: Path) -> list[int]:
@@ -852,19 +873,44 @@ class Installer(QWidget):
         super().closeEvent(event)
 
 
-def silent_install(target: Path, *, shortcuts: bool = True) -> int:
+def silent_install(
+    target: Path, *, shortcuts: bool = True, force_dir: bool = False
+) -> int:
     """`--silent <目录>`：无人值守安装，结果写 JSON 到临时目录。
 
     windowed 打包后没有控制台，返回值只能落盘 —— 这也是我能自动化验证
     安装包是否真的能把文件铺好、注册表写对的唯一办法。
+
+    **升级/修复必须回到已安装的位置**：注册表里的 ``InstallLocation`` 是唯一
+    可信来源（用户可能把软件装在 D 盘）。早先版本直接用传进来的 target，
+    结果是「静默升级会在新位置装出第二份，旧版原封不动留在原地」。
+    现在默认听注册表，只有显式 ``force_dir=True``（``--force-dir``）才按传参走。
+
+    返回码：0 成功 / 1 失败 / 2 程序正在运行 / 3 已安装更高版本（拒绝降级）。
     """
     import json
     import time as _time
 
     report: dict = {"target": str(target), "ok": False}
-    installed_version, _installed_dir = detect_installed()
+    installed_version, installed_dir = detect_installed()
     report["installed_version"] = installed_version
-    report["mode"] = install_mode(installed_version)
+    mode = install_mode(installed_version)
+    report["mode"] = mode
+
+    # 降级：宁可拒绝，也不把用户的新版本盖成旧版本
+    if mode == "downgrade":
+        report["error"] = "installed_version_newer"
+        report["message"] = downgrade_message(installed_version)
+        out = Path(tempfile.gettempdir()) / "seqaudio_install.json"
+        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 3
+
+    if installed_dir and not force_dir:
+        if Path(target) != installed_dir:
+            report["target_override"] = str(installed_dir)
+        target = installed_dir
+    report["target"] = str(target)
+
     payload = resource_path(PAYLOAD)
     report["payload"] = str(payload)
     # 程序还在跑就明确拒绝，别让用户对着「拒绝访问」猜原因。
@@ -932,11 +978,26 @@ def main() -> int:
     if "--silent" in sys.argv:
         index = sys.argv.index("--silent")
         target = Path(sys.argv[index + 1]) if index + 1 < len(sys.argv) else default_install_dir()
-        return silent_install(target, shortcuts="--no-shortcuts" not in sys.argv)
+        return silent_install(
+            target,
+            shortcuts="--no-shortcuts" not in sys.argv,
+            force_dir="--force-dir" in sys.argv,
+        )
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(QSS)
+
+    # 降级拦截：必须在建窗口之前，否则会先闪一下「安装」再报错
+    installed_version, _installed_dir = detect_installed()
+    if install_mode(installed_version) == "downgrade":
+        QMessageBox.warning(
+            None,
+            f"已安装更高版本 v{installed_version}",
+            downgrade_message(installed_version),
+        )
+        return 0
+
     # 复用主程序的字体（若安装包内带了字体目录）
     from PySide6.QtGui import QFontDatabase
 
