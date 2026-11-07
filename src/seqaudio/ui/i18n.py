@@ -396,9 +396,16 @@ def tr_text(text: str) -> str:
     return source
 
 
-def tr_format(source: str, **kwargs) -> str:
-    """翻译含占位符的文案；格式化失败时返回未格式化的译文。"""
-    text = tr_text(source)
+def tr_format(template: str, **kwargs) -> str:
+    """翻译含占位符的文案；格式化失败时返回未格式化的译文。
+
+    第一个参数**不能**叫 ``source``：界面文案里「来源」类占位符正好叫
+    ``{source}``（歌词来源、封面来源、数据来源），调用方会写成
+    ``tr_format("歌词来源：{source}", source=...)`` —— 位置参数与关键字参数同名，
+    Python 直接抛 ``got multiple values for argument 'source'``，整个
+    tooltip / 状态栏渲染中断。改名成 ``template`` 就不会再撞。
+    """
+    text = tr_text(template)
     try:
         return text.format(**kwargs)
     except (KeyError, IndexError, ValueError):

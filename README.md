@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.4-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.5-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,21 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.5 更新摘要
+
+修一个会弹「未预期的错误」并中断操作的崩溃。
+
+- **鼠标悬停到「有歌词来源」的行就崩**：`tr_format()` 的第一个参数名叫 `source`，而界面文案
+  「歌词来源：{source}」的占位符也叫 `source` —— 调用写成
+  `tr_format("歌词来源：{source}", source=...)` 时位置参数与关键字参数撞名，Python 直接抛
+  `TypeError: got multiple values for argument 'source'`，tooltip 渲染中断，弹出错误框；
+- 修法：第一个参数改名 `template`。`{source}` 这种占位符在「歌词来源 / 封面来源 / 数据来源」
+  里都会用到，改名比改调用点更彻底；
+- 补 3 项回归测试（`{source}` 占位符、普通多占位符、缺参数时优雅回退）。
+
+> 同时可见的 `HTTP 503 musicbrainz.org` 是 MusicBrainz 限流，程序已按 1.5s/3s 退避重试，
+> 属正常处理，不是这次崩溃的原因。
 
 ### V1.5.4 更新摘要
 
@@ -704,6 +719,24 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.5 highlights
+
+Fixes a crash that showed "an unexpected error occurred" and aborted the operation.
+
+- **Hovering a row that has a lyrics source crashed the app**: `tr_format()`'s first
+  parameter was named `source`, and the UI string "歌词来源：{source}" uses a `{source}`
+  placeholder — so `tr_format("歌词来源：{source}", source=...)` passed the same name as both
+  a positional and a keyword argument, raising
+  `TypeError: got multiple values for argument 'source'` and breaking tooltip rendering;
+- Fix: renamed the first parameter to `template`. Placeholders named `{source}` appear in
+  lyrics/cover/data-source strings, so renaming the parameter is more thorough than patching
+  the call site;
+- Added 3 regression tests (`{source}` placeholder, multiple placeholders, graceful fallback
+  on missing keys).
+
+> The `HTTP 503 musicbrainz.org` in the log is MusicBrainz rate limiting; the app already
+> backs off and retries (1.5s/3s). Unrelated to this crash.
 
 ### V1.5.4 highlights
 

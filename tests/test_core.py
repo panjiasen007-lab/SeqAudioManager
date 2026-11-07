@@ -3145,5 +3145,39 @@ class TestWallStepAndStereo(unittest.TestCase):
             self.assertNotIn(token, source)
 
 
+class TestI18nFormat(unittest.TestCase):
+    """tr_format 的参数名不能与占位符撞车。"""
+
+    def test_source_placeholder(self) -> None:
+        """文案里的 {source} 占位符必须能正常填充。
+
+        曾经的坑：tr_format 的第一个参数叫 source，调用方写
+        ``tr_format("歌词来源：{source}", source=...)`` 时位置参数和关键字参数
+        撞名，直接 TypeError: got multiple values for argument 'source' ——
+        鼠标悬停在有歌词来源的行上就弹「未预期的错误」。
+        """
+        from seqaudio.ui import i18n
+
+        self.assertEqual(
+            i18n.tr_format("歌词来源：{source}", source="LRCLIB"),
+            "歌词来源：LRCLIB",
+        )
+
+    def test_plain_placeholders(self) -> None:
+        from seqaudio.ui import i18n
+
+        self.assertEqual(i18n.tr_format("路径：{path}", path="a.flac"), "路径：a.flac")
+        self.assertEqual(
+            i18n.tr_format("CUE：{name}（{count} 轨）", name="a.cue", count=3),
+            "CUE：a.cue（3 轨）",
+        )
+
+    def test_missing_key_falls_back(self) -> None:
+        """缺参数时返回未格式化的译文，不能抛异常打断渲染。"""
+        from seqaudio.ui import i18n
+
+        self.assertEqual(i18n.tr_format("缺：{missing}"), "缺：{missing}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
