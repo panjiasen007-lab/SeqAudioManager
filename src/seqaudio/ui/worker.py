@@ -354,6 +354,7 @@ class SplitCueWorker(QThread):
                     use_netmusic=self.settings.use_netmusic,
                     use_qqmusic=self.settings.use_qqmusic,
                     trim_pregap=self.settings.cue_split_trim_pregap,
+                    output_format=self.settings.cue_split_format,
                     on_progress=lambda i, n: self.progressChanged.emit(i, n),
                     cancel=cancel,
                 )

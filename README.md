@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.5-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.6-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,21 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.6 更新摘要
+
+分轨导出支持选择输出格式。
+
+- **可选无压缩 WAV**：设置 → 扫描与过滤 → 「分轨格式」里选 **WAV**，导出体积与原盘基本一致
+  （实测 CD1：570,223,628 字节的整轨 → 13 个 WAV 合计 570,241,930 字节，多出来的是每轨
+  几百字节的 WAV 头与尾部 ID3 标签）；选 **FLAC** 时仍是原来的无损压缩，约为原盘的 60%；
+- **位深跟随源文件**：24bit 源在 WAV 下输出 `pcm_s24le`，不会被偷偷降到 16bit；
+- **无损性有据可查**：WAV 导出后与源盘逐采样比对 **0 差异**；13 轨采样数合计与整轨只差 1 帧
+  （CUE 的 75fps 时间码换算舍入）；
+- 配置项 `cue_split_format` 容错：值写错或旧配置文件里没有这个键，一律回落到 FLAC ——
+  不会因为一个拼写错误就悄悄产出几百 MB 的 WAV；
+- 标签写入失败不再让分轨算作失败：WAV 的 ID3 支持面比 FLAC 的 Vorbis comment 窄，
+  以前遇到这种情况会把已导出的文件记成「失败」，现在只记警告、音频照常交付。
 
 ### V1.5.5 更新摘要
 
@@ -719,6 +734,24 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.6 highlights
+
+Split export can now choose the output format.
+
+- **Uncompressed WAV option**: Settings → Scan & filter → "Split format". Choosing **WAV**
+  produces files roughly the size of the source (measured on a CD: a 570,223,628-byte whole-disc
+  WAV → 13 WAVs totalling 570,241,930 bytes; the extra few hundred bytes per track are the WAV
+  header and trailing ID3 tag). **FLAC** remains the default at ~60% of the source size;
+- **Bit depth follows the source**: 24-bit sources are written as `pcm_s24le` in WAV mode —
+  never silently truncated to 16-bit;
+- **Losslessness is verifiable**: the exported WAVs compare sample-for-sample with the source
+  with **zero differences**, and the summed sample count is off by 1 frame (CUE's 75 fps
+  timecode rounding);
+- The `cue_split_format` setting falls back to FLAC on any unrecognised value (or when an old
+  config has no such key), so a typo can't silently produce hundreds of megabytes of WAV;
+- A failed tag write no longer counts the track as failed: WAV's ID3 support is narrower than
+  FLAC's Vorbis comments, and the old path would mark an already-exported file as an error.
 
 ### V1.5.5 highlights
 

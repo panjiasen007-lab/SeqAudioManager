@@ -34,6 +34,33 @@ from ..net.http import HttpClient
 
 log = logging.getLogger(__name__)
 
+#: 分轨输出格式
+FORMAT_FLAC = "flac"   # 无损压缩，体积约为原盘 60%
+FORMAT_WAV = "wav"     # 无压缩 PCM，体积与原盘基本一致
+_SUFFIX = {FORMAT_FLAC: ".flac", FORMAT_WAV: ".wav"}
+_FORMAT_LABEL = {FORMAT_FLAC: "FLAC", FORMAT_WAV: "WAV"}
+
+
+def normalise_format(value: str | None) -> str:
+    """把配置里的格式字符串收敛成 ``flac`` / ``wav``。
+
+    配置文件是用户能直接编辑的，也可能来自旧版本（没有这个键）。任何
+    不认识的值一律回落到 FLAC —— 它是体积和安全性的平衡点，也不会因为
+    拼错一次就悄悄产出几百 MB 的 WAV。
+    """
+    text = (value or "").strip().lower()
+    if text in ("wav", "wave", "pcm", "uncompressed", "无压缩"):
+        return FORMAT_WAV
+    return FORMAT_FLAC
+
+
+def format_suffix(value: str | None) -> str:
+    return _SUFFIX[normalise_format(value)]
+
+
+def format_label(value: str | None) -> str:
+    return _FORMAT_LABEL[normalise_format(value)]
+
 
 @dataclass
 class SplitSummary:
@@ -60,18 +87,36 @@ def _find_ffmpeg() -> Optional[str]:
 
 
 def split_one(
-    ffmpeg: str, src: Path, dst: Path, start_sec: float, duration_sec: float
+    ffmpeg: str,
+    src: Path,
+    dst: Path,
+    start_sec: float,
+    duration_sec: float,
+    *,
+    output_format: str = FORMAT_FLAC,
+    bit_depth: int = 16,
 ) -> bool:
-    """用 ffmpeg 切出 [start, start+duration) 一段，输出 FLAC。
+    """用 ffmpeg 切出 [start, start+duration) 一段，按 ``output_format`` 输出。
 
     先写临时文件，校验时长无误后再原子替换到目标路径：
     * 中断/失败不会留下半截 FLAC；
     * 目标已存在时也能安全覆盖（修复历史坏分轨）。
+
+    ``output_format``：
+    * ``flac`` —— 无损压缩，体积约为原盘的 60%；
+    * ``wav``  —— 无压缩 PCM，体积与原盘基本一致。位深**跟随源文件**
+      （24bit 源出 pcm_s24le，不会偷偷降到 16bit）。
     """
     from ..core.probe import probe
 
     duration_sec = max(0.1, duration_sec)
+    fmt = normalise_format(output_format)
     tmp = dst.with_name(dst.stem + ".seqaudio.tmp" + dst.suffix)
+    if fmt == FORMAT_WAV:
+        codec = "pcm_s24le" if (bit_depth or 16) > 16 else "pcm_s16le"
+        codec_args = ["-c:a", codec, "-f", "wav"]
+    else:
+        codec_args = ["-c:a", "flac"]
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-ss", f"{start_sec:.3f}",
@@ -80,7 +125,7 @@ def split_one(
         "-map", "0:a:0",
         "-map_metadata", "-1",
         "-vn", "-sn", "-dn",
-        "-c:a", "flac",
+        *codec_args,
         "-y", str(tmp),
     ]
     try:
@@ -191,14 +236,16 @@ def split_cue_sheet(
     use_qqmusic: bool = True,
     fetch_lyrics: bool = True,
     trim_pregap: bool = False,
+    output_format: str = FORMAT_FLAC,
     on_progress=None,
     cancel=None,
 ) -> SplitSummary:
-    """把整轨 ``track`` 按 ``track.cue`` 切分成独立 FLAC，写标签 + 匹配歌词。
+    """把整轨 ``track`` 按 ``track.cue`` 切分成独立文件，写标签 + 匹配歌词。
 
-    ``output_dir`` 是输出目录；每个分轨文件名 ``NN - 标题.flac``。
+    ``output_dir`` 是输出目录；每个分轨文件名 ``NN - 标题.flac``（或 ``.wav``）。
     ``trim_pregap=True`` 时每轨在下一轨 INDEX 00 截止（去掉轨尾静音预间隙）；
     若预间隙里检测到真实音频（隐藏曲/尾奏），自动保留，不裁内容。
+    ``output_format`` 见 :func:`normalise_format`：``flac`` 无损压缩、``wav`` 无压缩。
     """
     sheet = track.cue
     if sheet is None or len(sheet.tracks) <= 1:
@@ -278,7 +325,9 @@ def split_cue_sheet(
                 duration_ms = default_end - entry.start_ms
         expected = duration_ms / 1000.0
 
-        dst = output_dir / _safe_filename(entry.number, title)
+        dst = output_dir / _safe_filename(
+            entry.number, title, suffix=format_suffix(output_format)
+        )
         if expected <= 0.05:
             log.warning("轨 %s 时长为 %.2fs，跳过：CUE 索引可能不完整", entry.number, expected)
             summary.failed += 1
@@ -303,6 +352,8 @@ def split_cue_sheet(
             ok = split_one(
                 ffmpeg, track.path, dst,
                 start_ms / 1000.0, expected,
+                output_format=output_format,
+                bit_depth=track.info.bit_depth or 16,
             )
             if not ok:
                 summary.failed += 1
@@ -335,6 +386,13 @@ def split_cue_sheet(
 
         result = write_tags(dst, tags)
         if result.ok:
+            summary.created += 1
+        elif dst.exists():
+            # 标签写不进去不该让整轨算失败：音频已经切好了，标不标签是次要问题。
+            # WAV 的 ID3 支持面比 FLAC 的 Vorbis comment 窄，这条路径会更常走到。
+            log.warning(
+                "分轨标签写入失败 %s：%s（音频已导出）", dst.name, result.message
+            )
             summary.created += 1
         else:
             summary.failed += 1

@@ -3179,5 +3179,39 @@ class TestI18nFormat(unittest.TestCase):
         self.assertEqual(i18n.tr_format("缺：{missing}"), "缺：{missing}")
 
 
+class TestSplitOutputFormat(unittest.TestCase):
+    """分轨输出格式：可选无压缩 WAV，默认仍是无损压缩 FLAC。"""
+
+    def test_normalise_known_values(self) -> None:
+        from seqaudio.pipeline.cue_split import normalise_format
+
+        self.assertEqual(normalise_format("flac"), "flac")
+        self.assertEqual(normalise_format("wav"), "wav")
+        self.assertEqual(normalise_format("WAV"), "wav")
+        self.assertEqual(normalise_format("pcm"), "wav")
+        self.assertEqual(normalise_format("无压缩"), "wav")
+
+    def test_normalise_falls_back_to_flac(self) -> None:
+        """配置写错或旧版本没有这个键时，不能悄悄产出几百 MB 的 WAV。"""
+        from seqaudio.pipeline.cue_split import normalise_format
+
+        for bad in ("", None, "mp3", "aiff", "随便写"):
+            self.assertEqual(normalise_format(bad), "flac", f"{bad!r} 应回落到 flac")
+
+    def test_suffix_and_label(self) -> None:
+        from seqaudio.pipeline.cue_split import format_label, format_suffix
+
+        self.assertEqual(format_suffix("flac"), ".flac")
+        self.assertEqual(format_suffix("wav"), ".wav")
+        self.assertEqual(format_suffix("bogus"), ".flac")
+        self.assertEqual(format_label("wav"), "WAV")
+        self.assertEqual(format_label(None), "FLAC")
+
+    def test_settings_default_is_flac(self) -> None:
+        from seqaudio.core.config import Settings
+
+        self.assertEqual(Settings().cue_split_format, "flac")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -276,6 +276,18 @@ class SettingsPanel(QWidget):
         self.min_duration_spin.valueChanged.connect(self._notify)
         card.add_form([("最短时长", self.min_duration_spin)])
 
+        self.split_format_combo = QComboBox()
+        self.split_format_combo.addItem("FLAC（无损压缩，约原盘 60%）", "flac")
+        self.split_format_combo.addItem("WAV（无压缩，体积与原盘相近）", "wav")
+        self.split_format_combo.setToolTip(
+            "分轨导出的文件格式。\n"
+            "FLAC：无损压缩，体积约为原盘的 60%，主流播放器都认；\n"
+            "WAV：无压缩 PCM，体积与原盘基本一致；位深跟随源文件\n"
+            "（24bit 源出 24bit，不会降成 16bit）。"
+        )
+        self.split_format_combo.currentIndexChanged.connect(self._notify)
+        card.add_form([("分轨格式", self.split_format_combo)])
+
         self.trim_pregap_check = QCheckBox("分轨在下一轨 INDEX 00 处截止")
         self.trim_pregap_check.setToolTip(
             "勾选：每轨输出到下一轨预间隙起点（INDEX 00），去掉轨尾约 2 秒的静音预间隙；\n"
@@ -523,6 +535,9 @@ class SettingsPanel(QWidget):
 
             self.recursive_check.setChecked(settings.recursive_scan)
             self.min_duration_spin.setValue(int(settings.min_duration_sec))
+            self.split_format_combo.setCurrentIndex(
+                max(0, self.split_format_combo.findData(settings.cue_split_format or "flac"))
+            )
             self.trim_pregap_check.setChecked(settings.cue_split_trim_pregap)
             self.suspect_check.setChecked(settings.cleanup_include_suspect)
             self.cover_check.setChecked(settings.ensure_folder_cover)
@@ -580,6 +595,7 @@ class SettingsPanel(QWidget):
 
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.min_duration_sec = float(self.min_duration_spin.value())
+        settings.cue_split_format = str(self.split_format_combo.currentData() or "flac")
         settings.cue_split_trim_pregap = self.trim_pregap_check.isChecked()
 
         settings.cleanup_include_suspect = self.suspect_check.isChecked()

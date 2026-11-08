@@ -77,6 +77,9 @@ class Settings:
     recursive_scan: bool = True
     min_duration_sec: float = 30.0         # 过滤短视频 BGM / 广告音频
     cue_split_trim_pregap: bool = False    # CUE 分轨在下一轨 INDEX 00 处截止（去掉轨尾预间隙）
+    #: 分轨输出格式：``flac`` 无损压缩 / ``wav`` 无压缩 PCM（体积与原盘接近）。
+    #: WAV 的位深跟随源文件（16bit 出 s16、24bit 出 s24），不做降位深。
+    cue_split_format: str = "flac"
     skip_encrypted: bool = True
 
     # ---- 界面 ----

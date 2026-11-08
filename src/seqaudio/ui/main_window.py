@@ -2030,7 +2030,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ CUE 分轨导出
 
     def run_split_cue(self) -> None:
-        """分轨导出：把整轨 WAV/APE/FLAC + CUE 切成 FLAC，或把 SACD ISO 导出为 DSF。"""
+        """分轨导出：整轨 WAV/APE/FLAC + CUE 切成 FLAC 或 WAV，SACD ISO 导出为 DSF。"""
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "请稍候", "批处理正在运行，先等它完成。")
             return
