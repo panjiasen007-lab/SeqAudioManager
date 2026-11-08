@@ -17,7 +17,7 @@ import logging
 from typing import Callable, Optional
 
 from ..core.model import MatchCandidate
-from ..core.text import similarity_strict
+from ..core.text import artist_match, similarity_strict
 from . import artist as artist_mod
 from . import coverart, itunes, lrclib, musicbrainz, netmusic, qqmusic
 from .http import HttpClient, sniff_image_mime
@@ -29,6 +29,7 @@ def _first_nonempty(
     providers: list[tuple[str, Callable[[], list[MatchCandidate]]]],
     accept: Optional[Callable[[MatchCandidate], bool]] = None,
     keep_as_fallback: Optional[Callable[[MatchCandidate], bool]] = None,
+    sort_key: Optional[Callable[[MatchCandidate], float]] = None,
 ) -> list[MatchCandidate]:
     """按顺序尝试，返回第一个「有结果且能通过校验」的源。
 
@@ -54,6 +55,11 @@ def _first_nonempty(
         kept = [c for c in candidates if accept(c)]
         if kept:
             log.debug("元数据命中 %s（%d/%d 条通过校验）", name, len(kept), len(candidates))
+            if sort_key is not None:
+                # 数据源自带的排名只反映「搜索相关度」，不区分录音室版与 Live、
+                # 也不认识译名。按内容吻合度重排，让最像的那条排第一 ——
+                # 界面上默认选中的就是第一条，排错等于匹配错。
+                kept.sort(key=sort_key, reverse=True)
             return kept
         log.debug("数据源 %s 的 %d 条候选都与查询不符，换下一个", name, len(candidates))
         if not fallback and keep_as_fallback is not None:
@@ -99,14 +105,15 @@ def search_metadata(
         duration_ok = bool(
             duration and cand.duration and abs(cand.duration - duration) <= 3.0
         )
+        artist_ok = artist_match(artist, cand.artist) >= 0.5 if artist else True
         title_ok = similarity_strict(title, cand.title) >= 0.75
         if not title_ok:
-            return duration_ok
-        if not artist:
-            # 没歌手可比（很多文件本来就没填），只能信标题
+            # 歌名完全对不上时，时长一致**不足以**放行 —— 见过搜「给你们」
+            # 返回「时间请回答」，两首歌时长恰好都是 285 秒。必须歌手也对得上。
+            return duration_ok and artist_ok
+        if artist_ok:
             return True
-        if similarity_strict(artist, cand.artist) >= 0.5:
-            return True
+        # 歌名对、歌手不同：只在时长吻合时放行（合唱/翻唱常写成不同艺名）
         return duration_ok
 
     providers: list[tuple[str, Callable[[], list[MatchCandidate]]]] = []
@@ -124,7 +131,17 @@ def search_metadata(
         # 这种搜错的热门歌也一起塞给评分层，等于没校验。
         return similarity_strict(title, cand.title) >= 0.5
 
-    candidates = _first_nonempty(providers, accept, keep_as_fallback)
+    def rank(cand: MatchCandidate) -> float:
+        """内容吻合度：歌名 55% + 歌手 25% + 时长 20%。"""
+        title_sim = similarity_strict(title, cand.title)
+        artist_sim = artist_match(artist, cand.artist) if artist else 1.0
+        if duration and cand.duration:
+            dur_sim = max(0.0, 1.0 - abs(cand.duration - duration) / 30.0)
+        else:
+            dur_sim = 0.5  # 未知给中性分，不奖不罚
+        return title_sim * 0.55 + artist_sim * 0.25 + dur_sim * 0.20
+
+    candidates = _first_nonempty(providers, accept, keep_as_fallback, rank)
     if candidates:
         return candidates
     # 全空时放宽：歌手可能写错，只按标题再试一次（仍然遵循优先级顺序）
@@ -149,12 +166,17 @@ def fetch_lyrics(
     use_lrclib: bool = True,
     use_netmusic: bool = True,
     use_qqmusic: bool = True,
+    _retry_without_artist: bool = True,
 ) -> Optional[lrclib.LyricsResult]:
     """歌词：**网易云 → QQ 音乐 → LRCLIB**。
 
     国内源排前面是因为中文歌的歌词在它们那里最全，且带逐行时间轴；LRCLIB 是
     社区库，华语老歌经常没有条目。``duration`` 会传给国内源，让它们按时长挑
     候选（避免贴上同名 LIVE / 翻唱 / 伴奏版的歌词）。
+
+    带歌手搜完一轮仍为空、且歌手名可疑时，会**只按歌名再试一次**：曲库里的
+    歌手字段常是拼音（``Deng1xiajiuhuijia``）、群星合集（``新时代明星团``）或
+    干脆写错，带着这种歌手去搜反而把正确的条目挡住。
     """
     if use_netmusic:
         result = netmusic.lyrics(client, title, artist, duration=duration or 0.0)
@@ -168,6 +190,14 @@ def fetch_lyrics(
         result = lrclib.fetch_lyrics(client, title, artist, album, duration)
         if result:
             return result
+    if artist and _retry_without_artist:
+        return fetch_lyrics(
+            client, title, "", album, duration,
+            use_lrclib=use_lrclib,
+            use_netmusic=use_netmusic,
+            use_qqmusic=use_qqmusic,
+            _retry_without_artist=False,
+        )
     return None
 
 

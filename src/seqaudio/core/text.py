@@ -55,5 +55,36 @@ def similarity_strict(a: str, b: str) -> float:
     if na == nb:
         return 1.0
     if na in nb or nb in na:
-        return 0.92
+        # 包含关系不能无条件给高分：搜「Chase」时，「汪洋与浩渺 (A Sky to Chase)」
+        # 归一化后确实包含 "chase"，但那是完全不同的歌。要求短串至少占长串的
+        # 55%，否则退回真实字符重合度。
+        short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+        if len(short) >= len(long) * 0.55:
+            return 0.92
     return SequenceMatcher(None, na, nb).ratio()
+
+
+def _is_ascii(text: str) -> bool:
+    return all(ord(ch) < 128 for ch in (text or ""))
+
+
+def artist_match(expected: str, actual: str) -> float:
+    """歌手名相似度，对「中文名 ↔ 英文/拼音名」做容错。
+
+    同一批文件里同一个人的写法经常不统一：标签写「杜德伟」、源里写「Alex To」，
+    或者标签写「赵传」、源里写「Zhao Chuan」。字符层面比是 0 分，于是明明搜对了
+    也被判成「歌手不符」。
+
+    这里无法真的验证译名对应关系（那需要一张艺人别名表），所以采取保守处理：
+    **一侧纯 ASCII、另一侧含中文**时给中性分 0.6 —— 不当成匹配的证据，也不当成
+    反证。真正的中文 vs 中文不同人（容祖儿 vs 樊桐舟）仍然是 0 分。
+    """
+    left, right = (expected or "").strip(), (actual or "").strip()
+    if not left or not right:
+        return 1.0  # 没有可比信息，不奖不罚
+    score = similarity_strict(left, right)
+    if score >= 0.5:
+        return score
+    if _is_ascii(left) != _is_ascii(right):
+        return 0.6
+    return score

@@ -3264,5 +3264,40 @@ class TestCandidatePicking(unittest.TestCase):
         self.assertEqual(similarity_strict("陈奕迅", "陳奕迅"), 1.0)
 
 
+class TestArtistAndContainment(unittest.TestCase):
+    """歌手译名容错、标题包含判定的边界。"""
+
+    def test_artist_alias_tolerated(self) -> None:
+        """中文名 ↔ 英文/拼音名视为译名，给中性分而非 0。"""
+        from seqaudio.core.text import artist_match
+
+        self.assertGreaterEqual(artist_match("杜德伟", "Alex To"), 0.5)
+        self.assertGreaterEqual(artist_match("赵传", "Zhao Chuan"), 0.5)
+
+    def test_different_chinese_artists_rejected(self) -> None:
+        """真正不同的中文歌手仍然判 0 —— 译名容错不能变成万能放行。"""
+        from seqaudio.core.text import artist_match
+
+        self.assertLess(artist_match("容祖儿", "樊桐舟"), 0.5)
+
+    def test_multi_artist_split(self) -> None:
+        """「成龙 / 陈淑桦」与「陈淑桦」应视为同一批人。"""
+        from seqaudio.core.text import artist_match
+
+        self.assertGreaterEqual(artist_match("成龙 / 陈淑桦", "陈淑桦"), 0.5)
+
+    def test_containment_needs_length_ratio(self) -> None:
+        """短标题被长标题包含时，长度比不够就不能给 0.92。
+
+        搜「Chase」时「汪洋与浩渺 (A Sky to Chase)」归一化后确实包含 chase，
+        但那是另一首歌；给 0.92 会让对的源被跳过。
+        """
+        from seqaudio.core.text import similarity_strict
+
+        self.assertLess(similarity_strict("Chase", "汪洋与浩渺 (A Sky to Chase)"), 0.75)
+        # 正常的版本后缀仍应命中
+        self.assertGreaterEqual(similarity_strict("当爱已成往事", "当爱已成往事 (Live)"), 0.9)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

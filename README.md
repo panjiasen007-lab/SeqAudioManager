@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.7-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.8-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,40 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.8 更新摘要
+
+用真实曲库做了量化评测，并据此把匹配准确率从 **42% 提到 72%**。
+
+评测方法：从已分轨的成品里取 40 首中文歌（标签来自原盘 CUE，可信），
+用「歌名 + 歌手 + 时长」去搜，判定「歌名对、歌手对、时长差 ≤5 秒」三者全中才算准确。
+工具在 `tools/eval_match.py`，可随时复跑。
+
+| 指标 | 优化前 | 优化后 |
+|---|---|---|
+| 元数据严格准确 | 42% | **72%** |
+| 歌名命中 | 92% | **95%** |
+| 歌词拿到且正确 | 92% | **100%**（0 错配） |
+| 封面拿到 | 100% | **100%** |
+
+四处改动：
+
+- **歌手译名容错**：同一批文件里同一个人的写法常不统一——标签写「杜德伟」、源里写
+  「Alex To」，或者标签「赵传」、源里「Zhao Chuan」。字符比对是 0 分，于是明明搜对了
+  也被判「歌手不符」。新增 `artist_match()`：**一侧纯 ASCII、另一侧含中文**时给中性分 0.6，
+  既不当匹配证据也不当反证；真正不同的中文歌手（容祖儿 vs 樊桐舟）仍是 0 分；
+- **标题包含关系加长度比**：搜「Chase」时「汪洋与浩渺 (A Sky to Chase)」归一化后确实
+  包含 `chase`，旧逻辑直接给 0.92，把 iTunes 里正确的 Leslie Cheung 版挡在后面。
+  现在要求短串至少占长串 **55%** 才算包含，正常版本后缀（「当爱已成往事 (Live)」）不受影响；
+- **候选按内容吻合度重排**：数据源自带的排名只反映搜索相关度，分不清录音室版与 Live，
+  也不认识译名。现在通过校验的候选按「歌名 55% + 歌手 25% + 时长 20%」重排，
+  界面上默认选中的第一条就是最像的那条；
+- **歌词加一轮「只按歌名」的兜底**：曲库里的歌手字段常是拼音（`Deng1xiajiuhuijia`）、
+  群星合集（`新时代明星团`）或写错，带着这种歌手去搜反而挡住正确条目。
+  带歌手搜完为空时，会去掉歌手再试一轮 —— 歌词成功率因此从 88% 提升到 100%。
+
+同时收紧了「歌名完全不符」时的放行条件：以前只要时长一致就放行，导致搜「给你们」
+命中「时间请回答」（两首歌恰好都是 285 秒）；现在时长一致**且**歌手也要对得上。
 
 ### V1.5.7 更新摘要
 
@@ -761,6 +795,44 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.8 highlights
+
+Measured matching quality on a real library and raised strict accuracy from **42% to 72%**.
+
+Method: 40 Chinese tracks from already-split albums (tags come from the original CUE, so they
+are trustworthy). Each is queried with title + artist + duration; a hit counts as accurate only
+when title, artist and duration (≤5s) all agree. The harness lives in `tools/eval_match.py`.
+
+| Metric | Before | After |
+|---|---|---|
+| Metadata strict accuracy | 42% | **72%** |
+| Title hit | 92% | **95%** |
+| Lyrics fetched and correct | 92% | **100%** (0 mismatches) |
+| Cover fetched | 100% | **100%** |
+
+Four changes:
+
+- **Artist alias tolerance**: the same person is written inconsistently — tag says 「杜德伟」,
+  source says "Alex To"; tag 「赵传」, source "Zhao Chuan". Character-level comparison scores 0,
+  so correct hits were rejected as "artist mismatch". New `artist_match()` gives a neutral 0.6
+  when one side is pure ASCII and the other contains CJK — neither evidence nor
+  counter-evidence. Genuinely different Chinese artists (容祖儿 vs 樊桐舟) still score 0;
+- **Containment now requires a length ratio**: searching "Chase" matched
+  「汪洋与浩渺 (A Sky to Chase)」 at 0.92 because the normalized string contains `chase`,
+  pushing the correct Leslie Cheung entry down. Now the shorter string must cover at least
+  **55%** of the longer one; normal version suffixes still match;
+- **Candidates re-ranked by content fit**: source ranking reflects search relevance only, not
+  studio vs. live, and knows nothing about aliases. Validated candidates are now sorted by
+  "title 55% + artist 25% + duration 20%", so the default-selected first row is the best match;
+- **Lyrics retry without artist**: library artist fields are often pinyin
+  (`Deng1xiajiuhuijia`), compilation names (`新时代明星团`) or simply wrong, and searching with
+  them hides the right entry. When the artist-qualified pass returns nothing, it retries with
+  title only — lyrics success went from 88% to 100%.
+
+Also tightened the "title doesn't match at all" case: previously equal duration alone was enough,
+so searching 「给你们」 returned 「时间请回答」 (both happen to be 285s). Now duration must
+match **and** the artist must agree.
 
 ### V1.5.7 highlights
 
