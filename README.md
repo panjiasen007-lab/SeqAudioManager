@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.6-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.5.7-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,33 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.5.7 更新摘要
+
+歌词与封面的匹配改成**网易云 → QQ 音乐**优先，并修掉几处让「优先」变成「优先失败」的问题。
+
+- **网易云在境外 IP 下永远匹配不到**：搜索接口 `/api/search/get/web` 检测到海外访问时，
+  返回的是 `{"code":200,"abroad":true,"result":"<十六进制密文>"}` —— `result` 是加密字符串
+  而不是对象，解析必然失败，随后静默落到下一个源。换成不带 `/web` 的旧端点
+  （`/api/search/get`）后境内外都返回明文，实测搜「旧朋友 张学友」第一条就是原曲；
+- **国内源排到最前**：元数据 `网易云 → QQ 音乐 → MusicBrainz → iTunes`，
+  歌词 `网易云 → QQ → LRCLIB`，专辑封面 `网易云 → QQ → iTunes`，歌手照 `网易云 → Deezer`。
+  以前 MusicBrainz 排第一，中文专辑大量落到 iTunes 的英文条目（专辑名常被本地化成
+  「xxx - Single」），曲序和封面跟着偏；
+- **候选要过校验才算命中**：数据源对冷门/中文曲目的召回质量参差，会返回完全无关的热门歌
+  （搜「终有一天感动你」返回「Right Here Waiting」）或只差一个字的不同歌
+  （「旧朋友」→「给朋友」）。现在每个源的结果先比对标题相似度与歌手/时长，
+  全都不像就换下一个源；四个源都不像时只保留「歌名对得上」的当备胎，不再整批带回；
+  - 为此新增 `core/text.py` 的 `similarity_strict`：评分那边允许「同长度中文」的宽容兜底，
+    选源不能 —— 「旧朋友」和「给朋友」只差一个字，却是两首歌；
+- **歌词按时长 + 歌名挑版本**：同名有 Live/翻唱/伴奏多个版本时，按时长差挑最接近的
+  （3 秒内视为同一录音），全都不符就宁可不取，避免把 Live 版歌词贴到录音室版上；
+- **网易云封面补图**：搜索接口只返回 `picId` 不返回 `picUrl`，拼
+  `p1.music.126.net/{picId}/{picId}.jpg` 是错的（真实地址里还有一段加密串）。
+  改为走单曲详情接口拿现成 URL，并加 `?param=300y300` —— 原图实测有 3MB+、下载要 30 秒，
+  缩放后约 180KB。
+
+实测（四首中文歌）：元数据命中网易云 4/4，其中 3 首第一条即为原曲；封面全部来自网易云。
 
 ### V1.5.6 更新摘要
 
@@ -734,6 +761,39 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.5.7 highlights
+
+Lyrics and cover matching now prefer **NetEase Cloud Music → QQ Music**, plus fixes for
+several things that made "prefer" mean "prefer failing".
+
+- **NetEase never matched when accessed from abroad**: the search endpoint
+  `/api/search/get/web` detects non-CN IPs and answers with
+  `{"code":200,"abroad":true,"result":"<hex ciphertext>"}` — `result` is an encrypted string
+  rather than an object, so parsing always failed and the source silently lost. Switching to
+  the older endpoint without `/web` returns plain JSON everywhere; searching
+  "旧朋友 张学友" now yields the original track as the first hit;
+- **Domestic sources moved to the front**: metadata `NetEase → QQ → MusicBrainz → iTunes`,
+  lyrics `NetEase → QQ → LRCLIB`, album art `NetEase → QQ → iTunes`, artist photo
+  `NetEase → Deezer`. MusicBrainz used to be first, which pushed Chinese albums onto iTunes
+  entries whose album names are localised ("xxx - Single"), skewing track order and covers;
+- **Candidates must pass validation**: sources often return unrelated hit songs
+  (searching "终有一天感动你" returned "Right Here Waiting") or a different song one character
+  apart ("旧朋友" → "给朋友"). Each source's results are now checked for title similarity plus
+  artist/duration before being accepted; if nothing matches, the next source is tried, and the
+  fallback keeps only candidates whose title at least resembles the query;
+  - adds `similarity_strict` in `core/text.py`: scoring may be lenient about same-length
+    Chinese strings, but source selection must not be;
+- **Lyrics pick the right version by duration + title**: when several versions exist
+  (Live / cover / instrumental), the closest duration within 3 seconds wins; if none fits,
+  no lyrics are attached rather than attaching a Live version's lyrics to a studio track;
+- **NetEase cover art**: the search API returns only `picId`, and building
+  `p1.music.126.net/{picId}/{picId}.jpg` is wrong (the real URL contains an extra encrypted
+  segment). It now goes through the song-detail endpoint and appends `?param=300y300` —
+  originals measured at 3MB+ and took 30s to download, scaled versions are ~180KB.
+
+Measured on four Chinese tracks: metadata hit NetEase 4/4 (3 with the original as the first
+result); every cover came from NetEase.
 
 ### V1.5.6 highlights
 

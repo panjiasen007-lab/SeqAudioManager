@@ -3213,5 +3213,56 @@ class TestSplitOutputFormat(unittest.TestCase):
         self.assertEqual(Settings().cue_split_format, "flac")
 
 
+class TestCandidatePicking(unittest.TestCase):
+    """多源候选挑选：优先网易云/QQ，但不能把搜错的热门歌当命中。"""
+
+    @staticmethod
+    def _cand(title, artist="", duration=0.0, rid="1", source="网易云"):
+        from seqaudio.core.model import MatchCandidate
+
+        return MatchCandidate(
+            source=source, title=title, artist=artist,
+            duration=duration, recording_id=rid,
+        )
+
+    def test_pick_best_prefers_matching_title(self) -> None:
+        """标题全不符时必须返回 None，不能退回原列表硬选。"""
+        from seqaudio.net.netmusic import pick_best
+
+        cands = [
+            self._cand("给朋友", "张学友", 237.0, "1"),
+            self._cand("偷心", "张学友", 261.0, "2"),
+        ]
+        self.assertIsNone(pick_best(cands, 237.0, "旧朋友"))
+
+    def test_pick_best_by_duration_among_same_title(self) -> None:
+        """同名多版本时按时长挑 —— 别把 Live 版歌词贴到录音室版上。"""
+        from seqaudio.net.netmusic import pick_best
+
+        cands = [
+            self._cand("当爱已成往事", "林忆莲", 320.0, "1"),
+            self._cand("当爱已成往事", "林忆莲", 274.0, "2"),
+        ]
+        picked = pick_best(cands, 273.5, "当爱已成往事")
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked.recording_id, "2")
+
+    def test_pick_best_rejects_far_duration(self) -> None:
+        """时长差超过 30 秒视为另一首歌，宁可不出歌词。"""
+        from seqaudio.net.netmusic import pick_best
+
+        cands = [self._cand("旧朋友", "黄凯芹", 321.0, "1")]
+        self.assertIsNone(pick_best(cands, 237.0, "旧朋友"))
+
+    def test_strict_similarity_rejects_one_char_diff(self) -> None:
+        """评分用的宽容兜底不能影响选源：「旧朋友」≠「给朋友」。"""
+        from seqaudio.core.text import similarity, similarity_strict
+
+        self.assertGreaterEqual(similarity("旧朋友", "给朋友"), 0.85)
+        self.assertLess(similarity_strict("旧朋友", "给朋友"), 0.75)
+        # 简繁不算差异
+        self.assertEqual(similarity_strict("陈奕迅", "陳奕迅"), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

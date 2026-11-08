@@ -19,6 +19,7 @@ from typing import Iterable, Optional
 
 from ..core.model import MatchCandidate, Track
 from ..core.script import to_simplified
+from ..core.text import normalize, similarity
 from ..net import aggregator, lrclib
 from ..net.http import HttpClient
 
@@ -27,30 +28,6 @@ _VERSION_HINTS = (
     "live", "remix", "acoustic", "instrumental", "伴奏", "现场", "翻唱", "dj", "demo",
     "演唱会", "演奏会", "音乐会", "karaoke", "ktv", "remastered", "重制",
 )
-
-
-def normalize(text: str) -> str:
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKC", text)
-    text = to_simplified(text).lower()
-    return _PUNCT.sub("", text)
-
-
-def similarity(a: str, b: str) -> float:
-    na, nb = normalize(a), normalize(b)
-    if not na or not nb:
-        return 0.0
-    if na == nb:
-        return 1.0
-    if na in nb or nb in na:
-        return 0.92
-    ratio = SequenceMatcher(None, na, nb).ratio()
-    # 简繁混用（陈奕迅 / 陳奕迅）时逐字比对会偏低，但同长度中文串几乎总是同一实体，
-    # 这里给 0.85 的下限，避免繁体库数据被误判为不匹配
-    if len(na) == len(nb) and ratio < 0.85:
-        ratio = 0.85
-    return ratio
 
 
 def duration_score(expected: Optional[float], actual: Optional[float]) -> float:
@@ -131,13 +108,15 @@ class Matcher:
     # ------------------------------------------------------------ 检索
 
     def query(self, title: str, artist: str, album: str, duration: Optional[float]) -> list[MatchCandidate]:
-        # 多源接力：MusicBrainz → iTunes → 网易云，任何一个命中即停。
+        # 多源接力：网易云 → QQ 音乐 → MusicBrainz → iTunes，任何一个「像这首歌」即停。
         # 每个源失败都静默切换，不会因为单个源失效而让整批曲目都匹配不上。
+        # duration 传下去让聚合层能按时长救回改过名的版本、也能挡掉明显无关的结果。
         return aggregator.search_metadata(
             self.client,
             title,
             artist,
             album,
+            duration=duration,
             use_mb=self.use_mb,
             use_itunes=self.use_itunes,
             use_netmusic=self.use_netmusic,

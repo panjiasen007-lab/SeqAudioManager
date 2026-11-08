@@ -115,13 +115,17 @@ def fetch_artist_photo(
     use_deezer: bool = True,
     use_netmusic: bool = True,
 ) -> tuple[Optional[bytes], str, str]:
-    """取歌手照片，返回 (图片字节, mime, 来源)。失败返回 (None, "", "")。"""
-    if use_deezer:
-        img, mime = deezer_artist_photo(client, artist)
-        if img:
-            return img, mime, "Deezer"
+    """取歌手照片，返回 (图片字节, mime, 来源)。失败返回 (None, "", "")。
+
+    顺序：**网易云 → Deezer**。中文歌手在网易云的图是官方宣传照，且按中文名
+    一定能搜到；Deezer 对华语艺人经常只有一个灰色占位图或干脆没有。
+    """
     if use_netmusic:
         img, mime = netmusic_artist_photo(client, artist)
         if img:
             return img, mime, "网易云"
+    if use_deezer:
+        img, mime = deezer_artist_photo(client, artist)
+        if img:
+            return img, mime, "Deezer"
     return None, "", ""

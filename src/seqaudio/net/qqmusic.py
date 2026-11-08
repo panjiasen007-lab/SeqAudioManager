@@ -111,7 +111,16 @@ def search(
         log.info("QQ 音乐检索失败：%s", exc)
         return []
 
-    songs = (((payload or {}).get("data") or {}).get("song") or {}).get("list") or []
+    if not isinstance(payload, dict):
+        log.info("QQ 音乐检索返回非对象（%s），按无结果处理", type(payload).__name__)
+        return []
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    song = data.get("song") or {}
+    if not isinstance(song, dict):
+        return []
+    songs = song.get("list") or []
     if not isinstance(songs, list):
         return []
 
@@ -130,13 +139,17 @@ def lyrics(
     title: str,
     artist: str = "",
     song_mid: str = "",
+    duration: float = 0.0,
 ) -> Optional[LyricsResult]:
     """取 LRC 歌词。优先用已解析出的 song_mid，否则先搜再取。"""
+    picked: Optional[MatchCandidate] = None
     if not song_mid:
-        candidates = search(client, title, artist, limit=3)
-        if not candidates:
+        from .netmusic import pick_best  # 同一套候选挑选规则，避免两处各写一遍
+
+        picked = pick_best(search(client, title, artist, limit=5), duration, title)
+        if picked is None:
             return None
-        song_mid = candidates[0].recording_id
+        song_mid = picked.recording_id
     if not song_mid:
         return None
 
@@ -162,20 +175,23 @@ def lyrics(
     text = (payload.get("lyric") or "").strip()
     if not text:
         return None
+    matched_title = picked.title if picked else title
+    matched_artist = picked.artist if picked else artist
+    matched_duration = picked.duration if picked else 0.0
     if is_synced(text):
         return LyricsResult(
             synced=text,
             plain="",
             source="QQ音乐",
-            matched_title=title,
-            matched_artist=artist,
-            duration=0.0,
+            matched_title=matched_title,
+            matched_artist=matched_artist,
+            duration=matched_duration,
         )
     return LyricsResult(
         synced="",
         plain=text,
         source="QQ音乐",
-        matched_title=title,
-        matched_artist=artist,
-        duration=0.0,
+        matched_title=matched_title,
+        matched_artist=matched_artist,
+        duration=matched_duration,
     )
