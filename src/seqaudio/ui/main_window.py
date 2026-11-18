@@ -418,7 +418,7 @@ class MainWindow(QMainWindow):
             self._append_log("WARNING", i18n.tr("列表没有歌曲，无法播放"))
             self.status_hint.setText(i18n.tr_text("列表没有歌曲，无法播放"))
             return
-        from .player.constants import PlayerState
+        from ..player.constants import PlayerState
 
         state = self.player_bridge.engine.state
         if state is PlayerState.PAUSED:
@@ -442,7 +442,7 @@ class MainWindow(QMainWindow):
         「直连起播不拆旧会话」的根因，这里把 UI 的状态也一并清干净。
         """
         try:
-            from .player.constants import PlayerState
+            from ..player.constants import PlayerState
 
             if self.player_bridge.engine.state is not PlayerState.IDLE:
                 self.player_bridge.stop()
