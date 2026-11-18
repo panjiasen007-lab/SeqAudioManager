@@ -84,13 +84,17 @@ def main() -> int:
     if tab_titles != ["详情", "参数"]:
         print("✗ 右侧页签顺序不对：", tab_titles)
         ok = False
-    # 底部 = 歌词 + 日志对分（QSplitter），队列面板不再是页签
-    if not hasattr(window, "_log_splitter") or window._log_splitter.count() != 2:
-        print("✗ 底部歌词/日志拆分不对：",
+    # 底部三栏（v1.6.1）：左日志 / 中歌词 / 右信号路径，水平 QSplitter
+    if not hasattr(window, "_log_splitter") or window._log_splitter.count() != 3:
+        print("✗ 底部三栏拆分不对：",
               getattr(window, "_log_splitter", None) and window._log_splitter.count())
         ok = False
     if not hasattr(window, "btn_delete_selected"):
         print("✗ 缺少「删除选中」按钮")
+        ok = False
+    # 表格最小高度必须保得住 10 行（用户点名）
+    if window.table.minimumHeight() < 300:
+        print("✗ 表格最小高度不足 10 行：", window.table.minimumHeight())
         ok = False
     if len(theme.THEMES) < 10:
         print("✗ 主题数量不足：", len(theme.THEMES))

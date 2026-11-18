@@ -215,19 +215,20 @@ class MainWindow(QMainWindow):
         splitter.setSizes([960, 460])
         body_layout.addWidget(splitter, 1)
 
-        # 信号路径面板：默认折叠（settings.playback_signal_panel_visible）
-        self.player_signals.setVisible(
-            bool(getattr(self.settings, "playback_signal_panel_visible", False))
-        )
-        body_layout.addWidget(self.player_signals)
+        # v1.6.1 用户反馈：底部改「左中右三等分」—— 左运行日志 / 中歌词 /
+        # 右信号路径。整体高度固定 190px：为的是主表格「至少能显示 10 首」，
+        # 高度给底部多了表格就不够（用户点名），三栏内容各自滚动。
+        bottom = self._build_bottom_area()
+        bottom.setFixedHeight(190)
         body_layout.addWidget(self.player_bar)
-
-        body_layout.addWidget(self._build_log_area())
+        body_layout.addWidget(bottom)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         self.progress.setTextVisible(False)
         body_layout.addWidget(self.progress)
+
+        self._enforce_table_min_height()
 
         status = QStatusBar()
         status.setSizeGripEnabled(False)
@@ -1071,7 +1072,23 @@ class MainWindow(QMainWindow):
             return True
         return super().eventFilter(obj, event)
 
-    def _build_log_area(self) -> QWidget:
+    def _enforce_table_min_height(self) -> None:
+        """表格最小高度 = 表头 + 10 行；splitter 再挤也不能少于这个数。"""
+        try:
+            metrics = self.table.fontMetrics()
+            row_h = max(
+                self.table.verticalHeader().defaultSectionSize(),
+                metrics.height() + 14,
+            )
+            header_h = max(
+                self.table.horizontalHeader().height(), metrics.height() + 8
+            )
+            self.table.setMinimumHeight(header_h + row_h * 10)
+        except Exception:  # noqa: BLE001 - 估算失败退回固定值
+            self.table.setMinimumHeight(320)
+
+    def _build_bottom_area(self) -> QWidget:
+        """底部三栏：左运行日志 / 中歌词 / 右信号路径（各 1/3，可拖）。"""
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1094,27 +1111,36 @@ class MainWindow(QMainWindow):
         head.addWidget(self.btn_log_clear)
         layout.addLayout(head)
 
-        # v1.6.1 用户反馈：底部区域一半给歌词（跟当前播放走），一半留日志。
-        # 歌词面板从右侧栏挪到这里，侧栏「歌词」页签已移除。
-        from PySide6.QtWidgets import QSplitter
-
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(6)
-        splitter.addWidget(self.player_lyrics)
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(3000)
         self.log_view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        splitter.addWidget(self.log_view)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([150, 150])
-        self._log_splitter = splitter
-        layout.addWidget(splitter)
-        return wrapper
+        layout.addWidget(self.log_view)
+
+        # 底部三栏（v1.6.1 用户反馈）：左运行日志 / 中歌词 / 右信号路径，
+        # 各 1/3 起步、可拖；播放条「≈」开关只控制右栏可见性。
+        from PySide6.QtWidgets import QSplitter
+
+        bottom = QSplitter(Qt.Horizontal)
+        bottom.setChildrenCollapsible(False)
+        bottom.setHandleWidth(6)
+        bottom.addWidget(wrapper)
+        bottom.addWidget(self.player_lyrics)
+        bottom.addWidget(self.player_signals)
+        bottom.setStretchFactor(0, 1)
+        bottom.setStretchFactor(1, 1)
+        bottom.setStretchFactor(2, 1)
+        bottom.setSizes([400, 400, 400])
+        # 初始可见性跟设置走（播放条「≈」开关共享这个状态）：
+        # 面板曾是独立折叠区，并入三栏后这行初始化不能丢，否则设置里存了
+        # 「隐藏」启动时却显示，开关状态与面板事实不一致。
+        self.player_signals.setVisible(
+            bool(getattr(self.settings, "playback_signal_panel_visible", False))
+        )
+        self._log_splitter = bottom
+        return bottom
 
     def _toggle_log(self) -> None:
         visible = not self.log_view.isVisible()
@@ -1152,10 +1178,9 @@ class MainWindow(QMainWindow):
             app.installEventFilter(self)
 
     def show_lyrics_tab(self) -> None:
-        """切到歌词页签（Ctrl+L）。"""
-        self.right_tabs.setVisible(True)
-        self.right_tabs.setCurrentWidget(self.player_lyrics)
-        self.btn_toggle_panel.setChecked(True)
+        """聚焦底部歌词栏（Ctrl+L；歌词已并入底部三栏）。"""
+        self.player_lyrics.setVisible(True)
+        self.player_lyrics.setFocus()
 
     def show_queue_tab(self) -> None:
         """队列并入主表格后，"查看队列"等价于回到列表（焦点交给表格）。"""
