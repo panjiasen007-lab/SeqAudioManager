@@ -107,6 +107,21 @@ def _copy_tree(src: Path, dst: Path) -> None:
 # ---------------------------------------------------------------- PyInstaller
 
 
+def _portaudio_dll() -> str:
+    """定位 sounddevice 自带的 PortAudio x64 DLL（供 --add-binary 点名）。"""
+    try:
+        import _sounddevice_data  # noqa: PLC0415 — 仅打包期需要
+
+        base = Path(os.path.dirname(_sounddevice_data.__file__)) / "portaudio-binaries"
+        dll = base / "libportaudio64bit.dll"
+        if dll.exists():
+            return str(dll)
+    except ImportError:
+        pass
+    # 开发环境没装 sounddevice 时给个占位路径，让 PyInstaller 报错信息更可读
+    return "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll"
+
+
 def _pyinstaller_common(debug: bool) -> list[str]:
     args = [
         sys.executable, "-m", "PyInstaller",
@@ -116,6 +131,15 @@ def _pyinstaller_common(debug: bool) -> list[str]:
         "--collect-submodules", "seqaudio",
         # 真假无损鉴定依赖内置 ffmpeg 解码（DSD / APE / WV 都吃）
         "--collect-binaries", "imageio_ffmpeg",
+        # v1.6 播放输出：sounddevice 是**单文件模块**，--collect-submodules 对它
+        # 无效（只对包生效），必须用 hiddenimport 点名；否则 PyInstaller 静态
+        # 分析在 seqaudio.player 的惰性导出后面看不到它，exe 一调播放就
+        # ModuleNotFoundError——正是校验脚本抓出来的那类"上线才发现"。
+        "--hiddenimport", "sounddevice",
+        "--hiddenimport", "_sounddevice_data",
+        "--hiddenimport", "cffi",
+        "--hiddenimport", "pycparser",
+        "--add-binary", f"{_portaudio_dll()}{os.pathsep}_sounddevice_data/portaudio-binaries",
         "--exclude-module", "tkinter",
         "--exclude-module", "unittest",
         "--exclude-module", "pydoc",
@@ -144,6 +168,17 @@ def build_onedir(debug: bool = False) -> Path:
     app_dir = out / "dist" / APP_NAME
     if not app_dir.exists():
         raise SystemExit(f"未找到预期产物：{app_dir}")
+
+    # PyInstaller 的 sounddevice hook 会把 _sounddevice_data 里 7 个平台的
+    # PortAudio 二进制全当数据带进来（mac/.dylib、32bit、arm64、ASIO 变体，
+    # 合计约 1.4 MB）；我们只用得上 win64 这一个，其余在此清掉。
+    pa_dir = app_dir / "_internal" / "_sounddevice_data" / "portaudio-binaries"
+    if pa_dir.is_dir():
+        for junk in pa_dir.iterdir():
+            if junk.name != "libportaudio64bit.dll" and junk.suffix.lower() in (
+                ".dll", ".dylib", ".so",
+            ):
+                junk.unlink()
 
     # 便携版该有的说明文件
     _write_text(app_dir / "使用说明.txt", README_TXT)

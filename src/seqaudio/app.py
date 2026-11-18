@@ -137,10 +137,74 @@ def _selftest() -> int:
         report["data_dir_exists"] = folder.exists()
     except Exception as exc:  # noqa: BLE001
         report["data_dir_error"] = str(exc)
+    # v1.6 播放链路：sounddevice 本体是纯 Python 模块，PyInstaller 会打进 PYZ
+    # 归档——文件级检查查不到它；PortAudio DLL 则靠 --add-binary 显式带上。
+    # 这条必须在打包后的 exe 里**真跑一次 import**：漏带的症状是「启动正常、
+    # 一点播放就 OSError」，源码环境永远复现不了，所以并入无人值守自检。
+    try:
+        import sounddevice as _sd
+
+        report["sounddevice"] = _sd.__version__
+        report["audio_hostapis"] = [api["name"] for api in _sd.query_hostapis() if api["name"]]
+        report["output_devices"] = sum(
+            1 for d in _sd.query_devices() if d["max_output_channels"] > 0
+        )
+    except Exception as exc:  # noqa: BLE001
+        report["sounddevice_error"] = f"{type(exc).__name__}: {exc}"
 
     target = Path(tempfile.gettempdir()) / "seqaudio_selftest.json"
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0
+
+
+def _audio_smoke(src: str) -> int:
+    """`--audio-smoke <音频文件>`：真实播放 3 秒并落盘结果（发版冒烟用）。
+
+    校验脚本查不到 PYZ 归档里的 sounddevice 模块，「DLL 漏带」的症状又是
+    启动正常、一播才炸——所以发版前必须让打包后的 exe **真的出一次声**。
+    输出 JSON 到临时目录，字段齐全与否直接判定发版放行与否。
+    """
+    import json
+    import tempfile
+    import time as _time
+
+    report: dict = {"version": __version__, "source": src}
+    try:
+        from .core.config import Settings
+        from .core.probe import probe
+        from .player.engine import PlayerEngine
+        from .player.session import clear_session
+
+        info = probe(Path(src), with_cue=False)
+        engine = PlayerEngine(Settings(), on_event=None)
+        ok = engine.play(info)  # probe 直接返回 Track，不要取 .original（那是 Tags）
+        report["play_accepted"] = bool(ok)
+        if ok:
+            _time.sleep(3.0)
+            snap = engine.snapshot()
+            report.update(
+                state=snap.get("state"),
+                rate=snap.get("rate"),
+                channels=snap.get("channels"),
+                position_ms=snap.get("position_ms"),
+                underruns=snap.get("output", {}).get("underruns"),
+                signal_summary=snap.get("signal_summary"),
+            )
+            engine.stop()
+        engine.shutdown()
+        clear_session()
+    except Exception as exc:  # noqa: BLE001
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        report["ok"] = False
+    else:
+        report["ok"] = (
+            report.get("play_accepted") is True
+            and report.get("underruns") == 0
+            and report.get("rate") in (44100, 48000, 88200, 96000, 176400, 192000)
+        )
+    target = Path(tempfile.gettempdir()) / "seqaudio_audio_smoke.json"
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if report.get("ok") else 1
 
 
 def _selftest_file(target: str) -> int:
@@ -309,6 +373,10 @@ def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
     if "--selftest" in args:
         return _selftest()
+    if "--audio-smoke" in args:
+        index = args.index("--audio-smoke")
+        target = args[index + 1] if index + 1 < len(args) else ""
+        return _audio_smoke(target)
     if "--selftest-file" in args:
         index = args.index("--selftest-file")
         target = args[index + 1] if index + 1 < len(args) else ""
