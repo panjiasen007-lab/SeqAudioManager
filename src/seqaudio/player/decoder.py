@@ -173,6 +173,67 @@ class DecodeSpec:
             block_frames=block_frames,
         )
 
+    @classmethod
+    def from_item(cls, item, settings, *, start_ms: Optional[int] = None) -> "DecodeSpec":
+        """由 ``queue.QueueItem``（轻量投影）构造，**不重新 probe、不重解析 CUE**。
+
+        引擎拿不到 ``Track``（队列只存投影），但解码需要的一切——
+
+        路径、CUE 起止、采样率、声道、位深、是否 DSD —— 队列项里都有，
+        所以这里直接按投影组装，起播路径上省掉一次文件探测。
+
+        Args:
+            item: ``QueueItem``（或任何具备同名属性的对象）。
+            settings: ``Settings``（缺字段按默认值兜底，便于测试替身）。
+            start_ms: 相对**曲目**起点的偏移（seek 用）；``None`` 表示从头。
+        """
+        base_start = max(0, int(getattr(item, "start_ms", 0) or 0))
+        item_duration = max(0, int(getattr(item, "duration_ms", 0) or 0))
+        offset = max(0, int(start_ms)) if start_ms is not None else 0
+
+        if item_duration > 0:
+            # CUE 子轨：起点顺延，时长按剩余部分截断
+            start = base_start + min(offset, item_duration)
+            duration = max(0, item_duration - offset)
+        else:
+            start = base_start + offset
+            duration = 0
+
+        codec = str(getattr(item, "codec", "") or "").strip().lower()
+        path = Path(getattr(item, "path", "") or "")
+        if not codec:
+            codec = path.suffix.lstrip(".").lower()
+        is_dsd = bool(getattr(item, "is_dsd", False)) or codec.startswith("dsd_")
+
+        channels = int(getattr(item, "channels", 0) or 0) or DEFAULT_CHANNELS
+        if getattr(settings, "playback_downmix_stereo", False) and channels > 2:
+            channels = 2
+
+        info_like = _InfoLike(
+            fmt=codec,
+            sample_rate=int(getattr(item, "sample_rate", 0) or 0),
+            bit_depth=int(getattr(item, "bit_depth", 0) or 0),
+            channels=channels,
+            dsd_rate="DSD" if is_dsd else None,
+        )
+        sample_rate = _pick_sample_rate(info_like, settings, is_dsd)
+        sample_fmt = _pick_sample_fmt(info_like, settings, is_dsd)
+        block_frames = int(getattr(settings, "playback_block_frames", BLOCK_FRAMES_DEFAULT))
+        if block_frames <= 0:
+            block_frames = BLOCK_FRAMES_DEFAULT
+
+        return cls(
+            path=path,
+            start_ms=start,
+            duration_ms=duration,
+            sample_rate=sample_rate,
+            channels=channels,
+            sample_fmt=sample_fmt,
+            codec=codec,
+            is_dsd=is_dsd,
+            block_frames=block_frames,
+        )
+
     # ------------------------------------------------------------ 展示 / 命令
 
     def to_display(self) -> str:
@@ -603,6 +664,30 @@ def probe_codec(path: Path | str) -> tuple[str, str]:
     if audio:
         codec = audio.group(1).lower()
     return version, codec
+
+
+class _InfoLike:
+    """把「位深/采样率/声道/DSD」几个字段包成 ``AudioInfo`` 的样子。
+
+    ``_pick_sample_fmt`` / ``_pick_sample_rate`` 只读这几个属性，用不着造一个
+    完整的 ``AudioInfo``（那会牵进 core.model 的导入与一堆无关字段）。
+    """
+
+    __slots__ = ("fmt", "sample_rate", "bit_depth", "channels", "dsd_rate")
+
+    def __init__(
+        self,
+        fmt: str = "",
+        sample_rate: int = 0,
+        bit_depth: int = 0,
+        channels: int = 0,
+        dsd_rate: Optional[str] = None,
+    ) -> None:
+        self.fmt = fmt
+        self.sample_rate = sample_rate
+        self.bit_depth = bit_depth
+        self.channels = channels
+        self.dsd_rate = dsd_rate
 
 
 def _codec_from_info(info, path: Path) -> str:

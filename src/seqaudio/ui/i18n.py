@@ -219,7 +219,10 @@ _PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
     ("sig_status_passthrough", "原样通过", "原樣通過", "Passed through", "そのまま通過", "그대로 통과", "Без изменений", "Transmis tel quel", "Unverändert durchgereicht"),
     ("sig_status_changed", "已改变", "已改變", "Changed", "変更あり", "변경됨", "Изменено", "Modifié", "Verändert"),
     ("sig_status_bypassed", "已旁路", "已旁路", "Bypassed", "バイパス", "바이패스", "Обход", "Contourné", "Umgangen"),
-    ("sig_status_error", "已回退", "已回退", "Fell back", "フォールバック", "대체됨", "Откат", "Repli", "Zurückgefallen"),
+    ("sig_status_fallback", "已回退", "已回退", "Fell back", "フォールバック", "대체됨", "Откат", "Repli", "Zurückgefallen"),
+    ("sig_status_error", "错误", "錯誤", "Error", "エラー", "오류", "Ошибка", "Erreur", "Fehler"),
+    ("sig_summary_no_change", "未做软件改动", "未做軟體改動", "No software change", "ソフト側の変更なし", "소프트웨어 변경 없음", "Без программных изменений", "Aucune modification logicielle", "Keine Software-Änderung"),
+    ("sig_fallback_rate", "已重采样 {src}→{dst}（设备不支持源采样率）", "已重採樣 {src}→{dst}（裝置不支援來源取樣率）", "Resampled {src}→{dst} (device cannot do the source rate)", "{src}→{dst} にリサンプル（デバイスが元のレート非対応）", "{src}→{dst} 리샘플(장치가 원본 레이트 미지원)", "Ресемплинг {src}→{dst} (устройство не поддерживает исходную частоту)", "Rééchantillonné {src}→{dst} (périphérique incompatible)", "{src}→{dst} neu abgetastet (Gerät unterstützt Quellrate nicht)"),
     ("sig_untouched", "未做软件改动", "未做軟體改動", "No software change", "ソフト側の変更なし", "소프트웨어 변경 없음", "Без программных изменений", "Aucune modification logicielle", "Keine Software-Änderung"),
     ("sig_underruns", "欠载", "欠載", "Underruns", "アンダーラン", "언더런", "Прерывания", "Sous-alimentations", "Unterläufe"),
     ("sig_gain_db", "增益", "增益", "Gain", "ゲイン", "게인", "Усиление", "Gain", "Verstärkung"),
@@ -243,6 +246,12 @@ _PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
     ("dev_backend_directsound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound"),
     ("dev_backend_mme", "MME", "MME", "MME", "MME", "MME", "MME", "MME", "MME"),
     ("dev_backend_wdmks", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS"),
+
+    # ---- 后端优劣提示（设置面板「播放」页用）----
+    ("dev_hint_mme", "推荐：可跟随源采样率（44.1k/48k/96k/192k）", "推薦：可跟隨來源取樣率（44.1k/48k/96k/192k）", "Recommended: follows the source rate (44.1k/48k/96k/192k)", "推奨：ソースのサンプルレートに追従（44.1k/48k/96k/192k）", "권장: 원본 샘플레이트 추종(44.1k/48k/96k/192k)", "Рекомендуется: следует частоте источника (44.1k/48k/96k/192k)", "Recommandé : suit la fréquence source (44,1k/48k/96k/192k)", "Empfohlen: folgt der Quellrate (44,1k/48k/96k/192k)"),
+    ("dev_hint_directsound", "可跟随源采样率，延迟略高于 MME", "可跟隨來源取樣率，延遲略高於 MME", "Follows the source rate, slightly higher latency than MME", "ソースレートに追従、MME よりやや高遅延", "원본 레이트 추종, MME보다 지연 약간 높음", "Следует частоте источника, задержка чуть выше MME", "Suit la fréquence source, latence un peu plus élevée que MME", "Folgt der Quellrate, etwas höhere Latenz als MME"),
+    ("dev_hint_wasapi", "共享模式会被系统混音到 48k 并重采样", "共享模式會被系統混音到 48k 並重採樣", "Shared mode is mixed to 48k by Windows and resampled", "共有モードは 48k にミックスされリサンプルされます", "공유 모드는 48k로 믹스되어 리샘플됩니다", "В общем режиме Windows микширует в 48k с ресемплингом", "En mode partagé, Windows mixe en 48k avec rééchantillonnage", "Im Shared-Modus mischt Windows auf 48k und tastet neu ab"),
+    ("dev_hint_wdmks", "实验性后端，兼容性不保证", "實驗性後端，相容性不保證", "Experimental backend, compatibility not guaranteed", "実験的バックエンド（互換性非保証）", "실험적 백엔드, 호환성 미보장", "Экспериментальный бэкенд, совместимость не гарантируется", "Backend expérimental, compatibilité non garantie", "Experimentelles Backend, Kompatibilität nicht garantiert"),
 
     # ---- 无损/位完美相关措辞（措辞铁律 R2：只说「未做软件改动」）----
     ("play_lossless", "无损", "無損", "Lossless", "ロスレス", "무손실", "Lossless", "Lossless", "Lossless"),

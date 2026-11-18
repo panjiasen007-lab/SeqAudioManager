@@ -289,6 +289,14 @@ def resolve_device(name: str, backend: str = "") -> DeviceInfo:
     api_index = resolve_backend(backend)
     devices = list_output_devices()
 
+    # 纯数字按 PortAudio 全局索引解释：引擎/界面常把索引当设备标识保存，
+    # 按名字精确匹配永远匹配不上（会静默退回默认设备，用户看到的是「设置没生效」）。
+    if text.isdigit():
+        info = device_by_index(int(text))
+        if info is not None:
+            return info
+        log.warning("设备索引 %s 不存在，改用默认输出设备", text)
+
     if text:
         scoped = [d for d in devices if api_index < 0 or d.hostapi_index == api_index]
         for pool in (scoped, devices):

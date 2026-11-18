@@ -549,7 +549,8 @@ class TestFoundation(unittest.TestCase):
         "playback_enabled": True,
         "playback_bar_visible": True,
         "playback_signal_panel_visible": False,
-        "playback_output_backend": "wasapi",
+        # T03 决策：默认后端改为 MME（WASAPI 共享只吃 48k，会强制重采样）
+        "playback_output_backend": "mme",
         "playback_exclusive": False,
         "playback_device": "",
         "playback_follow_source_rate": True,
@@ -611,7 +612,7 @@ class TestFoundation(unittest.TestCase):
             )
             settings = Settings.load(legacy)
             self.assertEqual(settings.language, "en")
-            self.assertEqual(settings.playback_output_backend, "wasapi")
+            self.assertEqual(settings.playback_output_backend, "mme")
             self.assertEqual(settings.playback_follow_source_rate, True)
             self.assertEqual(settings.playback_dsp_bypass, True)
             self.assertEqual(settings.library_roots, [])
@@ -671,13 +672,27 @@ class TestFoundation(unittest.TestCase):
         meta = (ROOT / "installer" / "_meta.py").read_text(encoding="utf-8")
         self.assertIn('VERSION = "1.6.0"', meta)
 
-    def test_lazy_exports_are_documented(self) -> None:
-        """T03 的类还没有实现，访问时要给出「属于 T03」的明确错误而不是崩溃。"""
+    def test_t03_exports_resolve(self) -> None:
+        """T03 落地后，包出口的惰性名字必须都能取到（且仍然不碰 Qt）。"""
         import seqaudio.player as player
 
-        with self.assertRaises(AttributeError) as ctx:
-            _ = player.PlayerEngine
-        self.assertIn("T03", str(ctx.exception))
+        for name in (
+            "PlayerEngine",
+            "PlayerSnapshot",
+            "PlayerError",
+            "PlayQueue",
+            "QueueItem",
+            "SignalPath",
+            "SignalStage",
+            "Counters",
+            "PlaybackSession",
+            "GainStage",
+            "BiquadEq",
+        ):
+            self.assertTrue(hasattr(player, name), f"包出口缺少 {name}")
+        # 未实现的名字仍要给出明确 AttributeError
+        with self.assertRaises(AttributeError):
+            _ = player.NoSuchPlayerThing
 
     def test_ringbuffer_accepts_single_channel_1d(self) -> None:
         ring = PcmRingBuffer(4, channels=1, dtype="int16")

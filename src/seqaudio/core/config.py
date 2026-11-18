@@ -109,7 +109,11 @@ class Settings:
     playback_enabled: bool = True                  # 播放功能总开关（关=隐藏播放条与入口）
     playback_bar_visible: bool = True              # 播放条显示（折叠态 56 px 单行）
     playback_signal_panel_visible: bool = False    # 信号路径面板展开态
-    playback_output_backend: str = "wasapi"        # wasapi/directsound/mme/wdmks
+    # 默认 **MME** 而不是 WASAPI：Windows 共享模式的 WASAPI 只接受系统混音格式
+    # （本机实测 48000），44.1 kHz 源必然被重采样，与「采样率跟随」的核心承诺冲突；
+    # MME/DirectSound 同一物理设备实测可接受 44100/48000/88200/96000/176400/192000，
+    # 186 ms 上报延迟对音乐播放可接受。想独占/低延迟可自行切 WASAPI 并在面板看到回退标注。
+    playback_output_backend: str = "mme"           # mme/directsound/wasapi/wdmks
     playback_exclusive: bool = False               # WASAPI 独占（可选而非默认）
     playback_device: str = ""                      # 设备名，空 = 系统默认
     playback_follow_source_rate: bool = True       # 采样率跟随

@@ -194,11 +194,19 @@ class PlayMode(str, enum.Enum):
 
 
 class StageStatus(str, enum.Enum):
-    """信号路径单级状态（架构文档 3.3）。"""
+    """信号路径单级状态。
+
+    架构文档 3.3 给的是 4 态（PASSTHROUGH/CHANGED/BYPASSED/ERROR），任务书
+    T03 又要求「采样率回退时 resample 级状态为 fallback」。两者都要满足，
+    所以取并集：多一个 ``FALLBACK``，语义是「本来要做的没做成，设备替我们
+    降级了」——它必须和 ``CHANGED`` 区分开：``CHANGED`` 是我们主动改的，
+    ``FALLBACK`` 是设备不支持被迫改的，界面要标红并给出原因。
+    """
 
     PASSTHROUGH = "PASSTHROUGH"
     CHANGED = "CHANGED"
     BYPASSED = "BYPASSED"
+    FALLBACK = "FALLBACK"
     ERROR = "ERROR"
 
     @property

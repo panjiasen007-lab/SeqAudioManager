@@ -188,16 +188,17 @@ class AudioOutput:
             return resolve_device(raw, self._backend)
         return resolve_device("", self._backend)
 
-    def start(self, rate: int, channels: int = 0) -> int:
-        """按「源采样率 + 声道」开流并开始回调；返回设备**实际**采样率。
+    def prepare(self, rate: int, channels: int = 0) -> int:
+        """**只开流、不启动回调**，返回设备实际采样率。
 
-        采样率回退由 ``devices.pick_rate`` 决定（源率 → 88.2k/96k/48k/44.1k
-        → 设备默认率）。发生回退时调用方（引擎）必须按返回的真实率重新
-        配置解码器，否则会变调 —— 本层只如实上报，不偷偷重采样。
+        引擎先 ``prepare()`` 再起解码器预填，最后 ``begin()`` —— 这样「解码器
+        已经在写、却还没有消费者」的窗口只有一个开流动作（几十毫秒），
+        不会顶到解码线程 500 ms 的停滞阈值（T03 实测过：先起解码器再开流，
+        慢设备上会丢掉 480 帧）。
         """
         with self._lock:
             if self._stream is not None:
-                raise DeviceError("输出流已经打开，先 stop() 再重新 start()")
+                raise DeviceError("输出流已经打开，先 stop() 再重新 prepare()")
             ch = int(channels) if channels else int(self.ring.channels)
             if ch != int(self.ring.channels):
                 raise DeviceError(
@@ -224,19 +225,33 @@ class AudioOutput:
                 latency=self._latency,
             )
             opened = self.open(config)
-            stream = self._stream
-            if stream is None:  # pragma: no cover - open 成功即非空
-                raise DeviceError("输出流打开失败")
-            try:
-                stream.start()
-            except Exception as exc:  # noqa: BLE001
-                mapped = map_portaudio_error(exc)
-                self._error_text = str(mapped)
-                self._teardown_stream()
-                raise mapped from exc
             self._want_rate = int(rate)
             self._fallback = bool(fallback)
             return int(opened.samplerate)
+
+    def begin(self) -> None:
+        """启动回调（``prepare()`` 之后调用）。"""
+        stream = self._stream
+        if stream is None:
+            raise DeviceError("输出流尚未打开，先 prepare()")
+        try:
+            stream.start()
+        except Exception as exc:  # noqa: BLE001
+            mapped = map_portaudio_error(exc)
+            self._error_text = str(mapped)
+            self._teardown_stream()
+            raise mapped from exc
+
+    def start(self, rate: int, channels: int = 0) -> int:
+        """``prepare()`` + ``begin()`` 的合并形式；返回设备**实际**采样率。
+
+        采样率回退由 ``devices.pick_rate`` 决定（源率 → 88.2k/96k/48k/44.1k
+        → 设备默认率）。发生回退时调用方（引擎）必须按返回的真实率重新
+        配置解码器，否则会变调 —— 本层只如实上报，不偷偷重采样。
+        """
+        actual_rate = self.prepare(rate, channels)
+        self.begin()
+        return actual_rate
 
     def open(self, cfg: OutputConfig, callback: Optional[DspHook] = None) -> OutputConfig:
         """创建 PortAudio 流（不自动 start，方便引擎先预填再出声）。
@@ -325,15 +340,25 @@ class AudioOutput:
 
     # ------------------------------------------------------------ 关流
 
-    def stop(self) -> None:
-        """停止并关闭流（状态机语义：停止 = 关流 → IDLE，不留半开句柄）。"""
+    def stop(self, abort: bool = False) -> None:
+        """停止并关闭流（状态机语义：停止 = 关流 → IDLE，不留半开句柄）。
+
+        Args:
+            abort: ``True`` 时用 ``Pa_AbortStream`` 直接丢弃缓冲。切歌/停止前
+                引擎已经做完 5 ms 淡出，缓冲里剩下的是静音，没必要等它播完 ——
+                实测 MME 上 ``stop()`` 要等 266 ms（缓冲区长度），``abort()`` 只要 4 ms。
+                默认 ``False``：不吞掉未播音频，行为可预测。
+        """
         with self._lock:
             stream = self._stream
             if stream is None:
                 return
             try:
                 if stream.active:
-                    stream.stop()
+                    if abort and hasattr(stream, "abort"):
+                        stream.abort()
+                    else:
+                        stream.stop()
             except Exception as exc:  # noqa: BLE001 - 关流失败不能挡住清理
                 log.debug("停止输出流时出错（忽略）：%s", exc)
             self._teardown_stream()
