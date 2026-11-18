@@ -654,3 +654,6 @@ def _pick_sample_fmt(info, settings, is_dsd: bool) -> str:
     if depth in (25, 26, 27, 28, 29, 30, 31, 32):
         return "s32"
     return DEFAULT_SAMPLE_FMT
+
+
+__all__ = ["DecodeSpec", "FfmpegDecoder", "DecodeError", "probe_codec"]

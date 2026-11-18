@@ -245,3 +245,6 @@ class PcmRingBuffer:
             f"<PcmRingBuffer {self._channels}ch {self._dtype} "
             f"{self.available}/{self._capacity} 帧>"
         )
+
+
+__all__ = ["PcmRingBuffer"]

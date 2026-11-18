@@ -332,6 +332,26 @@ class TestDecoder(unittest.TestCase):
         self.assertIn("f32le", self._spec(sample_fmt="f32").build_args("ffmpeg"))
         self.assertIn("pcm_s32le", self._spec(sample_fmt="s24").build_args("ffmpeg"))
 
+    def test_pause_feeding_holds_data(self) -> None:
+        """暂停播放时解码线程必须「等」而不是「丢」。"""
+        ring = PcmRingBuffer.from_seconds(3.0, _SINE_RATE, channels=_SINE_CH, dtype="int16")
+        decoder = FfmpegDecoder(self._spec(), ring=ring)
+        decoder.start()
+        try:
+            decoder.pause_feeding()          # 立刻关闸
+            time.sleep(0.05)
+            before = ring.available
+            time.sleep(0.15)
+            self.assertEqual(ring.available, before, "暂停期间不应继续写入")
+            self.assertEqual(decoder.dropped_frames, 0, "暂停不应导致丢帧")
+            decoder.resume_feeding()
+            deadline = time.monotonic() + 5.0
+            while ring.available <= before and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(ring.available, before, "恢复后应继续喂数据")
+        finally:
+            decoder.stop()
+
     def test_missing_file_raises(self) -> None:
         decoder = FfmpegDecoder(self._spec(path=self.tmp / "nope.flac"))
         with self.assertRaises(DecodeError):
