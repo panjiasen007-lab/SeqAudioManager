@@ -365,6 +365,10 @@ class PlayQueue:
         self.index = target
         return self.current()
 
+    def prev(self) -> Optional[QueueItem]:
+        """``previous()`` 的别名（引擎与 T04 都习惯写 prev）。"""
+        return self.previous()
+
     # ------------------------------------------------------------ 内部
 
     def _remember_current(self) -> None:
