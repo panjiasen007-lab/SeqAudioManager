@@ -74,14 +74,23 @@ def main() -> int:
     if "LXGW WenKai" not in theme.QSS:
         print("✗ QSS 未使用所选字体")
         ok = False
-    # T04 后：右侧 = 详情 / 队列 / 歌词 / 参数；参数面板 = 匹配 / 歌词 / 写入 / 外观 / 播放
-    if window.right_tabs.count() != 4 or window.settings_panel.tabs.count() != 5:
+    # v1.6.1 按用户反馈重构：队列并入主表格、歌词挪到底部 —— 右侧 = 详情/参数；
+    # 参数面板 = 匹配 / 歌词 / 写入 / 外观 / 播放
+    if window.right_tabs.count() != 2 or window.settings_panel.tabs.count() != 5:
         print("✗ 右侧/参数分页数量不对：",
               window.right_tabs.count(), window.settings_panel.tabs.count())
         ok = False
     tab_titles = [window.right_tabs.tabText(i) for i in range(window.right_tabs.count())]
-    if tab_titles != ["详情", "队列", "歌词", "参数"]:
+    if tab_titles != ["详情", "参数"]:
         print("✗ 右侧页签顺序不对：", tab_titles)
+        ok = False
+    # 底部 = 歌词 + 日志对分（QSplitter），队列面板不再是页签
+    if not hasattr(window, "_log_splitter") or window._log_splitter.count() != 2:
+        print("✗ 底部歌词/日志拆分不对：",
+              getattr(window, "_log_splitter", None) and window._log_splitter.count())
+        ok = False
+    if not hasattr(window, "btn_delete_selected"):
+        print("✗ 缺少「删除选中」按钮")
         ok = False
     if len(theme.THEMES) < 10:
         print("✗ 主题数量不足：", len(theme.THEMES))

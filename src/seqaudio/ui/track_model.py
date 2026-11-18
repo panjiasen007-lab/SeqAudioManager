@@ -54,6 +54,54 @@ class TrackTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._tracks: list[Track] = tracks or []
         self._row_of: dict[int, int] = self._build_index()
+        # 当前正在播放的曲目（path + CUE 轨号联合标识）。v1.6 队列并入列表后，
+        # 表格就是播放队列，用整行加粗标记"正在播哪首"——不污染文本、不抢选择焦点。
+        self._playing_path = ""
+        self._playing_cue_seq = -1
+
+    # ------------------------------------------------------------ 播放标记
+
+    @staticmethod
+    def _identity(track: Track) -> tuple[str, int]:
+        entry = getattr(track, "cue_track_entry", None)
+        seq = int(getattr(entry, "sequence", getattr(entry, "index", -1)) or -1) if entry else -1
+        return (str(getattr(track, "path", "")), seq)
+
+    def set_playing(self, track: Optional[Track]) -> None:
+        """标记正在播放的行；``None`` 清除标记。"""
+        ident = self._identity(track) if track is not None else ("", -1)
+        if ident == (self._playing_path, self._playing_cue_seq):
+            return
+        old_rows = self._playing_rows()
+        self._playing_path, self._playing_cue_seq = ident
+        self._playing_track_ref = track
+        new_rows = self._playing_rows()
+        for row in sorted(set(old_rows) | set(new_rows)):
+            if 0 <= row < len(self._tracks):
+                self.dataChanged.emit(
+                    self.index(row, 0), self.index(row, self.columnCount() - 1)
+                )
+
+    def _playing_rows(self) -> list[int]:
+        if not self._playing_path:
+            return []
+        ref = getattr(self, "_playing_track_ref", None)
+        rows = [
+            i for i, t in enumerate(self._tracks)
+            if self._identity(t) == (self._playing_path, self._playing_cue_seq)
+        ]
+        if not rows and ref is not None:
+            rows = [i for i, t in enumerate(self._tracks) if t is ref]
+        return rows
+
+    def playing_row(self) -> int:
+        rows = self._playing_rows()
+        return rows[0] if rows else -1
+
+    def _default_font(self):
+        from PySide6.QtGui import QGuiApplication
+
+        return QGuiApplication.font()
 
     def _build_index(self) -> dict[int, int]:
         """id(track) -> 行号。上千首时避免每次刷新都做 O(n) 的 list.index 扫描。"""
@@ -94,6 +142,15 @@ class TrackTableModel(QAbstractTableModel):
 
         if role == Qt.ToolTipRole:
             return self._tooltip(track)
+
+        if role == Qt.FontRole and self._playing_path:
+            if self._identity(track) == (self._playing_path, self._playing_cue_seq) or (
+                getattr(self, "_playing_track_ref", None) is not None
+                and track is self._playing_track_ref
+            ):
+                bold = QFont(self._default_font())
+                bold.setBold(True)
+                return bold
 
         if role == Qt.ForegroundRole:
             if index.column() == 0:

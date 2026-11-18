@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -135,9 +136,20 @@ class PlayerSignalsPanel(QWidget):
         keys = tuple(stage_keys or FALLBACK_STAGE_KEYS)
         self._rows: dict[str, _SignalRow] = {}
 
-        root = QVBoxLayout(self)
+        # 面板插在播放条上方、高度随窗口挤压 —— 9 级 + 计数器 + 总述必须
+        # 可滚动，否则矮窗口直接显示不全（用户实测反馈）。
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        body = QWidget()
+        root = QVBoxLayout(body)
         root.setContentsMargins(12, 8, 12, 8)
         root.setSpacing(6)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
 
         self.summary_label = QLabel(i18n.tr_text("未做软件改动"))
         summary_font = QFont(self.summary_label.font())
@@ -219,7 +231,7 @@ class PlayerSignalsPanel(QWidget):
                 # 引擎出现了面板没预置的级：补一行，而不是丢掉这条信息
                 row = _SignalRow(key, self)
                 self._rows[key] = row
-                layout = self.layout()
+                layout = body.layout()
                 if layout is not None:
                     layout.insertWidget(layout.count() - 1, row)
             row.update_stage(stage)

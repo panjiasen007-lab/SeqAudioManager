@@ -77,6 +77,38 @@ class _VolumeSlider(QSlider):
         super().mouseDoubleClickEvent(event)
 
 
+class _ProgressSlider(QSlider):
+    """进度条：点击任意位置直接跳到该处。
+
+    ``QSlider`` 默认点击只把 handle 移动一页 —— 对进度条来说就是"点了没反应"，
+    用户想听哪就点哪的预期完全落空，所以重写按下事件按比例换算并发出跳转。
+    """
+
+    jumpRequested = Signal(int)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self.maximum() > self.minimum():
+            from PySide6.QtWidgets import QStyle, QStyleOptionSlider
+
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            groove = self.style().subControlRect(
+                QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self
+            )
+            handle = self.style().subControlRect(
+                QStyle.CC_Slider, opt, QStyle.SC_SliderHandle, self
+            )
+            span = max(1, groove.width() - handle.width())
+            x = event.position().x() - groove.x() - handle.width() / 2
+            ratio = min(1.0, max(0.0, x / span))
+            value = self.minimum() + round(ratio * (self.maximum() - self.minimum()))
+            self.setValue(value)
+            self.jumpRequested.emit(value)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class PlayerBar(QFrame):
     """底部单行播放条。
 
@@ -182,12 +214,13 @@ class PlayerBar(QFrame):
         outer.addWidget(self.controls_widget)
 
         # 进度条 + 时间
-        self.progress = QSlider(Qt.Horizontal)
+        self.progress = _ProgressSlider(Qt.Horizontal)
         self.progress.setObjectName("playerProgress")
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setMinimumWidth(80)
         self.progress.setCursor(Qt.PointingHandCursor)
+        self.progress.jumpRequested.connect(self._on_progress_jump)
         self.progress.sliderPressed.connect(self._on_slider_pressed)
         self.progress.sliderReleased.connect(self._on_slider_released)
         self.progress.sliderMoved.connect(self._on_slider_moved)
@@ -438,6 +471,13 @@ class PlayerBar(QFrame):
     def _on_slider_pressed(self) -> None:
         self._dragging = True
 
+    def _on_progress_jump(self, value: int) -> None:
+        """点击进度条：立即 seek 到点击处（拖动仍走 press→release）。"""
+        self.time_label.setText(
+            f"{format_mmss(value)} / {format_mmss(self._total_ms)}"
+        )
+        self.seekRequested.emit(value)
+
     def _on_slider_moved(self, value: int) -> None:
         # 拖动期间只更新文字，不 seek，避免每移动一像素就重开解码器
         self.time_label.setText(
@@ -516,13 +556,14 @@ class PlayerBar(QFrame):
             btn.setEnabled(playable)
         self.btn_mode.setEnabled(self._enabled)
         self.progress.setEnabled(playable and has_track)
-        software = self._volume_mode == "software"
-        self.volume_slider.setEnabled(self._enabled and software)
-        if software:
+        # 音量滑块**旁路模式也可用**：拖动 = 顺手启用软件音量（main_window 落地），
+        # 双击 = 归零回旁路。以前旁路时直接禁用，用户会以为根本没有音量功能。
+        self.volume_slider.setEnabled(self._enabled)
+        if self._volume_mode == "software":
             self.volume_slider.setToolTip(i18n.tr_text("音量"))
         else:
             self.volume_slider.setToolTip(
-                i18n.tr_text("软件音量已旁路：系统音量仍可能衰减")
+                i18n.tr_text("软件音量已旁路：拖动滑块即启用软件音量")
             )
         self._refresh_volume_label()
 

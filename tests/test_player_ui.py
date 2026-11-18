@@ -144,12 +144,27 @@ class PlayerBarTest(unittest.TestCase):
         self.assertEqual(received[-1], 0.0)
         self.assertEqual(self.bar.volume_label.text(), "旁路")
 
-    def test_volume_bypass_disables_slider(self) -> None:
+    def test_volume_bypass_still_usable(self) -> None:
+        """v1.6.1 用户反馈：旁路只是默认值，不是功能锁 —— 滑块必须始终可用，
+        拖动 = 顺手启用软件音量（main_window 落地），双击 = 归零回旁路。"""
         self.bar.set_volume_mode("bypass")
-        self.assertFalse(self.bar.volume_slider.isEnabled())
-        self.assertIn("系统音量", self.bar.volume_slider.toolTip())
+        self.assertTrue(self.bar.volume_slider.isEnabled())
+        self.assertIn("软件音量", self.bar.volume_slider.toolTip())
         self.bar.set_volume_mode("software")
         self.assertTrue(self.bar.volume_slider.isEnabled())
+
+    def test_progress_click_jumps(self) -> None:
+        """v1.6.1 用户反馈：点击进度条任意位置直接跳转（原实现只翻页）。"""
+        self.bar.set_track({"title": "T", "duration_ms": 100_000})
+        self.bar.set_state("PLAYING")
+        self.bar.set_position(0, 100_000)
+        received: list[int] = []
+        self.bar.seekRequested.connect(received.append)
+        self.bar._on_progress_jump(50_000)
+        self.assertEqual(received[-1], 50_000)
+        self.assertEqual(self.bar.time_label.text()[:5], "00:50")
+        # 子类确实带点击跳转能力
+        self.assertTrue(hasattr(self.bar.progress, "jumpRequested"))
 
     def test_mode_cycle_order(self) -> None:
         received: list[str] = []

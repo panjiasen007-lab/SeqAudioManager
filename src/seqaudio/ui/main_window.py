@@ -67,7 +67,6 @@ from .player_bar import PlayerBar, format_mmss
 from .player_bridge import PlayerBridge
 from .player_eq import PlayerEqPanel
 from .player_lyrics import PlayerLyricsPanel
-from .player_queue import PlayerQueuePanel
 from .player_signals import PlayerSignalsPanel
 from .settings_panel import SettingsPanel
 from .track_model import (
@@ -197,7 +196,6 @@ class MainWindow(QMainWindow):
 
         # 播放相关控件先建好，再交给页签与布局（顺序反了会拿不到引用）
         self.player_bar = PlayerBar()
-        self.player_queue = PlayerQueuePanel()
         self.player_lyrics = PlayerLyricsPanel(self.settings)
         self.player_eq = PlayerEqPanel()
         self.player_signals = PlayerSignalsPanel()
@@ -205,9 +203,8 @@ class MainWindow(QMainWindow):
         self.right_tabs = QTabWidget()
         self.right_tabs.setDocumentMode(True)
         self.right_tabs.addTab(self.inspector, "详情")
-        # 队列/歌词插在「参数」之前：架构 6.1 的页签顺序，参数页随之后移
-        self.right_tabs.addTab(self.player_queue, "队列")
-        self.right_tabs.addTab(self.player_lyrics, "歌词")
+        # v1.6.1 按用户反馈重构：队列并入主表格（表格即队列），歌词挪到底部
+        # 与日志各占一半 —— 右侧只留「详情」「参数」，信息密度不挤占曲库区。
         self.right_tabs.addTab(self.settings_panel, "参数")
         self.right_tabs.setCurrentWidget(self.inspector)
 
@@ -274,15 +271,12 @@ class MainWindow(QMainWindow):
         self.player_bar.prevRequested.connect(self.player_prev)
         self.player_bar.seekRequested.connect(self.player_bridge.seek)
         self.player_bar.volumeChanged.connect(self._on_volume_dragged)
+        if hasattr(self.player_bar.volume_slider, "doubleClicked"):
+            self.player_bar.volume_slider.doubleClicked.connect(self._on_volume_reset)
         self.player_bar.modeChanged.connect(self._on_mode_changed)
         self.player_bar.collapseToggled.connect(self._on_bar_collapsed)
         self.player_bar.signalPanelToggled.connect(self.set_signal_panel_visible)
 
-        self.player_queue.trackActivated.connect(self._on_queue_activated)
-        self.player_queue.removeRequested.connect(self._on_queue_remove)
-        self.player_queue.clearRequested.connect(self._on_queue_clear)
-        self.player_queue.playNextRequested.connect(self._on_queue_play_next)
-        self.player_queue.locateRequested.connect(self._on_queue_locate)
 
         self.player_eq.gainsChanged.connect(self._on_eq_gains)
         self.player_eq.enabledChanged.connect(self._on_eq_enabled)
@@ -352,8 +346,8 @@ class MainWindow(QMainWindow):
             data["cover"] = self._cover_for(data.get("path"))
         self.player_bar.set_track(data)
         self.player_lyrics.set_track(data)
+        self._sync_playing_row(data)
         self.player_bridge.poll_now()
-        self._sync_queue_current()
 
     def _on_player_position(self, position: int) -> None:
         snapshot = self.player_bridge.last_snapshot()
@@ -395,13 +389,10 @@ class MainWindow(QMainWindow):
         self.player_bar.set_state(self.player_bar.current_state())
         self.player_bar.set_mode(self.player_bar.current_mode())
         self.player_bar.set_volume(self.player_bar.volume_db())
-        self.player_queue.refresh_texts()
         self.player_lyrics.refresh_offset_label()
         self.player_eq.refresh_texts()
         self.player_signals.refresh_texts()
-        self.right_tabs.setTabText(1, i18n.tr_text("队列"))
-        self.right_tabs.setTabText(2, i18n.tr_text("歌词"))
-        self.right_tabs.setTabText(3, i18n.tr_text("参数"))
+        self.right_tabs.setTabText(1, i18n.tr_text("参数"))
 
     # ---- 播放命令 ----
 
@@ -475,7 +466,16 @@ class MainWindow(QMainWindow):
         entry = track.cue_track_entry
         if entry is not None:
             start_ms = max(0, int(getattr(entry, "start_ms", 0) or 0))
-        ok = self.player_bridge.play_track(track, start_ms=start_ms)
+        # 队列并入列表（v1.6.1 用户反馈）：双击哪行，整个主列表就是播放队列、
+        # 从该行开始按顺序播 —— 播放器的常规语义，右键「下一首播放」仍可插播。
+        ok = False
+        if self.model.rowCount() > 0:
+            self.player_bridge.enqueue(list(self.model.tracks()), replace=True)
+            row = self._row_of_track(track)
+            if 0 <= row < self.model.rowCount():
+                ok = self.player_bridge.play_index(row)
+        if not ok:
+            ok = self.player_bridge.play_track(track, start_ms=start_ms)
         if ok:
             self._append_log(
                 "INFO",
@@ -519,7 +519,21 @@ class MainWindow(QMainWindow):
 
     def _on_volume_dragged(self, db: float) -> None:
         self.settings.playback_volume_db = float(db)
+        # 旁路是「默认值」，不是「功能锁」：用户拖音量 = 明确要求软件音量生效。
+        # 引擎 set_volume 直接读 settings.playback_volume_mode，改完立即生效。
+        if float(db) != 0.0 and getattr(self.settings, "playback_volume_mode", "bypass") != "software":
+            self.settings.playback_volume_mode = "software"
+            self.player_bar.set_volume_mode("software")
         self.player_bridge.set_volume(float(db))
+
+    def _on_volume_reset(self) -> None:
+        """双击归零：回到 0 dB 旁路（位完美取向）。"""
+        self.settings.playback_volume_db = 0.0
+        if getattr(self.settings, "playback_volume_mode", "bypass") != "bypass":
+            self.settings.playback_volume_mode = "bypass"
+            self.player_bar.set_volume_mode("bypass")
+        self.player_bar.set_volume(0.0)
+        self.player_bridge.set_volume(0.0)
 
     def _on_mode_changed(self, mode: str) -> None:
         self.settings.playback_mode = str(mode)
@@ -597,12 +611,57 @@ class MainWindow(QMainWindow):
     # ---- 队列面板 ----
 
     def _refresh_queue_panel(self) -> None:
-        items = self.player_bridge.queue_items()
-        self.player_queue.set_items(items)
-        self._sync_queue_current()
+        """队列并入主表格后，这里只负责刷新"正在播放哪行"的表格标记。"""
+        self._sync_playing_row(None)
 
-    def _sync_queue_current(self) -> None:
-        self.player_queue.set_current(self.player_bridge.queue_index())
+    def _sync_playing_row(self, data) -> None:
+        """把正在播放的曲目映射到主表格行并加粗标记。"""
+        try:
+            track = None
+            if isinstance(data, dict):
+                track = self._track_by_payload(data)
+            elif data is None:
+                snap = self.player_bridge.last_snapshot() or {}
+                cur = snap.get("track")
+                if isinstance(cur, dict):
+                    track = self._track_by_payload(cur)
+            self.model.set_playing(track)
+        except Exception:  # noqa: BLE001 - 标记失败不影响播放
+            log.debug("播放行同步失败", exc_info=True)
+
+    def _track_by_payload(self, data: dict):
+        path = str(data.get("path") or "")
+        if not path:
+            return None
+        from pathlib import Path as _P
+
+        target = _P(path)
+        cue_seq = -1
+        for t in self.model.tracks():
+            if t.path == target:
+                entry = getattr(t, "cue_track_entry", None)
+                seq = int(getattr(entry, "sequence", getattr(entry, "index", -1)) or -1) if entry else -1
+                if data.get("cue_sequence") is not None:
+                    try:
+                        cue_seq = int(data.get("cue_sequence") or -1)
+                    except (TypeError, ValueError):
+                        cue_seq = -1
+                    if seq == cue_seq:
+                        return t
+                else:
+                    return t
+        return None
+
+    def _row_of_track(self, track: Track) -> int:
+        for i, t in enumerate(self.model.tracks()):
+            if t is track:
+                return i
+        for i, t in enumerate(self.model.tracks()):
+            if t.path == track.path and getattr(t, "cue_track_entry", None) is getattr(
+                track, "cue_track_entry", None
+            ):
+                return i
+        return -1
 
     def _on_queue_activated(self, index: int) -> None:
         if not self._player_ready():
@@ -621,31 +680,12 @@ class MainWindow(QMainWindow):
         self._append_log("INFO", i18n.tr("队列已清空"))
 
     def _on_queue_play_next(self, index: int) -> None:
-        items = self.player_queue.items()
-        if not (0 <= int(index) < len(items)):
-            return
-        # 直接传字典：队列项是 QueueItem 的只读投影，桥内部负责还原
-        self.player_bridge.play_next(items[int(index)])
-        self._refresh_queue_panel()
+        """队列面板已并入主表格，本槽仅保留兼容签名。"""
+        return None
 
     def _on_queue_locate(self, index: int) -> None:
-        """「在列表中定位」：按路径（+CUE 轨号）在主表格里选中对应行。"""
-        items = self.player_queue.items()
-        if not (0 <= int(index) < len(items)):
-            return
-        target = items[int(index)]
-        path = str(target.get("path") or "")
-        cue = target.get("cue_track")
-        for row, track in enumerate(self.model.tracks()):
-            if str(track.path) != path:
-                continue
-            if cue is not None and track.cue_track != int(cue):
-                continue
-            proxy_index = self.proxy.mapFromSource(self.model.index(row, 0))
-            if proxy_index.isValid():
-                self.table.selectRow(proxy_index.row())
-                self.table.scrollTo(proxy_index)
-            return
+        """队列面板已并入主表格，本槽仅保留兼容签名。"""
+        return None
 
     def _cover_for(self, path) -> Optional[bytes]:
         """从主列表里找到同一路径的 Track，取它的封面字节（没有就返回 None）。"""
@@ -707,8 +747,16 @@ class MainWindow(QMainWindow):
         self.btn_cleanup = self._button(i18n.tr("cleanup"), self.run_cleanup, ghost=True, i18n_key="cleanup")
         self.btn_cleanup.setObjectName("danger")
         self.btn_cleanup.setToolTip("把判定为假无损/可疑的文件移入回收站或隔离区（Ctrl+Shift+D）")
+        self.btn_delete_selected = self._button(
+            "删除选中", self.delete_selected_from_disk, ghost=True, i18n_key="删除选中"
+        )
+        self.btn_delete_selected.setObjectName("danger")
+        self.btn_delete_selected.setToolTip(
+            "把选中的音频文件移入系统回收站（Shift+Delete；正在播放的文件不允许删除）"
+        )
         bottom.addWidget(self.btn_auth)
         bottom.addWidget(self.btn_cleanup)
+        bottom.addWidget(self.btn_delete_selected)
 
         bottom.addStretch(1)
 
@@ -1046,14 +1094,26 @@ class MainWindow(QMainWindow):
         head.addWidget(self.btn_log_clear)
         layout.addLayout(head)
 
+        # v1.6.1 用户反馈：底部区域一半给歌词（跟当前播放走），一半留日志。
+        # 歌词面板从右侧栏挪到这里，侧栏「歌词」页签已移除。
+        from PySide6.QtWidgets import QSplitter
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
+        splitter.addWidget(self.player_lyrics)
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setFixedHeight(118)
         self.log_view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        layout.addWidget(self.log_view)
+        splitter.addWidget(self.log_view)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([150, 150])
+        self._log_splitter = splitter
+        layout.addWidget(splitter)
         return wrapper
 
     def _toggle_log(self) -> None:
@@ -1066,6 +1126,7 @@ class MainWindow(QMainWindow):
     def _init_shortcuts(self) -> None:
         QShortcut(QKeySequence.Open, self, self.add_folder)
         QShortcut(QKeySequence.Delete, self, self.remove_selected)
+        QShortcut(QKeySequence("Shift+Delete"), self, self.delete_selected_from_disk)
         undo = QShortcut(QKeySequence.Undo, self.table)
         undo.setContext(Qt.WidgetWithChildrenShortcut)
         undo.activated.connect(self.undo_last_tag_edit)
@@ -1097,9 +1158,9 @@ class MainWindow(QMainWindow):
         self.btn_toggle_panel.setChecked(True)
 
     def show_queue_tab(self) -> None:
-        self.right_tabs.setVisible(True)
-        self.right_tabs.setCurrentWidget(self.player_queue)
-        self.btn_toggle_panel.setChecked(True)
+        """队列并入主表格后，"查看队列"等价于回到列表（焦点交给表格）。"""
+        self.table.setFocus()
+        self.table.scrollToTop()
 
     def _space_should_play(self, widget) -> bool:
         """空格是否应该触发播放：输入框/按钮/勾选框聚焦时必须让位。"""
@@ -1626,6 +1687,67 @@ class MainWindow(QMainWindow):
             return
         self.model.remove_rows(rows)
         self._refresh_stats()
+
+    def delete_selected_from_disk(self) -> None:
+        """把选中的音频文件移入系统回收站（可还原）。
+
+        与「从列表移除」的本质区别：这里删的是磁盘文件。安全边界——
+        走 Windows 回收站而不是直接删；正在播放的文件拒绝删除（PortAudio
+        还握着句柄，删了播放立刻炸且不可恢复）。
+        """
+        from .core.quarantine import send_to_recycle_bin
+
+        tracks = self._selected_tracks()
+        if not tracks:
+            self._append_log("WARNING", "请先在列表中选中要删除的曲目")
+            return
+        # 正在播的必须拦下：文件被播放器占用时回收站操作也会失败
+        playing_path = ""
+        try:
+            snap = self.player_bridge.last_snapshot() or {}
+            playing_path = str((snap.get("track") or {}).get("path") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        deletable, blocked = [], []
+        for t in tracks:
+            if playing_path and t.path == Path(playing_path):
+                blocked.append(t)
+            else:
+                deletable.append(t)
+        if blocked:
+            self._append_log(
+                "WARNING",
+                i18n.tr_format(
+                    "{count} 首正在播放，已跳过删除", count=len(blocked)
+                ),
+            )
+        if not deletable:
+            return
+        preview = "、".join(t.path.name for t in deletable[:5])
+        more = f" 等 {len(deletable)} 个文件" if len(deletable) > 5 else ""
+        if (
+            QMessageBox.question(
+                self,
+                "删除选中曲目",
+                f"把 {preview}{more} 移入系统回收站？\n\n（可从回收站还原；标签/播放记录不受影响）",
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        count, message = send_to_recycle_bin([t.path for t in deletable])
+        if count > 0:
+            rows = self._row_of_tracks(deletable[:count] if count <= len(deletable) else deletable)
+            # 回收站可能只收下一部分；逐个探测还存在的文件再移出表格
+            removed = [t for t in deletable if not t.path.exists()]
+            self.model.remove_rows(self._row_of_tracks(removed))
+            self._refresh_stats()
+            self._append_log("INFO", f"已删除 {count} 个文件（{message}）")
+        else:
+            self._append_log("ERROR", f"删除失败：{message}")
+
+    def _row_of_tracks(self, tracks: list[Track]) -> list[int]:
+        keys = {id(t) for t in tracks}
+        return [i for i, t in enumerate(self.model.tracks()) if id(t) in keys]
 
     def clear_all(self) -> None:
         if not self.model.tracks():
@@ -2496,13 +2618,11 @@ class MainWindow(QMainWindow):
             card.restyle()
         if getattr(self, "inspector", None) is not None:
             self.inspector.refresh()
-        # 播放条/队列/信号面板的颜色来自 theme 常量，切主题必须重刷（TC-GUI-27）
+        # 播放条/信号面板的颜色来自 theme 常量，切主题必须重刷（TC-GUI-27）
         if getattr(self, "player_bar", None) is not None:
             self.player_bar.apply_theme()
-            self.player_queue.update()
-            self.player_queue.model.layoutChanged.emit()
-            self.player_eq.refresh_texts()
-            self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
+        self.player_eq.refresh_texts()
+        self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
         try:
             from .win_effects import apply_titlebar
 
