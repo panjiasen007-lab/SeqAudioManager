@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.5.8-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.6.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,69 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.6.0 更新摘要
+
+**音序管家这次变成了播放器。** 按《全格式音乐播放器产品需求文档 V1.0》（项目代号 Resonance）
+的 P0 范围，在现有元数据工具上加入了完整的播放能力。
+
+#### 播放内核
+
+- **全格式解码**：ffmpeg 7.1 子进程逐块解码——FLAC/ALAC/APE/WavPack/TTA/TAK/Shorten/
+  WAV/AIFF、DSD（DSF/DFF，DSD64/128/256/512）、MP3/AAC/Ogg/Opus/WMA/Musepack/AC-3、
+  MKV/MP4/MKA 容器内音轨（`-map 0:a:0` 忽略视频）、WAV+FLAC+APE+CUE 整轨按 INDEX 精确定位；
+- **输出**：sounddevice/PortAudio，后端可选 MME/DirectSound/WASAPI/WDM-KS（不可用的自动
+  灰显）；**采样率跟随**——按源采样率打开设备，不支持时沿回退链降级并在信号路径如实标注；
+- **位完美取向**：默认浮点通路 + 0 dB 旁路 + DSP 全关；「整数通路」与 DSP 互斥（要改样本
+  就别谈位完美），降级时面板写明原因。对外措辞是「未做软件改动」，**不声称 bit-perfect
+  已验证**（客观判定需要回环录音硬件，见 PRD AC-02）；
+- **DSP 链**：音量（−60~0 dB 浮点）+ 10 段图形 EQ（RBJ 系数 + FFT 域处理，默认全关）；
+  三级旁路（全局直通 / 单模块 / A-B 配置）；
+- **播放控制**：顺序/单曲/列表循环/随机不重复四种模式、插播、防爆音斜坡、会话恢复
+  （队列/位置/模式/音量，启动恢复但不自动播放）、批处理期间禁止起播但不断播。
+
+#### 播放界面
+
+- **播放条**（56px 单行可折叠）：封面、曲名、控制、进度、音量、模式；
+- **队列 / 歌词 / 信号路径 / EQ** 四个页签；表格**双击=起播**（右键编辑标签保留）；
+- **歌词**：同名 .lrc 优先（UTF-8/GBK/BIG5 自动识别）、内嵌标签次之、在线匹配兜底；
+  当前行高亮滚动、整体偏移微调；
+- **信号路径面板**：9 级（源→解码→格式→增益→EQ→淡变→重采样→输出→设备）逐级标注
+  「原样通过 / 已改变 / 已旁路 / 已回退」+ underrun 等计数器，全直通时显示「未做软件改动」；
+- 设置面板新增「播放」页：设备/后端/独占/采样率跟随/缓冲/DSD 转换率/整数通路/会话开关。
+
+#### 实测数字（真实曲库）
+
+| 项 | 结果 |
+|---|---|
+| 起播延迟 | 115.9 ms（目标 ≤150ms） |
+| underrun（3 格式串播 15 秒） | **0** |
+| 采样率跟随 | 44.1/48/88.2/96/176.4/192 kHz 全部跟随（MME） |
+| DSD64 → PCM | 176.4 kHz 直通，无回退 |
+| 切歌接缝跳变 | ≤0.0005（阈值 0.5，无爆音） |
+| 格式矩阵 | 19 格式含 APE 真实样本全部解码出声 |
+| 静音矩阵（int×DSP×音量×EQ 24 组合） | 全部出声且面板声明与实测一致 |
+
+测试：核心 **232** 项 + 播放 **163** 项（ring/decoder/output/engine/formats/behaviour/ui）
++ UI 流程，全绿。
+
+#### 已知限制（如实声明）
+
+- **切歌间隙 110–130 ms**：PRD 要求的无缝播放（≤5 ms）需要「预解码下一首 + 同流续写」，
+  排到 v1.6.1；数值已通过 `gap` 事件暴露给界面；
+- **WASAPI 共享模式**在本机只接受 48000（Windows 混音格式），44.1k 源会回退重采样并如实
+  标注——所以默认后端是 **MME**（六档采样率全跟随，延迟约 186 ms）；
+- **独占输出 / Native DSD / ASIO** 不在本期：PortAudio 无 ASIO，Native DSD 依赖驱动，
+  WASAPI 独占需 COM 级实现，见 `docs/1.6-需求范围.md` 的取舍说明；
+- 位完美措辞收敛为「未做软件改动」，原因是客观验证依赖回环录音硬件。
+
+#### 发版工程
+
+- 新增 `tools/check_audio_bundle.py`：产物完整性校验（PortAudio DLL / cffi 后端），
+  FAIL 即非零退出码——sounddevice 的 DLL 在包外，漏带的症状是「启动正常、一播就炸」；
+- 新增 `--audio-smoke <file>`：打包后的 exe 真实播 3 秒落盘 JSON，发版冒烟用；
+- 设计与测试文档：`docs/1.6-需求范围.md`（P0 48 条落地矩阵）、`docs/1.6-架构设计.md`
+  （950 行 + 类图 + 时序图）、`docs/1.6-测试计划.md`（156 用例）、`docs/1.6-测试报告-第1轮.md`。
 
 ### V1.5.8 更新摘要
 
@@ -795,6 +858,70 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.6.0 highlights
+
+**SeqAudio Manager is now a player.** Following the P0 scope of the "Full-Format Music Player
+PRD V1.0" (codename Resonance), full playback capability was added on top of the existing
+metadata toolkit.
+
+#### Playback core
+
+- **Full-format decode** via ffmpeg 7.1 subprocess: FLAC/ALAC/APE/WavPack/TTA/TAK/Shorten/
+  WAV/AIFF, DSD (DSF/DFF, 64–512), MP3/AAC/Ogg/Opus/WMA/Musepack/AC-3, audio tracks inside
+  MKV/MP4/MKA (`-map 0:a:0`), and WAV/FLAC/APE+CUE albums positioned by INDEX;
+- **Output** via sounddevice/PortAudio with selectable backends (MME/DirectSound/WASAPI/
+  WDM-KS, unavailable ones greyed out); **sample-rate following** — the device is opened at
+  the source rate, with an honest fallback chain when unsupported;
+- **Bit-transparent intent**: default float pipeline at 0 dB bypass with DSP off; the integer
+  pipeline is mutually exclusive with DSP (if samples are altered, bit transparency is moot)
+  and any downgrade is labelled on the panel. Wording is "no software changes" — **never
+  "bit-perfect verified"** (objective proof needs loopback hardware, PRD AC-02);
+- **DSP chain**: float volume (−60~0 dB) + 10-band graphic EQ (RBJ + FFT, off by default);
+  three-level bypass;
+- **Playback control**: four modes, insert-next, anti-pop ramps, session restore (restored but
+  never auto-plays), and play-forbidden/resume-allowed during batch jobs.
+
+#### Playback UI
+
+- **Player bar** (56px, collapsible); **Queue / Lyrics / Signal Path / EQ** tabs; table
+  **double-click now starts playback** (right-click keeps tag editing);
+- **Lyrics**: same-name .lrc first (UTF-8/GBK/BIG5), embedded tags, then online matching;
+- **Signal-path panel**: 9 stages each marked passthrough/changed/bypassed/fallback plus
+  counters; all-clear shows "no software changes";
+- Settings gains a "Playback" page.
+
+#### Measured (real library)
+
+| Item | Result |
+|---|---|
+| Start latency | 115.9 ms (target ≤150) |
+| Underruns (3 formats, 15 s) | **0** |
+| Rate following | 44.1/48/88.2/96/176.4/192 kHz all followed (MME) |
+| DSD64 → PCM | 176.4 kHz, no fallback |
+| Track-change seam | ≤0.0005 (threshold 0.5 — no pop) |
+| Format matrix | 19 formats incl. real APE sample |
+| Silence matrix (24 combos) | all audible, panel claims match measurements |
+
+Tests: core **232** + player **163** + UI flow, all green.
+
+#### Known limitations (honest)
+
+- **Track-change gap 110–130 ms**: true gapless (≤5 ms) needs "pre-decode next + same-stream
+  continuation", scheduled for v1.6.1;
+- **WASAPI shared** only accepts 48000 on this machine, so 44.1k resamples with an honest
+  label — default backend is **MME** (all six rates followed, ~186 ms latency);
+- **Exclusive / Native DSD / ASIO** not in this release (PortAudio has no ASIO; Native DSD is
+  driver-dependent; WASAPI exclusive needs COM-level work);
+- Bit-transparency wording is capped at "no software changes".
+
+#### Release engineering
+
+- `tools/check_audio_bundle.py`: bundle integrity check (PortAudio DLL / cffi), non-zero exit
+  on failure — the missing-DLL symptom is "starts fine, dies on first play";
+- `--audio-smoke <file>`: the packaged exe really plays 3 seconds and writes JSON;
+- Docs: `docs/1.6-需求范围.md` (48 P0 landing matrix), `docs/1.6-架构设计.md` (950 lines +
+  diagrams), `docs/1.6-测试计划.md` (156 cases), round-1 report.
 
 ### V1.5.8 highlights
 
