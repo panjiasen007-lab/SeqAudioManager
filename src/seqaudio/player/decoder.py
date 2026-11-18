@@ -720,16 +720,16 @@ def _pick_sample_rate(info, settings, is_dsd: bool) -> int:
 
 
 def _pick_sample_fmt(info, settings, is_dsd: bool) -> str:
-    """样本格式：整数通路优先只在「旁路 + 非 DSD + 已知位深」时成立。
+    """样本格式：整数通路只在「音量旁路 + 无 EQ + 无淡变 + 非 DSD」时成立。
 
-    一旦启用音量或 EQ，就必须在浮点上做（定点乘增益要额外缩放与饱和处理），
-    所以浮点通路是默认；整数通路（`s16/s24/s32`）是位完美模式的专用捷径。
+    判据统一走 ``dsp.int_pipeline_allowed()`` —— 这里是**唯一**决定样本格式的
+    地方，别处（引擎/界面）只许读结果。这条交叉校验是 QA 实测出来的缺口：
+    少了它，``int_pipeline`` 与软件音量/EQ 同时打开会让浮点 DSP 拿到 int16
+    缓冲，numpy 2.x 抛 casting 异常、被回调吞掉 → 整场静音。
     """
-    int_pipeline = bool(
-        getattr(settings, "playback_int_pipeline", False)
-        or getattr(settings, "playback_bit_perfect", False)
-    )
-    if not int_pipeline or is_dsd:
+    from .dsp import int_pipeline_allowed
+
+    if is_dsd or not int_pipeline_allowed(settings):
         return DEFAULT_SAMPLE_FMT
     depth = int(getattr(info, "bit_depth", 0) or 0)
     if depth == 16:

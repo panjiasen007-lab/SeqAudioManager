@@ -221,6 +221,7 @@ _PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
     ("sig_status_bypassed", "已旁路", "已旁路", "Bypassed", "バイパス", "바이패스", "Обход", "Contourné", "Umgangen"),
     ("sig_status_fallback", "已回退", "已回退", "Fell back", "フォールバック", "대체됨", "Откат", "Repli", "Zurückgefallen"),
     ("sig_status_error", "错误", "錯誤", "Error", "エラー", "오류", "Ошибка", "Erreur", "Fehler"),
+    ("sig_int_pipeline_unavailable", "整数通路不可用（DSP 已启用，改用浮点）", "整數通路不可用（DSP 已啟用，改用浮點）", "Integer path unavailable (DSP enabled, using float)", "整数パスは使用不可（DSP 有効のため浮動小数点）", "정수 경로 사용 불가(DSP 활성, 부동소수 사용)", "Целочисленный путь недоступен (DSP включён, используется float)", "Chemin entier indisponible (DSP actif, float utilisé)", "Ganzzahlpfad nicht verfügbar (DSP aktiv, Float verwendet)"),
     ("sig_summary_no_change", "未做软件改动", "未做軟體改動", "No software change", "ソフト側の変更なし", "소프트웨어 변경 없음", "Без программных изменений", "Aucune modification logicielle", "Keine Software-Änderung"),
     ("sig_fallback_rate", "已重采样 {src}→{dst}（设备不支持源采样率）", "已重採樣 {src}→{dst}（裝置不支援來源取樣率）", "Resampled {src}→{dst} (device cannot do the source rate)", "{src}→{dst} にリサンプル（デバイスが元のレート非対応）", "{src}→{dst} 리샘플(장치가 원본 레이트 미지원)", "Ресемплинг {src}→{dst} (устройство не поддерживает исходную частоту)", "Rééchantillonné {src}→{dst} (périphérique incompatible)", "{src}→{dst} neu abgetastet (Gerät unterstützt Quellrate nicht)"),
     ("sig_untouched", "未做软件改动", "未做軟體改動", "No software change", "ソフト側の変更なし", "소프트웨어 변경 없음", "Без программных изменений", "Aucune modification logicielle", "Keine Software-Änderung"),

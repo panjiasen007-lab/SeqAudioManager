@@ -64,6 +64,47 @@ def db_to_linear(db: float) -> float:
     return float(10.0 ** (value / 20.0))
 
 
+def int_pipeline_allowed(settings: Any, volume_db: Optional[float] = None) -> bool:
+    """整数通路是否**真的**可行（与「DSP 是否会改样本」交叉校验）。
+
+    架构文档 FR-DEC-009 说得很清楚：整数通路只在「音量旁路、无 EQ、无淡变」时
+    才成立 —— 一旦有任何一级要动样本，就必须在浮点上做（定点乘增益要额外缩放
+    与饱和处理，EQ 的 biquad 更是浮点算法）。
+
+    这个判断以前散在引擎里，QA 实测发现漏了：``int_pipeline=True`` +
+    ``dsp_bypass=False`` + 软件音量/EQ 时，环形缓冲是 int16，回调里
+    ``buf *= np.float32(...)`` 在 numpy 2.x 直接抛 ``UFuncOutputCastingError``，
+    异常被回调兜底吞掉 → **整场静音，界面只有计数器在动**。所以把裁决收敛成
+    这一个函数，解码器（决定样本格式）与引擎（决定要不要挂 DSP 钩子）共用它，
+    谁都不许自己再推一遍。
+
+    Args:
+        settings: ``Settings``（只读，缺字段按默认值兜底）。
+        volume_db: 覆盖设置里的音量（引擎用运行期实际值）。
+    """
+    wants_int = bool(
+        getattr(settings, "playback_int_pipeline", False)
+        or getattr(settings, "playback_bit_perfect", False)
+    )
+    if not wants_int:
+        return False
+    # 交叉淡变必须浮点（本期默认 0，但别留个定时炸弹）
+    if float(getattr(settings, "playback_crossfade_sec", 0.0) or 0.0) > 0.0:
+        return False
+    if not bool(getattr(settings, "playback_dsp_bypass", True)):
+        mode = str(getattr(settings, "playback_volume_mode", "bypass") or "bypass")
+        db = float(
+            volume_db
+            if volume_db is not None
+            else (getattr(settings, "playback_volume_db", 0.0) or 0.0)
+        )
+        if mode == "software" and abs(db) > 1e-9:
+            return False
+        if bool(getattr(settings, "playback_eq_enabled", False)):
+            return False
+    return True
+
+
 def _next_pow2(value: int) -> int:
     """不小于 ``value`` 的最小 2 的幂（FFT 长度取 2 的幂最快）。"""
     size = 1
@@ -511,6 +552,11 @@ class DspChain:
         """
         if buf.size == 0:
             return False
+        if buf.dtype != np.float32:
+            # 防未来再犯的护栏：浮点链只处理 float32。整数缓冲走到这里说明
+            # 「整数通路与 DSP 互斥」这道门被绕过了 —— 宁可静默跳过（不崩、
+            # 不抛进回调），也不要让 numpy 的 casting 异常变成整场静音。
+            return False
         if not self._enabled:
             return False
         changed = False
@@ -544,6 +590,7 @@ class DspChain:
 
 __all__ = [
     "DspChain",
+    "int_pipeline_allowed",
     "GainStage",
     "BiquadEq",
     "RampController",

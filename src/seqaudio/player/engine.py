@@ -52,7 +52,7 @@ from .constants import (
     StageStatus,
 )
 from .decoder import DecodeError, DecodeSpec, FfmpegDecoder
-from .dsp import DspChain
+from .dsp import DspChain, int_pipeline_allowed
 from .devices import (
     DeviceBusyError,
     DeviceError,
@@ -64,7 +64,7 @@ from .devices import (
 from .output import AudioOutput
 from .queue import PlayQueue, QueueItem
 from .ringbuffer import PcmRingBuffer
-from .signal_path import SignalPath
+from .signal_path import TEXT_INT_PIPELINE_UNAVAILABLE, SignalPath
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +193,7 @@ class PlayerEngine:
         self._eof_pending = False
         self._last_position_ms = -1
         self._last_gap_ms = 0.0
+        self._int_downgraded = False   # 用户要整数通路、但被 DSP 挤回浮点
         self._underrun_seen = 0        # 当前这条流的欠载数（回调自增）
         self._underrun_base = 0        # 已拆掉的流累计欠载数
         self._closed = False
@@ -659,12 +660,31 @@ class PlayerEngine:
         """按队列项 + 偏移构造解码参数（含采样率/声道/样本格式的最终裁决）。"""
         spec = DecodeSpec.from_item(item, self.settings, start_ms=offset_ms)
         settings = self.settings
-        # 整数通路与软件处理互斥：EQ/音量一旦要真的改样本，就必须在浮点上做
-        # （int16 上乘 0.5 会截断、EQ 的 biquad 更没法做）。这里**主动**改回浮点，
-        # 而不是让面板声称"已衰减 6 dB"却一个样本都没动 —— 声明必须与事实一致。
-        if spec.sample_fmt in ("s16", "s24", "s32") and self._dsp_will_process():
-            log.info("整数通路与软件处理互斥，改用浮点通路（%s → f32）", spec.sample_fmt)
+        # 整数通路与软件处理互斥：判据统一在 dsp.int_pipeline_allowed()，
+        # 解码器已经据此选过样本格式；这里只是把「用户要整数、实际给了浮点」
+        # 这件事记下来，好在信号路径 format 级如实说明原因（面板不能含糊）。
+        requested_int = bool(
+            getattr(settings, "playback_int_pipeline", False)
+            or getattr(settings, "playback_bit_perfect", False)
+        )
+        self._int_downgraded = bool(
+            requested_int
+            and not spec.is_dsd
+            and spec.sample_fmt not in ("s16", "s24", "s32")
+        )
+        if self._int_downgraded:
+            log.info(
+                "整数通路不可用（DSP 已启用：旁路=%s 音量模式=%s EQ=%s），改用浮点",
+                getattr(settings, "playback_dsp_bypass", True),
+                getattr(settings, "playback_volume_mode", "bypass"),
+                getattr(settings, "playback_eq_enabled", False),
+            )
+        # 双保险：万一有人塞了一个自带 spec 的工厂，这里仍旧强制浮点
+        if spec.sample_fmt in ("s16", "s24", "s32") and not int_pipeline_allowed(
+            settings, self._volume_db
+        ):
             spec = replace(spec, sample_fmt="f32")
+            self._int_downgraded = True
         device = self._resolve_device()
         want = int(spec.sample_rate)
         if not bool(getattr(settings, "playback_follow_source_rate", True)) and not spec.is_dsd:
@@ -687,15 +707,8 @@ class PlayerEngine:
         return replace(spec, sample_rate=int(rate))
 
     def _dsp_will_process(self) -> bool:
-        """这次起播 DSP 是否真的会改样本（决定要不要放弃整数通路）。"""
-        settings = self.settings
-        if bool(getattr(settings, "playback_dsp_bypass", True)):
-            return False
-        software_volume = (
-            str(getattr(settings, "playback_volume_mode", "bypass")) == "software"
-            and abs(float(self._volume_db)) > 1e-9
-        )
-        return software_volume or bool(getattr(settings, "playback_eq_enabled", False))
+        """这次起播 DSP 是否真的会改样本（= 整数通路是否可行，取反）。"""
+        return not int_pipeline_allowed(self.settings, self._volume_db)
 
     def _resolve_device(self) -> Optional[DeviceInfo]:
         try:
@@ -1042,6 +1055,9 @@ class PlayerEngine:
             latency_ms=float(output_snapshot.get("latency_ms", 0.0) or 0.0),
             device_dtype=str(output_snapshot.get("dtype", "") or ""),
             int_pipeline=spec.sample_fmt in ("s16", "s24", "s32"),
+            format_note=(
+                TEXT_INT_PIPELINE_UNAVAILABLE if self._int_downgraded else ""
+            ),
         )
         # 回退时 counters 里补一笔（引擎在 _build_spec 里已 bump，这里不重复加）
         self._sync_counters(output_snapshot)

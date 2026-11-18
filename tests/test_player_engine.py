@@ -27,8 +27,10 @@ from seqaudio.player import devices as dev_mod  # noqa: E402
 from seqaudio.player import session as session_mod  # noqa: E402
 from seqaudio.player.constants import PlayMode, PlayerState, StageStatus  # noqa: E402
 from seqaudio.player.dsp import BiquadEq, DspChain, RampController, db_to_linear  # noqa: E402
+from seqaudio.player.decoder import DecodeSpec, FfmpegDecoder  # noqa: E402
 from seqaudio.player.engine import PlayerEngine  # noqa: E402
 from seqaudio.player.queue import PlayQueue, QueueItem  # noqa: E402
+from seqaudio.player.ringbuffer import PcmRingBuffer  # noqa: E402
 from seqaudio.player.session import PlaybackSession, load_session, save_session  # noqa: E402
 from seqaudio.player.signal_path import (  # noqa: E402
     FORBIDDEN_CLAIMS,
@@ -80,6 +82,255 @@ def _make_item(name: str, duration: float = 120.0, rate: int = 44100) -> QueueIt
         channels=2,
         bit_depth=16,
     )
+
+
+class _MemoryOutput:
+    """内存输出替身：不发声，由测试**按生产顺序**拉环并调用引擎的 DSP 钩子。
+
+    真开流既慢又拿不回样本，而这一组用例要的恰恰是「送进设备的那块样本长什么样」。
+    ``prepare/begin/start`` 的拆分与 ``AudioOutput`` 一致；引擎给不给 hook
+    （只有 float32 环才给）这条生产规则被原样保留 —— 那正是被测的点。
+    """
+
+    def __init__(self, ring: PcmRingBuffer, hook) -> None:
+        self.ring = ring
+        self.hook = hook
+        self.rate = 0
+        self.channels = int(ring.channels)
+        self.started = False
+
+    def prepare(self, rate: int, channels: int = 0) -> int:
+        self.rate = int(rate)
+        self.channels = int(channels or self.ring.channels)
+        return self.rate
+
+    def begin(self) -> None:
+        self.started = True
+
+    def start(self, rate: int, channels: int = 0) -> int:
+        actual = self.prepare(rate, channels)
+        self.begin()
+        return actual
+
+    def stop(self, abort: bool = False) -> None:
+        self.started = False
+
+    def pause(self) -> None:
+        self.started = False
+
+    def resume(self) -> None:
+        self.started = True
+
+    def snapshot(self) -> dict:
+        return {
+            "is_open": self.started,
+            "rate": self.rate,
+            "want_rate": self.rate,
+            "fallback": False,
+            "channels": self.channels,
+            "dtype": str(self.ring.dtype),
+            "device": "memory",
+            "device_index": -1,
+            "backend": "memory",
+            "exclusive": False,
+            "blocksize": 1024,
+            "latency_ms": 0.0,
+            "underruns": 0,
+            "frames_out": 0,
+            "pa_flags": 0,
+            "cb_errors": 0,
+            "cb_error": "",
+            "paused": not self.started,
+            "volume_db": 0.0,
+            "error": "",
+        }
+
+
+def _pump(output: _MemoryOutput, blocks: int = 12) -> tuple[float, int, int]:
+    """按生产顺序消费 ``blocks`` 块：读环 → （有钩子就）跑 DSP，返回峰值/帧数/钩子异常数。"""
+    ring = output.ring
+    buf = np.zeros((1024, ring.channels), dtype=ring.dtype)
+    peak = 0.0
+    frames = 0
+    errors = 0
+    for _ in range(blocks):
+        deadline = time.monotonic() + 5.0
+        while ring.available < 1024 and time.monotonic() < deadline:
+            time.sleep(0.002)
+        filled = ring.read_into(buf)
+        if filled < len(buf):
+            buf[filled:] = 0
+        if output.hook is not None and filled > 0:
+            try:
+                output.hook(buf, filled)
+            except BaseException:  # noqa: BLE001 - 这里要**数**异常，所以自己兜
+                errors += 1
+        if filled > 0:
+            peak = max(peak, float(np.max(np.abs(buf[:filled].astype(np.float32)))))
+            frames += filled
+    # 归一化到 ±1：int16 的原始值（±32768）与 float32（±1.0）不在同一量纲，
+    # 不归一化就没法拿「0 dB 参考组合」去比 -6 dB 组合的幅度比。
+    if ring.dtype == np.int16:
+        peak /= 32768.0
+    elif ring.dtype == np.int32:
+        peak /= 2147483648.0
+    return peak, frames, errors
+
+
+class TestIntPipelineMatrix(unittest.TestCase):
+    """TC-DSP-11：``int_pipeline × dsp_bypass × volume_mode × eq_enabled`` 组合矩阵。
+
+    这一条的由来：QA 读代码时发现「整数通路」只按 ``bit_depth`` 决定，没有校验
+    「音量/EQ 是否真的在动样本」。于是 ``int_pipeline=True`` + 软件音量时，
+    环形缓冲是 int16，回调里 ``buf *= np.float32(...)`` 在 numpy 2.x 抛
+    ``UFuncOutputCastingError``，异常被回调兜底吞掉 → **整场静音**，界面只剩
+    计数器在动。现在样本格式的裁决收敛到 ``dsp.int_pipeline_allowed()``，
+    并要求每组都必须「有声音」。
+    """
+
+    BLOCKS = 10
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = Path(tempfile.mkdtemp(prefix="seq_matrix_"))
+        cls.file = _make_flac(cls.tmp / "matrix.flac", seconds=1.5)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _measure(
+        self, int_pipeline: bool, dsp_bypass: bool, volume_mode: str, volume_db: float, eq: bool
+    ) -> dict:
+        settings = Settings()
+        settings.playback_ramp_ms = 2
+        settings.playback_int_pipeline = int_pipeline
+        settings.playback_dsp_bypass = dsp_bypass
+        settings.playback_volume_mode = volume_mode
+        settings.playback_volume_db = volume_db
+        settings.playback_eq_enabled = eq
+        settings.playback_eq_gains = [0.0] * 10  # 全平直：不该改变幅度
+
+        outputs: list[_MemoryOutput] = []
+
+        def factory(ring, device, hook):  # noqa: ANN001 - 测试替身
+            output = _MemoryOutput(ring, hook)
+            outputs.append(output)
+            return output
+
+        item = QueueItem(
+            path=self.file,
+            title="matrix",
+            duration=1.5,
+            sample_rate=44100,
+            channels=2,
+            bit_depth=16,
+        )
+        engine = PlayerEngine(settings, output_factory=factory)
+        try:
+            engine.set_queue(PlayQueue([item]))
+            started = engine.play()
+            output = outputs[-1]
+            if not started:
+                return {"started": False, "peak": 0.0, "frames": 0, "errors": 0,
+                        "dtype": str(output.ring.dtype), "note": "", "engine": engine}
+            peak, frames, errors = _pump(output, self.BLOCKS)
+            snapshot = engine.snapshot()
+            fmt = next(stage for stage in snapshot["signal_path"] if stage["key"] == "format")
+            gain = next(stage for stage in snapshot["signal_path"] if stage["key"] == "gain")
+            return {
+                "started": True,
+                "peak": peak,
+                "frames": frames,
+                "errors": errors,
+                "dtype": str(output.ring.dtype),
+                "note": fmt["detail"],
+                "gain_detail": gain["detail"],
+                "gain_status": gain["status"],
+                "int_downgraded": "整数通路不可用" in fmt["detail"],
+                "snapshot": snapshot,
+            }
+        finally:
+            engine.shutdown()
+
+    def test_matrix_all_combinations_produce_sound(self) -> None:
+        combos = [
+            (int_pipeline, dsp_bypass, mode, db, eq)
+            for int_pipeline in (False, True)
+            for dsp_bypass in (False, True)
+            for mode, db in (("bypass", 0.0), ("software", 0.0), ("software", -6.0))
+            for eq in (False, True)
+        ]
+        self.assertEqual(len(combos), 24, "组合数应为 2×2×3×2 = 24（覆盖 16 组基础矩阵）")
+
+        reference: dict[tuple, float] = {}
+        problems: list[str] = []
+        rows: list[str] = []
+        for int_pipeline, dsp_bypass, mode, db, eq in combos:
+            name = (
+                f"int={int_pipeline} bypass={dsp_bypass} vol={mode}{'' if db == 0 else db} "
+                f"eq={eq}"
+            )
+            result = self._measure(int_pipeline, dsp_bypass, mode, db, eq)
+            rows.append(
+                f"{name}: peak={result['peak']:.4f} frames={result['frames']} "
+                f"errors={result['errors']} dtype={result['dtype']}"
+            )
+            if not result["started"]:
+                problems.append(f"{name}: 起播失败")
+                continue
+            if result["frames"] <= 0:
+                problems.append(f"{name}: 没有取到任何帧")
+            if result["peak"] <= 1e-4:
+                problems.append(f"{name}: 峰值 {result['peak']:.6f} —— 没声音（疑似静默失败）")
+            if result["errors"]:
+                problems.append(f"{name}: DSP 钩子抛了 {result['errors']} 次异常")
+            if int_pipeline and "整数通路不可用" in result["note"] and not (
+                not dsp_bypass and (mode == "software" and db != 0 or eq)
+            ):
+                problems.append(f"{name}: 不该降级却降级了（{result['note']}）")
+            if db == 0.0:
+                reference[(int_pipeline, dsp_bypass, mode, eq)] = result["peak"]
+
+        for int_pipeline, dsp_bypass, mode, db, eq in combos:
+            if db == 0.0:
+                continue
+            name = f"int={int_pipeline} bypass={dsp_bypass} vol={mode}{db} eq={eq}"
+            result = self._measure(int_pipeline, dsp_bypass, mode, db, eq)
+            base = reference.get((int_pipeline, dsp_bypass, mode, eq), 0.0)
+            ratio = (result["peak"] / base) if base > 1e-9 else 0.0
+            rows.append(f"{name}: peak={result['peak']:.4f} 相对 0dB={ratio:.3f}")
+            # 声明必须与事实一致：DSP 真的生效时才该看到约 0.501 的衰减
+            if not dsp_bypass:
+                if abs(ratio - 0.5012) > 0.08:
+                    problems.append(f"{name}: 声称 -6 dB，实测幅度比 {ratio:.3f}（应≈0.501）")
+            elif abs(ratio - 1.0) > 0.05 and base > 1e-9:
+                problems.append(
+                    f"{name}: 旁路模式下幅度不该被改（实测比 {ratio:.3f}，应≈1.000）"
+                )
+
+        self.assertEqual(
+            problems,
+            [],
+            "组合矩阵发现问题：" + "；".join(problems) + "\n实测全表：\n  " + "\n  ".join(rows),
+        )
+
+    def test_int_pipeline_downgraded_with_reason(self) -> None:
+        """要整数通路却开了 DSP：必须降级为浮点，且 format 级说清原因。"""
+        result = self._measure(True, False, "software", -6.0, False)
+        self.assertTrue(result["started"])
+        self.assertEqual(result["dtype"], "float32")
+        self.assertIn("整数通路不可用", result["note"])
+        self.assertIn("DSP 已启用", result["note"])
+        self.assertGreater(result["peak"], 1e-4)
+
+    def test_int_pipeline_kept_when_dsp_off(self) -> None:
+        """DSP 全关时整数通路必须保留（否则「位完美备选」名存实亡）。"""
+        result = self._measure(True, True, "bypass", 0.0, False)
+        self.assertTrue(result["started"])
+        self.assertEqual(result["dtype"], "int16")
+        self.assertNotIn("整数通路不可用", result["note"])
+        self.assertGreater(result["peak"], 0.01)  # int16 归一化后幅度 ~0.125
 
 
 class TestQueue(unittest.TestCase):
@@ -582,6 +833,67 @@ class TestEnginePlayback(unittest.TestCase):
             self.assertGreaterEqual(snapshot["counters"]["resample_events"], 1)
             self.assertEqual(snapshot["rate"], 48000)
             self.assertNotIn("位完美", snapshot["signal_summary"])
+        finally:
+            engine.shutdown()
+
+    def test_fallback_pcm_matches_device_rate(self) -> None:
+        """采样率回退后「不变调」：PCM 必须按**设备率**产出，不是按源率。
+
+        只看 ``snapshot()["rate"]`` 会漏掉最隐蔽的一类 bug：流按 48k 开、PCM 按
+        44.1k 送 —— 界面一切正常，听感变调。所以这里用引擎实际的 ``DecodeSpec``
+        重新解码一遍，帧数必须等于 ``时长 × 设备率``。
+        """
+        device = next(
+            (
+                candidate
+                for candidate in dev_mod.list_output_devices("wasapi")
+                if not dev_mod.supports_rate(candidate, 44100)
+            ),
+            None,
+        )
+        if device is None:
+            self.skipTest("本机没有「拒绝 44.1 kHz」的设备，无法验证回退")
+
+        settings = Settings()
+        settings.playback_output_backend = "wasapi"
+        settings.playback_device = str(device.index)
+        engine = PlayerEngine(settings)
+        try:
+            track = probe_mod.probe(_make_flac(self.tmp / "fb.flac", seconds=2.0))
+            engine.set_queue(PlayQueue.from_tracks([track]))
+            self.assertTrue(engine.play())
+            snapshot = engine.snapshot()
+            actual_rate = snapshot["rate"]
+            self.assertEqual(actual_rate, 48000, "WASAPI 共享应回退到 48k")
+            self.assertTrue(snapshot["fallback"])
+
+            spec = engine._spec  # 解码器真正吃到的参数
+            self.assertIsNotNone(spec)
+            self.assertEqual(spec.sample_rate, actual_rate, "解码率必须等于设备率")
+
+            decoder = FfmpegDecoder(
+                DecodeSpec(
+                    path=track.path,
+                    sample_rate=spec.sample_rate,
+                    channels=spec.channels,
+                    sample_fmt=spec.sample_fmt,
+                )
+            )
+            decoder.start()
+            frames = 0
+            try:
+                while True:
+                    block = decoder.read_block()
+                    if block is None:
+                        break
+                    frames += int(block.shape[0])
+            finally:
+                decoder.stop()
+            expected = int(round(2.0 * actual_rate))
+            self.assertLessEqual(
+                abs(frames - expected), 2048,
+                f"帧数 {frames} 与 {expected}（2 s × {actual_rate}）不符 —— 这就是静默变调",
+            )
         finally:
             engine.shutdown()
 

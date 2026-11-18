@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 TEXT_NO_SOFTWARE_CHANGE = "未做软件改动"
 #: 采样率回退时的说明模板
 TEXT_FALLBACK_RATE = "已重采样 {src}→{dst}（设备不支持源采样率）"
+#: 整数通路被 DSP 挤掉时的说明（面板必须说清楚为什么「位完美」没生效）
+TEXT_INT_PIPELINE_UNAVAILABLE = "整数通路不可用（DSP 已启用，改用浮点）"
 #: 绝不允许出现的说法
 FORBIDDEN_CLAIMS = ("bit-perfect", "bit perfect", "位完美", "逐样本一致", "比特完美")
 
@@ -173,6 +175,7 @@ class SignalPath:
         latency_ms: float = 0.0,
         device_dtype: str = "",
         int_pipeline: bool = False,
+        format_note: str = "",
     ) -> "SignalPath":
         """按真实链路重建 9 级描述（引擎开流成功后调用一次）。"""
         want = int(rate_want or 0)
@@ -196,6 +199,8 @@ class SignalPath:
             )
             if part
         ) or "—"
+        if format_note:
+            format_detail = f"{format_detail} · {format_note}"
         stages.append(
             SignalStage(
                 "format",
@@ -364,6 +369,7 @@ __all__ = [
     "Counters",
     "STAGE_LABELS",
     "TEXT_NO_SOFTWARE_CHANGE",
+    "TEXT_INT_PIPELINE_UNAVAILABLE",
     "TEXT_FALLBACK_RATE",
     "FORBIDDEN_CLAIMS",
     "BACKEND_LABELS",
