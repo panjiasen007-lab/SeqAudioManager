@@ -107,6 +107,19 @@ def presets_path() -> Path:
     return data_dir() / "presets.json"
 
 
+def session_path() -> Path:
+    """播放会话文件（v1.6）：上次的队列/位置/模式/设备/音量。
+
+    位置跟着 ``data_dir()`` 走，因此便携版落在 ``<程序目录>/data/``、安装版
+    与不可写环境落在 ``%APPDATA%/SeqAudioManager`` —— 与 config.json 同目录，
+    用户备份或迁移时只需搬一个目录。
+
+    这里**不**创建父目录：读会话时目录可能还不存在（首次启动），调用方按
+    「没有会话」处理即可；写入方（``PlaybackSession.save``）自己 ``mkdir``。
+    """
+    return data_dir() / "playback_session.json"
+
+
 def cache_dir() -> Path:
     d = data_dir() / "cache"
     d.mkdir(parents=True, exist_ok=True)

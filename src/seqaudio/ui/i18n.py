@@ -151,6 +151,110 @@ for _key, _names in {
     _TRANSLATIONS[f"theme:{_key}"] = dict(zip(LOCALE_NAMES, _names))
 
 
+# ---------------------------------------------------------------- 播放词条（v1.6）
+#
+# 键前缀按架构文档 10.2：play_*（控制）、pl_*（队列）、lyr_*（歌词）、
+# sig_*（信号路径）、eq_*（均衡器）、dev_*（设备/后端）。
+#
+# 行格式：key, 简体中文, 繁體中文, English, 日本語, 한국어, Русский, Français,
+# Deutsch —— 与 ui_text_main.py 的 ROWS 写法一致，八语言齐全，漏一列会被
+# zip 截断而不是悄悄少一个语言。
+#
+# 注意：这里同时喂给 tr(key) 与 tr_text(简体原文) 两条通路 —— 后者靠
+# _source_map() 反查（值→zh_CN），所以界面里直接写 QLabel("播放中") 也能跟着
+# 换语言，不必逐个改写成 tr("play_state_playing")。
+
+_PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
+    # ---- 播放控制 ----
+    ("play_play", "播放", "播放", "Play", "再生", "재생", "Воспроизвести", "Lire", "Wiedergabe"),
+    ("play_pause", "暂停", "暫停", "Pause", "一時停止", "일시정지", "Пауза", "Pause", "Pause"),
+    ("play_stop", "停止", "停止", "Stop", "停止", "정지", "Стоп", "Arrêter", "Stopp"),
+    ("play_prev", "上一首", "上一首", "Previous", "前へ", "이전 곡", "Предыдущий", "Précédent", "Vorheriger Titel"),
+    ("play_next", "下一首", "下一首", "Next", "次へ", "다음 곡", "Следующий", "Suivant", "Nächster Titel"),
+    ("play_volume", "音量", "音量", "Volume", "音量", "음량", "Громкость", "Volume", "Lautstärke"),
+    ("play_mute", "静音", "靜音", "Mute", "ミュート", "음소거", "Без звука", "Muet", "Stumm"),
+    ("play_seek", "进度", "進度", "Position", "再生位置", "재생 위치", "Позиция", "Position", "Position"),
+    ("play_loading", "载入中…", "載入中…", "Loading…", "読み込み中…", "불러오는 중…", "Загрузка…", "Chargement…", "Wird geladen…"),
+    ("play_buffering", "缓冲中…", "緩衝中…", "Buffering…", "バッファリング中…", "버퍼링 중…", "Буферизация…", "Mise en mémoire tampon…", "Puffern…"),
+    ("play_reconnect", "重新连接", "重新連線", "Reconnect", "再接続", "다시 연결", "Переподключить", "Reconnecter", "Neu verbinden"),
+    ("play_no_device", "无可用输出设备", "無可用的輸出裝置", "No output device", "利用可能な出力デバイスがありません", "사용 가능한 출력 장치 없음", "Нет доступного устройства вывода", "Aucun périphérique de sortie", "Kein Ausgabegerät verfügbar"),
+    ("play_disabled", "播放功能已关闭", "播放功能已關閉", "Playback disabled", "再生機能は無効です", "재생 기능 꺼짐", "Воспроизведение отключено", "Lecture désactivée", "Wiedergabe deaktiviert"),
+
+    # ---- 状态 ----
+    ("play_state_idle", "空闲", "閒置", "Idle", "待機", "대기", "Ожидание", "Inactif", "Bereit"),
+    ("play_state_loading", "载入中", "載入中", "Loading", "読み込み中", "불러오는 중", "Загрузка", "Chargement", "Lädt"),
+    ("play_state_playing", "播放中", "播放中", "Playing", "再生中", "재생 중", "Играет", "Lecture", "Wiedergabe läuft"),
+    ("play_state_paused", "已暂停", "已暫停", "Paused", "一時停止中", "일시정지됨", "Пауза", "En pause", "Angehalten"),
+    ("play_state_error", "播放错误", "播放錯誤", "Playback error", "再生エラー", "재생 오류", "Ошибка воспроизведения", "Erreur de lecture", "Wiedergabefehler"),
+
+    # ---- 队列 ----
+    ("pl_queue", "队列", "佇列", "Queue", "キュー", "대기열", "Очередь", "File d’attente", "Warteschlange"),
+    ("pl_queue_empty", "队列为空", "佇列為空", "Queue is empty", "キューは空です", "대기열이 비어 있음", "Очередь пуста", "La file est vide", "Warteschlange ist leer"),
+    ("pl_total", "总时长", "總時長", "Total length", "合計時間", "총 길이", "Общая длительность", "Durée totale", "Gesamtdauer"),
+    ("pl_add_next", "下一首播放", "下一首播放", "Play next", "次に再生", "다음에 재생", "Играть следующим", "Lire ensuite", "Als Nächstes"),
+    ("pl_add_last", "加入队列", "加入佇列", "Add to queue", "キューに追加", "대기열에 추가", "Добавить в очередь", "Ajouter à la file", "Zur Warteschlange"),
+    ("pl_remove", "从队列移除", "從佇列移除", "Remove from queue", "キューから削除", "대기열에서 제거", "Убрать из очереди", "Retirer de la file", "Aus Warteschlange entfernen"),
+    ("pl_clear", "清空队列", "清空佇列", "Clear queue", "キューを空にする", "대기열 비우기", "Очистить очередь", "Vider la file", "Warteschlange leeren"),
+    ("pl_mode_sequential", "顺序播放", "順序播放", "Sequential", "順番に再生", "순차 재생", "По порядку", "Séquentiel", "Der Reihe nach"),
+    ("pl_mode_shuffle", "随机播放", "隨機播放", "Shuffle", "シャッフル", "무작위 재생", "Перемешать", "Aléatoire", "Zufällig"),
+    ("pl_mode_repeat_one", "单曲循环", "單曲循環", "Repeat one", "1 曲リピート", "한 곡 반복", "Повтор одной", "Répéter le titre", "Titel wiederholen"),
+    ("pl_mode_repeat_all", "列表循环", "清單循環", "Repeat all", "全曲リピート", "전체 반복", "Повтор списка", "Répéter la liste", "Liste wiederholen"),
+
+    # ---- 歌词 ----
+    ("lyr_panel", "歌词", "歌詞", "Lyrics", "歌詞", "가사", "Текст песни", "Paroles", "Liedtext"),
+    ("lyr_empty", "暂无歌词", "暫無歌詞", "No lyrics", "歌詞がありません", "가사 없음", "Текста нет", "Aucune parole", "Kein Liedtext"),
+    ("lyr_offset", "歌词偏移", "歌詞偏移", "Lyrics offset", "歌詞オフセット", "가사 오프셋", "Смещение текста", "Décalage des paroles", "Liedtext-Versatz"),
+
+    # ---- 信号路径 ----
+    ("sig_panel", "信号路径", "訊號路徑", "Signal path", "信号経路", "신호 경로", "Путь сигнала", "Chemin du signal", "Signalweg"),
+    ("sig_stage_source", "源文件", "來源檔案", "Source file", "ソースファイル", "원본 파일", "Исходный файл", "Fichier source", "Quelldatei"),
+    ("sig_stage_decode", "解码器", "解碼器", "Decoder", "デコーダー", "디코더", "Декодер", "Décodeur", "Decoder"),
+    ("sig_stage_format", "样本格式", "樣本格式", "Sample format", "サンプル形式", "샘플 형식", "Формат отсчётов", "Format des échantillons", "Sampleformat"),
+    ("sig_stage_gain", "音量", "音量", "Gain", "ゲイン", "게인", "Усиление", "Gain", "Verstärkung"),
+    ("sig_stage_eq", "均衡器", "等化器", "Equalizer", "イコライザー", "이퀄라이저", "Эквалайзер", "Égaliseur", "Entzerrer"),
+    ("sig_stage_fade", "淡变/无缝", "淡變/無縫", "Fade / gapless", "フェード/ギャップレス", "페이드/갭리스", "Затухание/без пауз", "Fondu / sans pause", "Überblendung/Lückenlos"),
+    ("sig_stage_resample", "重采样/声道", "重採樣/聲道", "Resample / channels", "リサンプル/チャンネル", "리샘플/채널", "Ресемплинг/каналы", "Rééchantillonnage / canaux", "Resampling/Kanäle"),
+    ("sig_stage_output", "输出后端", "輸出後端", "Output backend", "出力バックエンド", "출력 백엔드", "Бэкенд вывода", "Backend de sortie", "Ausgabe-Backend"),
+    ("sig_stage_device", "设备上报格式", "裝置回報格式", "Device format", "デバイス報告形式", "장치 보고 형식", "Формат устройства", "Format du périphérique", "Geräteformat"),
+    ("sig_status_passthrough", "原样通过", "原樣通過", "Passed through", "そのまま通過", "그대로 통과", "Без изменений", "Transmis tel quel", "Unverändert durchgereicht"),
+    ("sig_status_changed", "已改变", "已改變", "Changed", "変更あり", "변경됨", "Изменено", "Modifié", "Verändert"),
+    ("sig_status_bypassed", "已旁路", "已旁路", "Bypassed", "バイパス", "바이패스", "Обход", "Contourné", "Umgangen"),
+    ("sig_status_error", "已回退", "已回退", "Fell back", "フォールバック", "대체됨", "Откат", "Repli", "Zurückgefallen"),
+    ("sig_untouched", "未做软件改动", "未做軟體改動", "No software change", "ソフト側の変更なし", "소프트웨어 변경 없음", "Без программных изменений", "Aucune modification logicielle", "Keine Software-Änderung"),
+    ("sig_underruns", "欠载", "欠載", "Underruns", "アンダーラン", "언더런", "Прерывания", "Sous-alimentations", "Unterläufe"),
+    ("sig_gain_db", "增益", "增益", "Gain", "ゲイン", "게인", "Усиление", "Gain", "Verstärkung"),
+
+    # ---- 均衡器 ----
+    ("eq_title", "均衡器", "等化器", "Equalizer", "イコライザー", "이퀄라이저", "Эквалайзер", "Égaliseur", "Entzerrer"),
+    ("eq_bypass", "旁路", "旁路", "Bypass", "バイパス", "바이패스", "Обход", "Contourner", "Umgehen"),
+    ("eq_preset", "预设", "預設", "Preset", "プリセット", "프리셋", "Пресет", "Préréglage", "Voreinstellung"),
+    ("eq_snapshot_a", "A 快照", "A 快照", "Snapshot A", "スナップショット A", "스냅샷 A", "Снимок A", "Instantané A", "Snapshot A"),
+    ("eq_snapshot_b", "B 快照", "B 快照", "Snapshot B", "スナップショット B", "스냅샷 B", "Снимок B", "Instantané B", "Snapshot B"),
+    ("eq_flat", "平坦", "平坦", "Flat", "フラット", "평탄", "Ровно", "Plat", "Flach"),
+
+    # ---- 设备 / 后端 ----
+    ("dev_backend", "输出后端", "輸出後端", "Output backend", "出力バックエンド", "출력 백엔드", "Бэкенд вывода", "Backend de sortie", "Ausgabe-Backend"),
+    ("dev_device", "输出设备", "輸出裝置", "Output device", "出力デバイス", "출력 장치", "Устройство вывода", "Périphérique de sortie", "Ausgabegerät"),
+    ("dev_exclusive", "独占", "獨佔", "Exclusive", "排他", "독점", "Монопольно", "Exclusif", "Exklusiv"),
+    ("dev_exclusive_busy", "设备忙（独占被占用）", "裝置忙碌（獨佔被佔用）", "Device busy (exclusive in use)", "デバイス使用中（排他モード）", "장치 사용 중(독점)", "Устройство занято (монопольный режим)", "Périphérique occupé (exclusif)", "Gerät belegt (exklusiv)"),
+    ("dev_samplerate", "采样率", "取樣率", "Sample rate", "サンプルレート", "샘플레이트", "Частота дискретизации", "Fréquence d’échantillonnage", "Abtastrate"),
+    ("dev_latency", "延迟", "延遲", "Latency", "レイテンシー", "지연", "Задержка", "Latence", "Latenz"),
+    ("dev_backend_wasapi", "WASAPI", "WASAPI", "WASAPI", "WASAPI", "WASAPI", "WASAPI", "WASAPI", "WASAPI"),
+    ("dev_backend_directsound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound", "DirectSound"),
+    ("dev_backend_mme", "MME", "MME", "MME", "MME", "MME", "MME", "MME", "MME"),
+    ("dev_backend_wdmks", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS", "WDM-KS"),
+
+    # ---- 无损/位完美相关措辞（措辞铁律 R2：只说「未做软件改动」）----
+    ("play_lossless", "无损", "無損", "Lossless", "ロスレス", "무손실", "Lossless", "Lossless", "Lossless"),
+    ("play_bit_perfect", "位完美", "位完美", "Bit-perfect mode", "ビットパーフェクト", "비트 퍼펙트", "Бит-в-бит", "Bit-perfect", "Bit-genau"),
+    ("play_hires", "高解析", "高解析", "Hi-res", "ハイレゾ", "고해상도", "Hi-Res", "Haute résolution", "Hi-Res"),
+)
+
+for _row in _PLAYBACK_ROWS:
+    _TRANSLATIONS[_row[0]] = dict(zip(LOCALE_NAMES, _row[1:]))
+
+
+
 # ---------------------------------------------------------------- 接口
 
 

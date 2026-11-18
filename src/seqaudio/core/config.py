@@ -98,6 +98,51 @@ class Settings:
     # ---- 文件夹封面 ----
     ensure_folder_cover: bool = True       # 处理完成后每个文件夹至少一张 cover（专辑封面→歌手照片）
 
+    # ---- 播放（v1.6，架构文档第七节）----
+    # 默认值就是产品定稿：共享输出、采样率跟随、DSP 全旁路、软件音量 0 dB 旁路、
+    # 播放相关标签写回关。字段追加靠 from_dict 的白名单自动兼容旧 config.json，
+    # 不需要迁移脚本。
+    #
+    # 这里刻意**不** import player.constants：依赖方向规定 core 不认识 player
+    # （架构文档 2.3），所以字符串/数值默认值在此按字面量写，与
+    # player/constants.py 的常量保持一致由测试守护。
+    playback_enabled: bool = True                  # 播放功能总开关（关=隐藏播放条与入口）
+    playback_bar_visible: bool = True              # 播放条显示（折叠态 56 px 单行）
+    playback_signal_panel_visible: bool = False    # 信号路径面板展开态
+    playback_output_backend: str = "wasapi"        # wasapi/directsound/mme/wdmks
+    playback_exclusive: bool = False               # WASAPI 独占（可选而非默认）
+    playback_device: str = ""                      # 设备名，空 = 系统默认
+    playback_follow_source_rate: bool = True       # 采样率跟随
+    playback_dsd_pcm_rate: int = 176400            # DSD→PCM 目标率（88.2k/176.4k/352.8k）
+    playback_bit_perfect: bool = False             # 位完美模式（强制率/位深=源 + 0 dB + 空 DSP）
+    playback_volume_mode: str = "bypass"           # bypass（固定 0 dB）/ software（浮点音量）
+    playback_volume_db: float = 0.0                # 软件音量 dB，-60 视为静音
+    playback_block_frames: int = 1024              # 回调块帧数
+    playback_buffer_ms: int = 80                   # 目标缓冲深度（40 为下限）
+    playback_dsp_bypass: bool = True               # 全局直通
+    playback_eq_enabled: bool = False              # EQ 模块启用（与 bypass 互斥）
+    playback_eq_gains: list[float] = field(default_factory=lambda: [0.0] * 10)      # 10 段增益 dB
+    playback_eq_preset: str = "flat"               # flat/custom/A/B
+    playback_eq_snapshot_a: list[float] = field(default_factory=lambda: [0.0] * 10)  # A/B 快照 A
+    playback_eq_snapshot_b: list[float] = field(default_factory=lambda: [0.0] * 10)  # A/B 快照 B
+    playback_gapless: bool = True                  # 同规格无缝续写
+    playback_crossfade_sec: float = 0.0            # 交叉淡变秒数（0=关，1–10 s，与无缝互斥）
+    playback_ramp_ms: int = 5                      # 切歌/暂停/seek 斜坡（1–5 ms）
+    playback_mode: str = "sequential"              # sequential/shuffle/repeat_one/repeat_all
+    playback_downmix_stereo: bool = False          # 多声道下混为 2.0
+    playback_int_pipeline: bool = False            # 整数通路优先（音量旁路且无 DSP 时生效）
+    playback_restore_session: bool = True          # 启动恢复队列/位置/模式/设备/音量
+    playback_restore_position: bool = True         # 恢复时回到上次毫秒位置
+    playback_lyrics_offset_ms: int = 0             # 歌词偏移（会话内的值优先）
+    playback_writeback_tags: bool = False          # 播放相关写回标签（默认关）
+    playback_exclusive_notice_shown: bool = False  # 独占首次说明是否已弹
+    playback_mini_bar: bool = False                # 迷你条开关（弹性项）
+
+    # ---- 曲库（v1.6）----
+    library_roots: list[str] = field(default_factory=list)   # 曲库根目录（取代零散 last_folder）
+    library_autoload: bool = True                            # 启动自动载入上次曲库
+    library_recent_sort: bool = True                         # 启用「最近播放」排序键
+
     # ---- 书写体统一 ----
     unify_artist_script: bool = True       # 同目录艺术家名字统一为简体（简繁不混搭）
 
