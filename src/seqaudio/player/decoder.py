@@ -366,10 +366,21 @@ class FfmpegDecoder:
 
     @property
     def returncode(self) -> Optional[int]:
-        """ffmpeg 退出码（未结束时为 ``None``）。"""
+        """ffmpeg 退出码（未结束时为 ``None``）。
+
+        **不要只看退出码判断成败**：被 ``stop()`` 主动终止时 ffmpeg 通常返回
+        ``1``（进程收到 terminate），那不是错误。判定顺序应是
+        ``stopped`` → 主动停；否则 ``at_eof`` + ``returncode == 0`` → 正常结束；
+        其余才是解码失败（可用 ``stderr_tail`` 取原因）。
+        """
         if self._proc is not None and self._proc.poll() is not None:
             self._returncode = self._proc.returncode
         return self._returncode
+
+    @property
+    def stopped(self) -> bool:
+        """是否被调用方 ``stop()`` 主动停止（区别于解码失败）。"""
+        return self._stop.is_set()
 
     # ------------------------------------------------------------ 读数
 
