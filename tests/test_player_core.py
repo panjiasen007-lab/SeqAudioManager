@@ -38,7 +38,14 @@ from seqaudio.player.decoder import (  # noqa: E402
     FfmpegDecoder,
     probe_codec,
 )
-from seqaudio.player.output import AudioOutput  # noqa: E402
+from seqaudio.player.output import (  # noqa: E402
+    AudioOutput,
+    DeviceBusyError,
+    DeviceError,
+    DeviceLostError,
+    RateUnsupportedError,
+    map_portaudio_error,
+)
 from seqaudio.player.ringbuffer import PcmRingBuffer  # noqa: E402
 
 _SINE_SEC = 2.0
@@ -406,6 +413,47 @@ class TestDecoder(unittest.TestCase):
         settings.playback_int_pipeline = False
         settings.playback_downmix_stereo = True
         self.assertEqual(DecodeSpec.from_track(track, settings).channels, 2)
+
+
+class TestOutputErrorMapping(unittest.TestCase):
+    """开流失败的文案必须能指导用户下一步动作。
+
+    QA 实测反馈：本机 WDM-KS 在「设备在、驱动拒绝这个设备/格式组合」时给的是
+    ``-9996 paInvalidDevice``，与「USB 解码器被拔」共用同一个码。以前一律报
+    「输出设备不可用（可能已被拔出）」，用户会去拔插头 —— 这是纯粹的误导。
+    """
+
+    def _map(self, text: str) -> DeviceError:
+        return map_portaudio_error(RuntimeError(text))
+
+    def test_invalid_device_is_not_reported_as_unplugged(self) -> None:
+        mapped = self._map("Error opening OutputStream: Invalid device [PaErrorCode -9996]")
+        self.assertNotIsInstance(mapped, DeviceLostError)
+        self.assertNotIn("拔出", str(mapped))
+        self.assertIn("后端", str(mapped), "应提示换后端/设备，而不是让用户拔插头")
+
+    def test_removed_device_is_lost(self) -> None:
+        mapped = self._map("Error opening OutputStream: Device was removed")
+        self.assertIsInstance(mapped, DeviceLostError)
+
+    def test_busy_device(self) -> None:
+        mapped = self._map("Error opening OutputStream: Device unavailable [PaErrorCode -9985]")
+        self.assertIsInstance(mapped, DeviceBusyError)
+
+    def test_invalid_sample_rate(self) -> None:
+        mapped = self._map("Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]")
+        self.assertIsInstance(mapped, RateUnsupportedError)
+
+    def test_channel_count_and_sample_format(self) -> None:
+        channels = self._map("Invalid number of channels [PaErrorCode -9998]")
+        self.assertIs(type(channels), DeviceError)
+        self.assertIn("声道", str(channels))
+        fmt = self._map("Sample format not supported [PaErrorCode -9994]")
+        self.assertIn("样本格式", str(fmt))
+
+    def test_unknown_error_keeps_text(self) -> None:
+        mapped = self._map("Error opening OutputStream: something odd")
+        self.assertIn("something odd", str(mapped))
 
 
 class TestEndToEnd(unittest.TestCase):

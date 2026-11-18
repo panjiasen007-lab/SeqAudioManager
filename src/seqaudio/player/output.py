@@ -72,22 +72,47 @@ class OutputConfig:
 
 
 def map_portaudio_error(exc: BaseException) -> DeviceError:
-    """把 PortAudio 的报错文本映射成四类可处理异常。
+    """把 PortAudio 的报错映射成「能让用户采取下一步动作」的异常。
 
-    PortAudio 只给一句英文 + 负的错误码，界面要的是「设备忙，请关闭占用它的
-    程序」这种能行动的信息，所以在这里做一次归类，而不是让字符串到处漏。
+    PortAudio 只给一句英文 + 一个负错误码，而且**不同后端会借用同一个码**：
+    本机 WDM-KS 在「设备在、驱动拒绝这个设备/格式组合」时给的是 ``-9996``
+    ``paInvalidDevice``，与「USB 解码器被拔」共用一个码。一律说成「可能已被拔出」
+    会让用户去拔插头（QA 实测反馈）。所以按错误码逐条给准信：
+
+    ============  ====================================  ==========================
+    码             含义                                  映射
+    ============  ====================================  ==========================
+    -9997          paInvalidSampleRate                    ``RateUnsupportedError``
+    -9998          paInvalidChannelCount                  不支持该声道数
+    -9994          paSampleFormatNotSupported             不支持该样本格式
+    -9996          paInvalidDevice                        后端/驱动拒绝此设备或格式
+    -9985          paDeviceUnavailable                    被其它程序占用（忙）
+    -9999          paUnanticipatedHostError               驱动内部错误（建议换后端）
+    ============  ====================================  ==========================
+
+    只有明确是「设备消失」的文本才归到 ``DeviceLostError``（运行期拔线），
+    这样界面能分开提示「换后端」与「插回设备」。
     """
     if isinstance(exc, (DeviceError,)):
         return exc
     text = str(exc).lower()
-    if "-9985" in text or "busy" in text or "unavailable" in text:
-        return DeviceBusyError(f"输出设备忙或被占用：{exc}")
-    if "-9997" in text or "invalid sample rate" in text or "sample rate" in text:
+    if "-9997" in text or "invalid sample rate" in text:
         return RateUnsupportedError(f"设备不支持该采样率：{exc}")
+    if "-9998" in text or "invalid channel count" in text or "channel count" in text:
+        return DeviceError(f"设备不支持的声道数：{exc}")
+    if "-9994" in text or "sample format not supported" in text:
+        return DeviceError(f"设备不支持该样本格式：{exc}")
+    if "removed" in text or "unplugged" in text or "no longer available" in text:
+        return DeviceLostError(f"输出设备已断开（可能被拔出）：{exc}")
     if "-9996" in text or "invalid device" in text or "device index" in text:
-        return DeviceLostError(f"输出设备不可用（可能已被拔出）：{exc}")
+        return DeviceError(
+            "无法打开该输出设备：后端/驱动拒绝了它。"
+            f"请换一个输出后端（如 MME / DirectSound）或另一台设备再试：{exc}"
+        )
+    if "-9985" in text or "busy" in text or "unavailable" in text:
+        return DeviceBusyError(f"输出设备忙或被其它程序占用：{exc}")
     if "-9999" in text or "unanticipated host error" in text:
-        return DeviceLostError(f"输出设备异常：{exc}")
+        return DeviceError(f"输出后端驱动内部错误（建议换一个后端再试）：{exc}")
     return DeviceError(f"打开输出流失败：{exc}")
 
 
