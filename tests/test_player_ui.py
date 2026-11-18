@@ -153,6 +153,30 @@ class PlayerBarTest(unittest.TestCase):
         self.bar.set_volume_mode("software")
         self.assertTrue(self.bar.volume_slider.isEnabled())
 
+    def test_stop_button_lifecycle(self) -> None:
+        """v1.6.1 用户反馈 4：停止按钮——有会话才可用，停止清状态走主窗口。"""
+        received: list[bool] = []
+        self.bar.stopRequested.connect(lambda: received.append(True))
+        self.bar.set_state("IDLE")
+        self.assertFalse(self.bar.btn_stop.isEnabled())
+        self.bar.set_state("PLAYING")
+        self.assertTrue(self.bar.btn_stop.isEnabled())
+        self.bar.btn_stop.click()
+        self.assertTrue(received and received[-1])
+
+    def test_nav_enabled_grey_out(self) -> None:
+        """v1.6.1 用户反馈 2：列表没有歌曲时上一首/下一首必须灰掉。"""
+        self.bar.set_nav_enabled(False)
+        self.assertFalse(self.bar.btn_next.isEnabled())
+        self.assertFalse(self.bar.btn_prev.isEnabled())
+        self.bar.set_nav_enabled(True)
+        self.assertTrue(self.bar.btn_next.isEnabled())
+
+    def test_play_button_not_primary_blob(self) -> None:
+        """v1.6.1 用户反馈 4：播放态不再套 primary 大内边距（一片蓝看不清图标）。"""
+        self.bar.set_state("PLAYING")
+        self.assertEqual(self.bar.btn_play.objectName(), "playerPlay")
+
     def test_progress_click_jumps(self) -> None:
         """v1.6.1 用户反馈：点击进度条任意位置直接跳转（原实现只翻页）。"""
         self.bar.set_track({"title": "T", "duration_ms": 100_000})

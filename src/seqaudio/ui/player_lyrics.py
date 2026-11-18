@@ -128,13 +128,15 @@ class _LyricsFetchWorker(QThread):
     fetched = Signal(str, str)   # (歌词文本, 来源)
     failed = Signal(str)
 
-    def __init__(self, settings, title: str, artist: str, album: str, duration: float, parent=None):
+    def __init__(self, settings, title: str, artist: str, album: str, duration: float,
+                 channels: tuple[str, ...] = ("netmusic", "qqmusic", "lrclib"), parent=None):
         super().__init__(parent)
         self.settings = settings
         self.title = title
         self.artist = artist
         self.album = album
         self.duration = duration
+        self.channels = channels
 
     def run(self) -> None:
         try:
@@ -155,9 +157,9 @@ class _LyricsFetchWorker(QThread):
                 self.artist,
                 self.album,
                 self.duration,
-                use_lrclib=bool(settings.use_lrclib),
-                use_netmusic=bool(settings.use_netmusic),
-                use_qqmusic=bool(settings.use_qqmusic),
+                use_lrclib=bool(settings.use_lrclib) and "lrclib" in self.channels,
+                use_netmusic=bool(settings.use_netmusic) and "netmusic" in self.channels,
+                use_qqmusic=bool(settings.use_qqmusic) and "qqmusic" in self.channels,
             )
             if result is None or not result.text:
                 self.failed.emit("未找到歌词")
@@ -242,6 +244,14 @@ class PlayerLyricsPanel(QWidget):
         if not text.strip():
             text = str(data.get("lyrics") or "")
         self.set_lyrics(text)
+        # v1.6.1 用户反馈：换歌后**自动**联网匹配（网易云 → QQ → LRCLIB 顺序），
+        # 不再要求手动右键。开关 playback_auto_lyrics 默认开，设置里可关
+        # （PRD 表 5-13 的"在线刮削默认关"针对的是批量元数据刮削，歌词跟播
+        # 是展示性的单次请求，不写盘、不上传音频，风险面不同）。
+        if not self._lines and not self._raw_plain:
+            auto = bool(getattr(self.settings, "playback_auto_lyrics", True))
+            if auto:
+                self.fetch_online()
 
     def set_lyrics(self, text: str) -> None:
         """直接喂一段歌词文本（本地/联网结果都走这里）。"""
@@ -386,9 +396,19 @@ class PlayerLyricsPanel(QWidget):
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
-        menu.addAction(
-            i18n.tr_text("联网匹配歌词…"),
-            self.fetch_online,
+        online_menu = menu.addMenu(i18n.tr_text("联网匹配歌词"))
+        online_menu.addAction(
+            i18n.tr_text("全部渠道（网易云 → QQ → LRCLIB）"),
+            lambda: self.fetch_online(),
+        )
+        online_menu.addAction(
+            i18n.tr_text("仅网易云"), lambda: self.fetch_online(("netmusic",))
+        )
+        online_menu.addAction(
+            i18n.tr_text("仅 QQ 音乐"), lambda: self.fetch_online(("qqmusic",))
+        )
+        online_menu.addAction(
+            i18n.tr_text("仅 LRCLIB"), lambda: self.fetch_online(("lrclib",))
         )
         menu.addSeparator()
         for step in OFFSET_STEPS:
@@ -408,8 +428,12 @@ class PlayerLyricsPanel(QWidget):
 
     # ------------------------------------------------------------ 联网
 
-    def fetch_online(self) -> None:
-        """右键「联网匹配歌词」：异步抓取，失败只提示不弹窗。"""
+    def fetch_online(self, channels: tuple[str, ...] = ("netmusic", "qqmusic", "lrclib")) -> None:
+        """联网匹配歌词：异步抓取，失败只提示不弹窗。
+
+        ``channels`` 由调用方挑（v1.6.1 用户反馈）：自动匹配与右键「全部渠道」
+        走默认三元组；右键里单独选「网易云」「QQ 音乐」就只走那一家的曲库。
+        """
         if not self._track:
             self.hint_label.setText(i18n.tr_text("未找到歌词"))
             return
@@ -432,6 +456,7 @@ class PlayerLyricsPanel(QWidget):
             str(self._track.get("artist") or ""),
             str(self._track.get("album") or ""),
             float(self._track.get("duration") or 0.0),
+            channels=channels,
             parent=self,
         )
         worker.fetched.connect(self._on_fetched)

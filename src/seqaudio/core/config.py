@@ -109,6 +109,7 @@ class Settings:
     playback_enabled: bool = True                  # 播放功能总开关（关=隐藏播放条与入口）
     playback_bar_visible: bool = True              # 播放条显示（折叠态 56 px 单行）
     playback_signal_panel_visible: bool = False    # 信号路径面板展开态
+    playback_auto_lyrics: bool = True              # 播放时自动联网匹配歌词（单次请求，不写盘）
     # 默认 **MME** 而不是 WASAPI：Windows 共享模式的 WASAPI 只接受系统混音格式
     # （本机实测 48000），44.1 kHz 源必然被重采样，与「采样率跟随」的核心承诺冲突；
     # MME/DirectSound 同一物理设备实测可接受 44100/48000/88200/96000/176400/192000，

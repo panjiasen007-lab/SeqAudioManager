@@ -126,6 +126,7 @@ class PlayerBar(QFrame):
 
     playRequested = Signal()
     pauseRequested = Signal()
+    stopRequested = Signal()
     nextRequested = Signal()
     prevRequested = Signal()
     seekRequested = Signal(int)
@@ -149,6 +150,7 @@ class PlayerBar(QFrame):
         self._dragging = False
         self._collapsed = False
         self._enabled = True
+        self._nav_enabled = False
         self._volume_mode = "bypass"
         self._cover_bytes: Optional[bytes] = None
         self._signal_visible = False
@@ -199,15 +201,18 @@ class PlayerBar(QFrame):
         # 传输控制
         self.btn_prev = self._small_button("|◀", i18n.tr_text("上一首"))
         self.btn_play = self._small_button("▶", i18n.tr_text("播放"))
+        self.btn_stop = self._small_button("■", i18n.tr_text("停止播放"))
         self.btn_next = self._small_button("▶|", i18n.tr_text("下一首"))
         self.btn_prev.clicked.connect(self.prevRequested.emit)
         self.btn_play.clicked.connect(self._on_play_clicked)
+        self.btn_stop.clicked.connect(self.stopRequested.emit)
         self.btn_next.clicked.connect(self.nextRequested.emit)
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(4)
         controls.addWidget(self.btn_prev)
         controls.addWidget(self.btn_play)
+        controls.addWidget(self.btn_stop)
         controls.addWidget(self.btn_next)
         self.controls_widget = QWidget()
         self.controls_widget.setLayout(controls)
@@ -298,6 +303,11 @@ class PlayerBar(QFrame):
                 border-top: 1px solid {theme.LINE};
                 border-bottom: 1px solid {theme.LINE};
             }}
+            QPushButton#playerPlay {{
+                background: {theme.ACCENT}; color: {theme.FG};
+                border: 1px solid {theme.ACCENT}; font-weight: 700;
+            }}
+            QPushButton#playerPlay:hover {{ background: {theme.ACCENT_HOVER}; }}
             QSlider#playerProgress::groove:horizontal {{
                 height: 4px; background: {theme.LINE_SOFT}; border-radius: 2px;
             }}
@@ -386,10 +396,14 @@ class PlayerBar(QFrame):
         self.btn_play.setToolTip(
             i18n.tr_text("暂停") if playing else i18n.tr_text("播放")
         )
-        self.btn_play.setObjectName("primary" if playing else "smallGhost")
+        # 播放态用专用的紧凑样式，不走 primary（7px 18px 的内边距会把 26px
+        # 小按钮撑成一坨蓝块，"❚❚"被挤没了——用户看到的"一片蓝色"）。
+        self.btn_play.setObjectName("playerPlay" if playing else "smallGhost")
         self.btn_play.setStyleSheet("")
         self.btn_play.style().unpolish(self.btn_play)
         self.btn_play.style().polish(self.btn_play)
+        has_session = value != "IDLE"
+        self.btn_stop.setEnabled(has_session and self._enabled)
         if value == "ERROR":
             self.title_label.setText(
                 self.title_label.text() or i18n.tr_text("播放错误")
@@ -423,6 +437,11 @@ class PlayerBar(QFrame):
     def set_playback_enabled(self, enabled: bool) -> None:
         """批处理/功能开关：禁用起播控件（不是隐藏）。"""
         self._enabled = bool(enabled)
+        self._refresh_enabled()
+
+    def set_nav_enabled(self, enabled: bool) -> None:
+        """上一首/下一首可用性：列表没有歌曲时置灰（用户反馈 2）。"""
+        self._nav_enabled = bool(enabled)
         self._refresh_enabled()
 
     def set_signal_panel_visible(self, visible: bool) -> None:
@@ -552,8 +571,10 @@ class PlayerBar(QFrame):
         """可用性：批处理 / 播放功能关闭 / 旁路模式下控件的灰显规则。"""
         has_track = self._track is not None
         playable = self._enabled and self.settings_playable()
-        for btn in (self.btn_play, self.btn_prev, self.btn_next):
-            btn.setEnabled(playable)
+        self.btn_play.setEnabled(playable)
+        for btn in (self.btn_prev, self.btn_next):
+            btn.setEnabled(playable and self._nav_enabled)
+        self.btn_stop.setEnabled(playable and self._state != "IDLE")
         self.btn_mode.setEnabled(self._enabled)
         self.progress.setEnabled(playable and has_track)
         # 音量滑块**旁路模式也可用**：拖动 = 顺手启用软件音量（main_window 落地），

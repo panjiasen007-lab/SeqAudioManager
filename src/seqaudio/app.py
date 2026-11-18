@@ -369,6 +369,29 @@ def _uninstall_flow(silent: bool = False, keep_data: bool = True) -> int:
     return 0
 
 
+#: 单实例锁端口（仅回环地址）。双开会各自起播放引擎，两首歌同时出声 ——
+#: 这正是用户反馈"播另一首原来的还在播"的另一半来源（引擎侧防重叠已修，
+#: 这里把"两个程序实例"这条路也堵死）。
+_SINGLE_INSTANCE_PORT = 43157
+
+
+def _acquire_single_instance():
+    """绑定本机回环端口做单实例锁；拿不到说明已有实例在跑，返回 None。"""
+    import socket as _socket
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", _SINGLE_INSTANCE_PORT))
+        sock.listen(1)
+        return sock
+    except OSError:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv
     if "--selftest" in args:
@@ -395,6 +418,20 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging()
     log.info("启动 %s v%s", APP_NAME, __version__)
 
+    # 单实例（PRD FR-SYS-005 简版）：拿到锁才继续；无头参数（selftest/smoke）
+    # 在前面已 return，不受锁影响。弹窗要在 QApplication 之后，所以先建 app。
+    _instance_lock = _acquire_single_instance()
+    if _instance_lock is None:
+        app = create_app(argv)
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.information(
+            None,
+            APP_NAME,
+            "音序管家已经在运行了。\n请在已打开的窗口里操作（两个实例同时播放会叠音）。",
+        )
+        log.info("已有实例在运行，本实例退出")
+        return 0
     app = create_app(argv)
     _install_excepthook(app)
 

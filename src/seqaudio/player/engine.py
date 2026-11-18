@@ -762,6 +762,12 @@ class PlayerEngine:
             self._emit(EVENT_TRACK, item.to_dict())
 
         self._set_state(PlayerState.LOADING)
+        # **防重叠播放（P0）**：直连起播路径（play(track)/open_track）此前不拆旧
+        # 会话就 ``self._output = output`` 覆盖 —— 旧输出流没关、旧解码器还在喂
+        # 旧环，两首歌同时出声（用户实测"播另一首，原来的还在播"）。
+        # 正常切歌走 _switch_to 已拆过，这里再拆一次是幂等空操作。
+        self._fade_out_and_wait()
+        self._teardown_playback()
         try:
             spec = self._build_spec(item, offset_ms)
         except (PlayerError, DecodeError) as exc:

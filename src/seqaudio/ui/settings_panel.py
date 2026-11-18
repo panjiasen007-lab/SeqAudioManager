@@ -515,6 +515,14 @@ class SettingsPanel(QWidget):
         self.restore_session_check.toggled.connect(self._notify)
         card.add_widget(self.restore_session_check)
 
+        self.auto_lyrics_check = QCheckBox("播放时自动匹配歌词（网易云 / QQ / LRCLIB）")
+        self.auto_lyrics_check.setToolTip(
+            "换歌后自动联网抓取歌词（单次文本请求，不上传音频、不写盘）；"
+            "关掉后仍可在歌词栏右键手动匹配"
+        )
+        self.auto_lyrics_check.toggled.connect(self._notify)
+        card.add_widget(self.auto_lyrics_check)
+
         hint = QLabel(
             "播放相关设置会立即生效，不需要重启；参数面板底部的「保存参数」负责落盘。"
         )
@@ -743,6 +751,9 @@ class SettingsPanel(QWidget):
             self.device_combo.setCurrentIndex(index if index >= 0 else 0)
             self.exclusive_check.setChecked(bool(getattr(settings, "playback_exclusive", False)))
             self.exclusive_hint.setVisible(self.exclusive_check.isChecked())
+            self.auto_lyrics_check.setChecked(
+                bool(getattr(settings, "playback_auto_lyrics", True))
+            )
             self.follow_rate_check.setChecked(
                 bool(getattr(settings, "playback_follow_source_rate", True))
             )
@@ -828,6 +839,7 @@ class SettingsPanel(QWidget):
         settings.playback_output_backend = self._current_backend_key()
         settings.playback_device = str(self.device_combo.currentData() or "")
         settings.playback_exclusive = self.exclusive_check.isChecked()
+        settings.playback_auto_lyrics = self.auto_lyrics_check.isChecked()
         settings.playback_follow_source_rate = self.follow_rate_check.isChecked()
         settings.playback_buffer_ms = int(self.buffer_spin.value())
         settings.playback_dsd_pcm_rate = int(

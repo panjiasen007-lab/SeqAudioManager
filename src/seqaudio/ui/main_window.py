@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
         # 播放条 / 面板 → 引擎
         self.player_bar.playRequested.connect(self.player_toggle)
         self.player_bar.pauseRequested.connect(self.player_toggle)
+        self.player_bar.stopRequested.connect(self._on_player_stop)
         self.player_bar.nextRequested.connect(self.player_next)
         self.player_bar.prevRequested.connect(self.player_prev)
         self.player_bar.seekRequested.connect(self.player_bridge.seek)
@@ -404,10 +405,51 @@ class MainWindow(QMainWindow):
         )
 
     def player_toggle(self) -> None:
+        """播放/暂停（空格与播放条共用）。
+
+        v1.6.1 用户反馈的语义：列表为空 → 提示并拒绝；有选中 → 从选中起播；
+        无选中 → 从第一首起播；暂停中 → 恢复。
+        """
         if not self._player_ready():
             self._append_log("WARNING", i18n.tr("play_disabled"))
             return
-        self.player_bridge.toggle()
+        tracks = self.model.tracks()
+        if not tracks:
+            self._append_log("WARNING", i18n.tr("列表没有歌曲，无法播放"))
+            self.status_hint.setText(i18n.tr_text("列表没有歌曲，无法播放"))
+            return
+        from .player.constants import PlayerState
+
+        state = self.player_bridge.engine.state
+        if state is PlayerState.PAUSED:
+            self.player_bridge.play_current()
+            return
+        if state is PlayerState.PLAYING or state is PlayerState.LOADING:
+            self.player_bridge.pause()
+            return
+        selected = self._selected_tracks()
+        target = selected[0] if selected else tracks[0]
+        self._play_track(target)
+
+    def _on_player_stop(self) -> None:
+        """停止按钮：立刻停播并清除播放状态（用户反馈 4）。"""
+        self._force_stop_player()
+
+    def _force_stop_player(self) -> None:
+        """清空/移除/删除列表联动：立刻停播 + 清除播放标记。
+
+        不停的话旧曲会一直放下去，还会跟下一次起播叠在一起 —— 引擎侧已修
+        「直连起播不拆旧会话」的根因，这里把 UI 的状态也一并清干净。
+        """
+        try:
+            from .player.constants import PlayerState
+
+            if self.player_bridge.engine.state is not PlayerState.IDLE:
+                self.player_bridge.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("强制停止失败", exc_info=True)
+        self.player_bar.set_state("IDLE")
+        self.model.set_playing(None)
 
     def player_next(self) -> None:
         if self._player_ready():
@@ -612,8 +654,9 @@ class MainWindow(QMainWindow):
     # ---- 队列面板 ----
 
     def _refresh_queue_panel(self) -> None:
-        """队列并入主表格后，这里只负责刷新"正在播放哪行"的表格标记。"""
+        """队列并入主表格后：同步播放行标记 + 按列表内容灰置上/下一首。"""
         self._sync_playing_row(None)
+        self.player_bar.set_nav_enabled(bool(self.model.tracks()))
 
     def _sync_playing_row(self, data) -> None:
         """把正在播放的曲目映射到主表格行并加粗标记。"""
@@ -1710,6 +1753,10 @@ class MainWindow(QMainWindow):
             f"从列表移除 {len(rows)} 项？（不删除磁盘文件，但会丢失这些项的匹配/编辑状态，需重新导入）",
         ) != QMessageBox.Yes:
             return
+        # 移除的是正在播放的曲目时：先停播清状态，否则旧曲继续放且队列错位
+        playing_row = self.model.playing_row()
+        if playing_row in rows:
+            self._force_stop_player()
         self.model.remove_rows(rows)
         self._refresh_stats()
 
@@ -1740,10 +1787,14 @@ class MainWindow(QMainWindow):
             else:
                 deletable.append(t)
         if blocked:
+            # v1.6.1 用户反馈：删除播放中的歌曲 → 立即停止播放后允许删除，
+            # 不再跳过（旧行为会让人以为按钮坏了）
+            self._force_stop_player()
+            deletable.extend(blocked)
             self._append_log(
-                "WARNING",
+                "INFO",
                 i18n.tr_format(
-                    "{count} 首正在播放，已跳过删除", count=len(blocked)
+                    "{count} 首正在播放，已停止播放后一并删除", count=len(blocked)
                 ),
             )
         if not deletable:
@@ -1778,6 +1829,8 @@ class MainWindow(QMainWindow):
         if not self.model.tracks():
             return
         if QMessageBox.question(self, "确认", "清空当前列表？（不会删除磁盘文件）") == QMessageBox.Yes:
+            # 列表被清空 = 队列没了：必须立刻停播清状态，否则旧曲继续放
+            self._force_stop_player()
             self.model.clear()
             self._refresh_stats()
 
