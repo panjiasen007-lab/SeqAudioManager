@@ -57,6 +57,11 @@ def main() -> int:
     )
     window = MainWindow(settings)
     window.show()
+    app.processEvents()
+    # 启动即可见（TC-GUI-01）；之后 app.exec() 结束会收起窗口，末段检查前会重新 show
+    if not window.player_bar.isVisible():
+        print("✗ 启动后播放条不可见")
+        ok = False
 
     from seqaudio.ui import fonts, theme
 
@@ -69,8 +74,14 @@ def main() -> int:
     if "LXGW WenKai" not in theme.QSS:
         print("✗ QSS 未使用所选字体")
         ok = False
-    if window.right_tabs.count() != 2 or window.settings_panel.tabs.count() != 4:
-        print("✗ 右侧/参数分页数量不对")
+    # T04 后：右侧 = 详情 / 队列 / 歌词 / 参数；参数面板 = 匹配 / 歌词 / 写入 / 外观 / 播放
+    if window.right_tabs.count() != 4 or window.settings_panel.tabs.count() != 5:
+        print("✗ 右侧/参数分页数量不对：",
+              window.right_tabs.count(), window.settings_panel.tabs.count())
+        ok = False
+    tab_titles = [window.right_tabs.tabText(i) for i in range(window.right_tabs.count())]
+    if tab_titles != ["详情", "队列", "歌词", "参数"]:
+        print("✗ 右侧页签顺序不对：", tab_titles)
         ok = False
     if len(theme.THEMES) < 10:
         print("✗ 主题数量不足：", len(theme.THEMES))
@@ -474,6 +485,99 @@ def main() -> int:
     if window._stat_cards["suspect"]._value != suspect_mid:
         print("✗ 鉴定完成后统计卡未保持一致")
         ok = False
+
+    # ---- T04：播放界面接线（播放条 / 双击 / 信号路径 / 参数页 roundtrip）----
+    # app.exec() 退出后离屏窗口会被收起，检查前重新显示一次（不影响真实桌面行为）
+    window.show()
+    app.processEvents()
+    if not window.player_bar.isVisible():
+        print("✗ 播放条未显示")
+        ok = False
+    if not (48 <= window.player_bar.height() <= 64):
+        print("✗ 播放条高度不在 56±8 px：", window.player_bar.height())
+        ok = False
+    if window.player_bar.btn_play.isEnabled() is False and settings.playback_enabled:
+        print("✗ 播放按钮在可用状态下被禁用")
+        ok = False
+
+    # 双击 → 起播：真实设备可能打不开（无声音频设备/被占用），但**绝不能抛异常**
+    window.table.selectRow(0)
+    app.processEvents()
+    try:
+        window.play_current_row()
+    except Exception as exc:  # noqa: BLE001
+        print("✗ 双击起播抛异常：", exc)
+        ok = False
+    app.processEvents()
+    if str(window.player_bridge.state()) not in ("LOADING", "PLAYING", "ERROR", "IDLE"):
+        print("✗ 双击后状态异常：", window.player_bridge.state())
+        ok = False
+    window.player_bridge.stop()
+
+    # 信号路径面板能吃下真实快照并渲染 9 级
+    snapshot = window.player_bridge.snapshot()
+    window.player_signals.update_from(snapshot)
+    if window.player_signals.row_count() != 9:
+        print("✗ 信号路径面板级数不是 9：", window.player_signals.row_count())
+        ok = False
+    if not window.player_signals.summary_text():
+        print("✗ 信号路径面板总述为空")
+        ok = False
+    if "bit-perfect" in window.player_signals.summary_text().lower():
+        print("✗ 信号路径面板出现禁用措辞（R2）")
+        ok = False
+
+    # 参数面板「播放」页：改值 → apply_to → 重新 load_from 往返一致
+    playback_card = window.settings_panel
+    keep = {
+        "playback_output_backend": settings.playback_output_backend,
+        "playback_buffer_ms": settings.playback_buffer_ms,
+        "playback_exclusive": settings.playback_exclusive,
+        "playback_follow_source_rate": settings.playback_follow_source_rate,
+        "playback_dsd_pcm_rate": settings.playback_dsd_pcm_rate,
+        "playback_int_pipeline": settings.playback_int_pipeline,
+        "playback_restore_session": settings.playback_restore_session,
+        "playback_device": settings.playback_device,
+    }
+    playback_card.backend_combo.setCurrentIndex(
+        playback_card.backend_combo.findData("wasapi")
+    )
+    playback_card.buffer_spin.setValue(120)
+    playback_card.exclusive_check.setChecked(True)
+    playback_card.follow_rate_check.setChecked(False)
+    playback_card.dsd_rate_combo.setCurrentIndex(
+        playback_card.dsd_rate_combo.findData(88200)
+    )
+    playback_card.int_pipeline_check.setChecked(True)
+    playback_card.restore_session_check.setChecked(False)
+    playback_card.apply_to(settings)
+    if settings.playback_output_backend != "wasapi":
+        print("✗ 播放页后端未写入设置：", settings.playback_output_backend)
+        ok = False
+    if settings.playback_buffer_ms != 120:
+        print("✗ 播放页缓冲大小未写入设置：", settings.playback_buffer_ms)
+        ok = False
+    if settings.playback_dsd_pcm_rate != 88200:
+        print("✗ 播放页 DSD 采样率未写入设置：", settings.playback_dsd_pcm_rate)
+        ok = False
+    if not settings.playback_exclusive or settings.playback_follow_source_rate:
+        print("✗ 播放页复选框未写入设置")
+        ok = False
+    playback_card.load_from(settings)
+    if playback_card.backend_combo.currentData() != "wasapi":
+        print("✗ 播放页后端 roundtrip 失败：", playback_card.backend_combo.currentData())
+        ok = False
+    if playback_card.buffer_spin.value() != 120:
+        print("✗ 播放页缓冲 roundtrip 失败：", playback_card.buffer_spin.value())
+        ok = False
+    if playback_card.backend_combo.count() != 4:
+        print("✗ 后端下拉不是 4 项：", playback_card.backend_combo.count())
+        ok = False
+    # 还原，避免污染真实 config.json 与后续用例
+    for key, value in keep.items():
+        setattr(settings, key, value)
+    playback_card.load_from(settings)
+    playback_card.mark_saved()
 
     window.close()
     shutil.rmtree(tmp, ignore_errors=True)

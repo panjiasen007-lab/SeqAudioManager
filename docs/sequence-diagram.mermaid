@@ -1,0 +1,88 @@
+%% v1.6 播放能力 · 时序图（对应 docs/1.6-架构设计.md 第四节）
+%% 四段：起播 / 切歌 / seek / 采样率跟随与回退
+
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant MW as MainWindow
+    participant BR as PlayerBridge
+    participant EN as PlayerEngine
+    participant DE as 解码线程
+    participant RB as PcmRingBuffer
+    participant AO as AudioOutput
+    participant CB as PortAudio 回调
+
+    rect rgb(238, 245, 255)
+    Note over U,CB: ① 起播（冷启动 → 出声）
+    U->>MW: 双击表格行
+    MW->>BR: play_item(track, start_ms=0)
+    BR->>EN: open_track(track, autoplay=True)
+    EN->>EN: state = LOADING（emit state）
+    EN->>DE: 投递 OpenCmd(DecodeSpec)
+    DE->>DE: probe_codec(path) → ("ffmpeg 7.1","flac")
+    DE->>DE: DecodeSpec.from_track（CUE 取 start_ms/end_ms）
+    DE->>DE: 启动 ffmpeg 子进程（原始 PCM 到 stdout）
+    DE->>RB: write(block)（预填 2 块）
+    DE-->>EN: RingPrefilled(frames, spec)
+    EN->>AO: open(OutputConfig)（WASAPI / 采样率跟随）
+    AO->>AO: WasapiSettings(exclusive=…)，RawOutputStream
+    AO->>CB: start()
+    EN->>EN: state = PLAYING（emit state）
+    EN-->>BR: emit signal path + track + duration
+    BR-->>MW: playerSignalPath / playerTrack / playerStateChanged
+    CB->>RB: read_into(out)
+    CB->>CB: 增益 → EQ → 斜坡（就地）
+    CB-->>EN: _frames_out 单调递增
+    end
+
+    rect rgb(240, 255, 244)
+    Note over EN,BR: ② 切歌（同规格无缝续写 / 跨规格重开流）
+    DE-->>EN: DecoderEof
+    EN->>EN: 取下一项 next(auto_advance=True)
+    alt 同采样率 / 同位深 / 同声道
+        EN->>CB: arm_ramp(out)（5 ms）
+        EN->>DE: 投递 OpenCmd(下一首 spec)，复用同一 ring
+        DE->>DE: 新 ffmpeg 子进程
+        DE->>RB: 预填到 ring（不 clear，续写）
+        EN->>CB: arm_ramp(in)
+        EN-->>BR: track 变更 + counters.last_gap_ms
+    else 规格不同
+        EN->>CB: arm_ramp(out)
+        EN->>AO: stop() + close()
+        EN->>DE: StopCmd（终止当前 ffmpeg）
+        EN->>DE: OpenCmd(下一首 spec)
+        DE->>DE: 新 ring（按新 dtype/channels 重新预分配）
+        EN->>AO: open(新 OutputConfig) + start()
+        EN->>CB: arm_ramp(in)
+        EN-->>BR: gap 事件（实测间隙回填）
+    end
+
+    rect rgb(255, 249, 235)
+    Note over BR,DE: ③ seek
+    BR->>EN: seek(ms)
+    EN->>EN: 位置立即乐观更新（UI 不跳回）
+    EN->>CB: arm_ramp(down, 3 ms) + paused_flag=True（写静音）
+    EN->>DE: StopCmd → terminate ffmpeg
+    EN->>DE: OpenCmd(spec, start_ms=ms)
+    DE->>DE: ffmpeg -ss ms -accurate_seek -i … -t …
+    DE->>DE: 预填 2 块
+    DE-->>EN: RingPrefilled
+    EN->>EN: _seek_base_ms = ms；_frames_out = 0
+    EN->>CB: paused_flag=False + arm_ramp(up)
+    EN-->>BR: position(ms) 校正
+    end
+
+    rect rgb(250, 240, 250)
+    Note over EN,DE: ④ 采样率跟随与回退
+    EN->>EN: devices.resolve_device(name, backend)
+    EN->>EN: pick_rate(device, want=源采样率)
+    alt 设备支持该采样率
+        EN->>AO: open(源采样率)
+    else 不支持（回退链：设备默认率 → 48000 → 44100）
+        EN->>AO: open(回退采样率)
+        EN->>DE: OpenCmd(spec, sample_rate=回退率)（引擎侧重采样）
+        EN->>EN: counters.resample_events += 1
+        EN->>EN: signal.resample = CHANGED，signal.device = CHANGED
+        EN-->>BR: WARNING 日志 + 面板标红 + 建议采样率提示
+    end
+    end

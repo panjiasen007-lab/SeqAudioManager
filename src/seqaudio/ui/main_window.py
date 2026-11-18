@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -62,6 +63,12 @@ from .dialogs import (
 )
 from .health import HealthDialog
 from .inspector import InspectorPanel
+from .player_bar import PlayerBar, format_mmss
+from .player_bridge import PlayerBridge
+from .player_eq import PlayerEqPanel
+from .player_lyrics import PlayerLyricsPanel
+from .player_queue import PlayerQueuePanel
+from .player_signals import PlayerSignalsPanel
 from .settings_panel import SettingsPanel
 from .track_model import (
     COLUMNS,
@@ -188,9 +195,19 @@ class MainWindow(QMainWindow):
         self.inspector.editRequested.connect(self.edit_selected)
         self.inspector.spectrumRequested.connect(self.show_spectrum)
 
+        # 播放相关控件先建好，再交给页签与布局（顺序反了会拿不到引用）
+        self.player_bar = PlayerBar()
+        self.player_queue = PlayerQueuePanel()
+        self.player_lyrics = PlayerLyricsPanel(self.settings)
+        self.player_eq = PlayerEqPanel()
+        self.player_signals = PlayerSignalsPanel()
+
         self.right_tabs = QTabWidget()
         self.right_tabs.setDocumentMode(True)
         self.right_tabs.addTab(self.inspector, "详情")
+        # 队列/歌词插在「参数」之前：架构 6.1 的页签顺序，参数页随之后移
+        self.right_tabs.addTab(self.player_queue, "队列")
+        self.right_tabs.addTab(self.player_lyrics, "歌词")
         self.right_tabs.addTab(self.settings_panel, "参数")
         self.right_tabs.setCurrentWidget(self.inspector)
 
@@ -200,6 +217,13 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([960, 460])
         body_layout.addWidget(splitter, 1)
+
+        # 信号路径面板：默认折叠（settings.playback_signal_panel_visible）
+        self.player_signals.setVisible(
+            bool(getattr(self.settings, "playback_signal_panel_visible", False))
+        )
+        body_layout.addWidget(self.player_signals)
+        body_layout.addWidget(self.player_bar)
 
         body_layout.addWidget(self._build_log_area())
 
@@ -217,6 +241,420 @@ class MainWindow(QMainWindow):
         self.mode_label = QLabel("")
         self.mode_label.setObjectName("hint")
         status.addPermanentWidget(self.mode_label)
+
+        self._setup_player()
+
+    # ------------------------------------------------------------ 播放
+
+    def _setup_player(self) -> None:
+        """建桥、接线、按设置初始化、恢复会话（**不自动播放**）。
+
+        ``PlayerBridge`` 是 UI 里唯一 import ``seqaudio.player`` 的类，其余面板
+        全部只认信号与方法 —— 依赖方向保持单向（架构 2.3）。
+        """
+        self.player_bridge = PlayerBridge(self.settings, self)
+        self.eq_dialog: Optional[QDialog] = None
+
+        # 引擎事件 → 界面
+        self.player_bridge.stateChanged.connect(self._on_player_state)
+        self.player_bridge.trackChanged.connect(self._on_player_track)
+        self.player_bridge.positionChanged.connect(self._on_player_position)
+        self.player_bridge.durationChanged.connect(self._on_player_duration)
+        self.player_bridge.errorRaised.connect(self._on_player_error)
+        self.player_bridge.signalPathChanged.connect(self._on_player_signal)
+        self.player_bridge.queueChanged.connect(self._on_player_queue)
+        self.player_bridge.gapDetected.connect(self._on_player_gap)
+        self.player_bridge.volumeChanged.connect(self.player_bar.set_volume)
+        self.player_bridge.busyChanged.connect(self._on_player_busy)
+
+        # 播放条 / 面板 → 引擎
+        self.player_bar.playRequested.connect(self.player_toggle)
+        self.player_bar.pauseRequested.connect(self.player_toggle)
+        self.player_bar.nextRequested.connect(self.player_next)
+        self.player_bar.prevRequested.connect(self.player_prev)
+        self.player_bar.seekRequested.connect(self.player_bridge.seek)
+        self.player_bar.volumeChanged.connect(self._on_volume_dragged)
+        self.player_bar.modeChanged.connect(self._on_mode_changed)
+        self.player_bar.collapseToggled.connect(self._on_bar_collapsed)
+        self.player_bar.signalPanelToggled.connect(self.set_signal_panel_visible)
+
+        self.player_queue.trackActivated.connect(self._on_queue_activated)
+        self.player_queue.removeRequested.connect(self._on_queue_remove)
+        self.player_queue.clearRequested.connect(self._on_queue_clear)
+        self.player_queue.playNextRequested.connect(self._on_queue_play_next)
+        self.player_queue.locateRequested.connect(self._on_queue_locate)
+
+        self.player_eq.gainsChanged.connect(self._on_eq_gains)
+        self.player_eq.enabledChanged.connect(self._on_eq_enabled)
+
+        # 初始状态（设置里的值，而不是硬编码默认）
+        self.player_bar.set_volume(float(getattr(self.settings, "playback_volume_db", 0.0) or 0.0))
+        self.player_bar.set_volume_mode(
+            str(getattr(self.settings, "playback_volume_mode", "bypass") or "bypass")
+        )
+        self.player_bar.set_mode(str(getattr(self.settings, "playback_mode", "sequential")))
+        self.player_signals.update_from({"signal_path": self.player_bridge.signal_snapshot()})
+        self.player_eq.set_gains(
+            list(getattr(self.settings, "playback_eq_gains", []) or [0.0] * 10)
+        )
+        self.player_eq.set_enabled(bool(getattr(self.settings, "playback_eq_enabled", False)))
+        self.settings_panel.set_output_devices(self.player_bridge.list_output_devices())
+
+        collapsed = bool(getattr(self.settings, "playback_bar_collapsed", False))
+        self.player_bar.set_collapsed(collapsed)
+        self.player_bar.setVisible(bool(getattr(self.settings, "playback_bar_visible", True)))
+
+        self._restore_playback_session()
+        self._attach_player_extras()
+        self.player_bridge.start()
+
+    def _restore_playback_session(self) -> None:
+        """启动恢复：只回填队列与位置，**不起播**（不打扰用户）。"""
+        if not bool(getattr(self.settings, "playback_restore_session", True)):
+            self._append_log("INFO", "已关闭「恢复上次播放」，本次从空队列开始")
+            return
+        report = self.player_bridge.restore_session(
+            restore_position=bool(getattr(self.settings, "playback_restore_position", True))
+        )
+        if not report.get("restored"):
+            return
+        self._refresh_queue_panel()
+        position = int(report.get("position_ms") or 0)
+        self._append_log(
+            "INFO",
+            i18n.tr_format(
+                "已恢复上次队列：{count} 首，第 {index} 首",
+                count=report.get("count", 0),
+                index=int(report.get("index", 0)) + 1,
+            ),
+        )
+        if position > 0:
+            self._append_log(
+                "INFO",
+                i18n.tr_format(
+                    "已恢复到 {value}，按播放从该位置继续", value=format_mmss(position)
+                ),
+            )
+
+    # ---- 引擎事件槽 ----
+
+    def _on_player_state(self, state: str) -> None:
+        self.player_bar.set_state(state)
+        self.brand_bar.set_status(
+            i18n.tr(f"play_state_{str(state).lower()}"),
+            theme.CYAN if str(state) == "PLAYING" else theme.FG_DIM,
+        )
+
+    def _on_player_track(self, track) -> None:
+        data = track if isinstance(track, dict) else None
+        if data:
+            data = dict(data)
+            data["cover"] = self._cover_for(data.get("path"))
+        self.player_bar.set_track(data)
+        self.player_lyrics.set_track(data)
+        self.player_bridge.poll_now()
+        self._sync_queue_current()
+
+    def _on_player_position(self, position: int) -> None:
+        snapshot = self.player_bridge.last_snapshot()
+        total = int(snapshot.get("duration_ms") or 0)
+        self.player_bar.set_position(int(position), total)
+        self.player_lyrics.set_position(int(position))
+
+    def _on_player_duration(self, duration: int) -> None:
+        self.player_bar.set_position(
+            int(self.player_bar.progress.value() if self.player_bar.progress.maximum() else 0),
+            int(duration),
+        )
+
+    def _on_player_error(self, message: str) -> None:
+        text = str(message or "").strip()
+        if text:
+            self._append_log("ERROR", text)
+            self.status_hint.setText(text)
+
+    def _on_player_signal(self, _payload) -> None:
+        self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
+
+    def _on_player_queue(self, _length: int) -> None:
+        self._refresh_queue_panel()
+
+    def _on_player_busy(self, busy: bool) -> None:
+        self.player_bar.set_playback_enabled(not bool(busy))
+
+    def _on_player_gap(self, gap_ms: float) -> None:
+        """切歌/续播间隙（T05 会在这里做缝隙回填提示，本期只记 DEBUG）。"""
+        log.debug("播放间隙 %.1f ms", float(gap_ms or 0.0))
+
+    def _attach_player_extras(self) -> None:
+        """弹性扩展钩子（T05 挂迷你条/托盘），T04 保持空实现。"""
+        return None
+
+    def _apply_playback_i18n(self) -> None:
+        """语言切换后刷新播放区的**动态**文案（静态文案由 localize_tree 负责）。"""
+        self.player_bar.set_state(self.player_bar.current_state())
+        self.player_bar.set_mode(self.player_bar.current_mode())
+        self.player_bar.set_volume(self.player_bar.volume_db())
+        self.player_queue.refresh_texts()
+        self.player_lyrics.refresh_offset_label()
+        self.player_eq.refresh_texts()
+        self.player_signals.refresh_texts()
+        self.right_tabs.setTabText(1, i18n.tr_text("队列"))
+        self.right_tabs.setTabText(2, i18n.tr_text("歌词"))
+        self.right_tabs.setTabText(3, i18n.tr_text("参数"))
+
+    # ---- 播放命令 ----
+
+    def _player_ready(self) -> bool:
+        """播放功能是否可用（总开关 + 桥是否在）。"""
+        return self.player_bridge is not None and bool(
+            getattr(self.settings, "playback_enabled", True)
+        )
+
+    def player_toggle(self) -> None:
+        if not self._player_ready():
+            self._append_log("WARNING", i18n.tr("play_disabled"))
+            return
+        self.player_bridge.toggle()
+
+    def player_next(self) -> None:
+        if self._player_ready():
+            self.player_bridge.next()
+
+    def player_prev(self) -> None:
+        if self._player_ready():
+            self.player_bridge.prev()
+
+    def player_volume_step(self, delta_db: float) -> None:
+        """音量微调（Ctrl+↑ / Ctrl+↓，步长 1 dB）。"""
+        current = float(getattr(self.settings, "playback_volume_db", 0.0) or 0.0)
+        target = max(-60.0, min(0.0, current + float(delta_db)))
+        self.settings.playback_volume_db = target
+        self.player_bar.set_volume(target)
+        value = self.player_bridge.set_volume(target)
+        self.status_hint.setText(
+            i18n.tr_format("音量 {value}", value=f"{value:+.1f} dB")
+        )
+
+    def player_mute(self) -> None:
+        """静音/取消静音：在 0 dB 与 -60 dB 之间切换。"""
+        current = float(getattr(self.settings, "playback_volume_db", 0.0) or 0.0)
+        target = 0.0 if current <= -59.9 else -60.0
+        self.settings.playback_volume_db = target
+        self.player_bar.set_volume(target)
+        self.player_bridge.set_volume(target)
+        self._append_log(
+            "INFO",
+            i18n.tr_text("已静音" if target <= -59.9 else "已取消静音"),
+        )
+
+    def play_current_row(self) -> None:
+        """双击表格行 → 起播该行（CUE 子轨自动带 ``start_ms``）。"""
+        rows = self._selected_rows()
+        if not rows:
+            index = self.table.currentIndex()
+            if not index.isValid():
+                return
+            rows = [self.proxy.mapToSource(index).row()]
+        track = self.model.track_at(rows[0])
+        if track is None:
+            return
+        self._play_track(track)
+
+    def _play_track(self, track: Track) -> bool:
+        """起播一首（从主表格双击/右键来）。"""
+        if not self._player_ready():
+            self._append_log("WARNING", i18n.tr("播放功能已关闭"))
+            return False
+        if bool(getattr(self.player_bridge.engine, "busy", False)):
+            self._append_log("WARNING", "批处理进行中，暂不能开始播放")
+            return False
+        # CUE 子轨的 start_ms 由 QueueItem.from_track 从 cue_track_entry 取，
+        # 这里显式传一次偏移，保证「整轨文件 + 子轨起点」不会从 0 开始
+        start_ms = 0
+        entry = track.cue_track_entry
+        if entry is not None:
+            start_ms = max(0, int(getattr(entry, "start_ms", 0) or 0))
+        ok = self.player_bridge.play_track(track, start_ms=start_ms)
+        if ok:
+            self._append_log(
+                "INFO",
+                i18n.tr_format("起播：{name}", name=track.path.name),
+            )
+        return ok
+
+    def add_selected_to_queue(self, *, play_next: bool = False) -> None:
+        """右键「加入队列 / 下一首播放」。"""
+        tracks = self._selected_tracks()
+        if not tracks:
+            return
+        if play_next and len(tracks) == 1:
+            self.player_bridge.play_next(tracks[0])
+        else:
+            self.player_bridge.enqueue(tracks)
+        self._refresh_queue_panel()
+        self._append_log(
+            "INFO",
+            i18n.tr_format(
+                "{count} 首已{action}",
+                count=len(tracks),
+                action=i18n.tr_text("插到下一首" if play_next else "加入队列"),
+            ),
+        )
+
+    def replace_queue_with_tracks(self) -> None:
+        """用主列表当前内容整队替换（不改磁盘、不影响已编辑标签）。"""
+        tracks = self.model.tracks()
+        if not tracks:
+            self._append_log("WARNING", i18n.tr("列表为空，无可加入队列的曲目"))
+            return
+        self.player_bridge.enqueue(tracks, replace=True)
+        self._refresh_queue_panel()
+        self._append_log(
+            "INFO",
+            i18n.tr_format("队列已替换为当前列表：{count} 首", count=len(tracks)),
+        )
+
+    # ---- 播放条 / 面板回调 ----
+
+    def _on_volume_dragged(self, db: float) -> None:
+        self.settings.playback_volume_db = float(db)
+        self.player_bridge.set_volume(float(db))
+
+    def _on_mode_changed(self, mode: str) -> None:
+        self.settings.playback_mode = str(mode)
+        applied = self.player_bridge.set_mode(mode)
+        self.player_bar.set_mode(applied)
+        self.status_hint.setText(
+            i18n.tr(f"pl_mode_{str(applied)}")
+        )
+        self._refresh_queue_panel()
+
+    def _set_mode_from_menu(self, key: str) -> None:
+        """菜单里选播放模式：同步按钮、设置与引擎。"""
+        self.player_bar.set_mode(key)
+        self._on_mode_changed(key)
+        if getattr(self, "_mode_menu", None) is not None:
+            for action in self._mode_menu.actions():
+                data = action.text()
+                action.setChecked(data == i18n.tr(f"pl_mode_{key}"))
+
+    def _on_bar_collapsed(self, collapsed: bool) -> None:
+        # 折叠状态存 Settings（会话内生效；Settings 暂无专属字段，见 T04 回报）
+        setattr(self.settings, "playback_bar_collapsed", bool(collapsed))
+        self.settings.playback_bar_visible = True
+
+    def set_signal_panel_visible(self, visible: bool) -> None:
+        """展开/收起信号路径面板（播放条开关与菜单共用）。"""
+        self.player_signals.setVisible(bool(visible))
+        self.settings.playback_signal_panel_visible = bool(visible)
+        self.player_bar.set_signal_panel_visible(bool(visible))
+        if visible:
+            self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
+
+    def toggle_signal_panel(self) -> None:
+        self.set_signal_panel_visible(not self.player_signals.isVisible())
+
+    def _on_eq_gains(self, gains) -> None:
+        values = [float(value) for value in (gains or [])]
+        self.settings.playback_eq_gains = values
+        self.player_bridge.set_eq_gains(values)
+
+    def _on_eq_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self.settings.playback_eq_enabled = enabled
+        self.player_bridge.set_eq_enabled(enabled)
+        if enabled and bool(getattr(self.settings, "playback_dsp_bypass", True)):
+            # 打开 EQ 就必须解开全局直通，否则「开了没效果」比不给开更糟
+            self.settings.playback_dsp_bypass = False
+            self.player_bridge.set_bypass(False)
+            self._append_log("INFO", "启用均衡器：已关闭全局 DSP 直通")
+        self._append_log(
+            "INFO",
+            i18n.tr_text("均衡器已启用" if enabled else "均衡器已旁路"),
+        )
+
+    def show_eq_panel(self) -> None:
+        """EQ 面板（非模态）：独立窗口，不占主布局空间。"""
+        if self.eq_dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(i18n.tr_text("均衡器"))
+            dialog.resize(560, 380)
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.player_eq)
+            self.eq_dialog = dialog
+        self.eq_dialog.show()
+        self.eq_dialog.raise_()
+        self.eq_dialog.activateWindow()
+
+    def toggle_eq_panel(self) -> None:
+        if self.eq_dialog is not None and self.eq_dialog.isVisible():
+            self.eq_dialog.hide()
+            return
+        self.show_eq_panel()
+
+    # ---- 队列面板 ----
+
+    def _refresh_queue_panel(self) -> None:
+        items = self.player_bridge.queue_items()
+        self.player_queue.set_items(items)
+        self._sync_queue_current()
+
+    def _sync_queue_current(self) -> None:
+        self.player_queue.set_current(self.player_bridge.queue_index())
+
+    def _on_queue_activated(self, index: int) -> None:
+        if not self._player_ready():
+            self._append_log("WARNING", i18n.tr("播放功能已关闭"))
+            return
+        if not self.player_bridge.play_index(int(index)):
+            self._append_log("WARNING", i18n.tr("该项已不可用，已跳过"))
+
+    def _on_queue_remove(self, index: int) -> None:
+        self.player_bridge.remove_index(int(index))
+        self._refresh_queue_panel()
+
+    def _on_queue_clear(self) -> None:
+        self.player_bridge.clear_queue()
+        self._refresh_queue_panel()
+        self._append_log("INFO", i18n.tr("队列已清空"))
+
+    def _on_queue_play_next(self, index: int) -> None:
+        items = self.player_queue.items()
+        if not (0 <= int(index) < len(items)):
+            return
+        # 直接传字典：队列项是 QueueItem 的只读投影，桥内部负责还原
+        self.player_bridge.play_next(items[int(index)])
+        self._refresh_queue_panel()
+
+    def _on_queue_locate(self, index: int) -> None:
+        """「在列表中定位」：按路径（+CUE 轨号）在主表格里选中对应行。"""
+        items = self.player_queue.items()
+        if not (0 <= int(index) < len(items)):
+            return
+        target = items[int(index)]
+        path = str(target.get("path") or "")
+        cue = target.get("cue_track")
+        for row, track in enumerate(self.model.tracks()):
+            if str(track.path) != path:
+                continue
+            if cue is not None and track.cue_track != int(cue):
+                continue
+            proxy_index = self.proxy.mapFromSource(self.model.index(row, 0))
+            if proxy_index.isValid():
+                self.table.selectRow(proxy_index.row())
+                self.table.scrollTo(proxy_index)
+            return
+
+    def _cover_for(self, path) -> Optional[bytes]:
+        """从主列表里找到同一路径的 Track，取它的封面字节（没有就返回 None）。"""
+        if not path:
+            return None
+        for track in self.model.tracks():
+            if str(track.path) == str(path):
+                return track.working.cover or track.original.cover
+        return None
 
     def _build_action_bar(self) -> QWidget:
         bar = QWidget()
@@ -289,6 +727,32 @@ class MainWindow(QMainWindow):
 
     def _build_more_menu(self) -> QMenu:
         menu = QMenu(self)
+
+        # ---- 播放子菜单（R8：不新增工具栏按钮，入口只在这里与播放条）----
+        self.play_menu = menu.addMenu(i18n.tr("play_play"))
+        self.play_menu.addAction(i18n.tr("play_play"), self.player_toggle)
+        self.play_menu.addAction(i18n.tr("play_prev"), self.player_prev)
+        self.play_menu.addAction(i18n.tr("play_next"), self.player_next)
+        self.play_menu.addSeparator()
+        self.play_menu.addAction(
+            i18n.tr_format("音量 +{value}", value="1 dB"),
+            lambda: self.player_volume_step(1.0),
+        )
+        self.play_menu.addAction(
+            i18n.tr_format("音量 -{value}", value="1 dB"),
+            lambda: self.player_volume_step(-1.0),
+        )
+        self.play_menu.addAction(i18n.tr("play_mute"), self.player_mute)
+        self.play_menu.addSeparator()
+        self._mode_menu = self.play_menu.addMenu(i18n.tr("pl_mode_sequential"))
+        for key in ("sequential", "repeat_one", "repeat_all", "shuffle"):
+            action = self._mode_menu.addAction(i18n.tr(f"pl_mode_{key}"))
+            action.setCheckable(True)
+            action.setChecked(key == str(getattr(self.settings, "playback_mode", "sequential")))
+            action.triggered.connect(lambda _checked=False, k=key: self._set_mode_from_menu(k))
+        self.play_menu.addSeparator()
+        self.play_menu.addAction(i18n.tr("eq_title"), self.toggle_eq_panel)
+        self.play_menu.addAction(i18n.tr("sig_panel"), self.toggle_signal_panel)
 
         self.action_rename = menu.addAction("重命名预览…", self.rename_preview)
         self.action_report = menu.addAction("导出处理报表…", self.export_report)
@@ -527,7 +991,8 @@ class MainWindow(QMainWindow):
             self.table.sortByColumn(self.settings.sort_column, order)
         self.table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.horizontalHeader().customContextMenuRequested.connect(self._header_menu)
-        self.table.doubleClicked.connect(lambda _: self.edit_selected())
+        # FR-UI-001：双击 = 起播（编辑标签迁移到 Ctrl+E 与右键首项）
+        self.table.doubleClicked.connect(lambda _index: self.play_current_row())
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
@@ -543,6 +1008,19 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):  # noqa: N802
         if obj is self.table.viewport() and event.type() == QEvent.Resize:
             self.empty_state.setGeometry(self.table.viewport().rect())
+        # 空格 = 播放/暂停。走应用级过滤器是因为 QTableView 会把空格当成
+        # 「切换选中」，QShortcut 又抢不过输入框 —— 只有在这里判断焦点控件身份
+        # 才能做到「表格里按空格播歌、搜索框里按空格打空格」。
+        if (
+            event.type() == QEvent.KeyPress
+            and getattr(self, "player_bridge", None) is not None
+            and event.key() == Qt.Key_Space
+            and event.modifiers() == Qt.NoModifier
+            and self.isActiveWindow()
+            and self._space_should_play(QApplication.focusWidget())
+        ):
+            self.player_toggle()
+            return True
         return super().eventFilter(obj, event)
 
     def _build_log_area(self) -> QWidget:
@@ -592,20 +1070,68 @@ class MainWindow(QMainWindow):
         undo.setContext(Qt.WidgetWithChildrenShortcut)
         undo.activated.connect(self.undo_last_tag_edit)
         QShortcut(QKeySequence("Ctrl+Return"), self, self.run_auto)
+        # Ctrl+E 保持「编辑标签」（双击语义迁移后的替代入口，TC-GUI-05）；
+        # EQ 面板改用 Ctrl+Shift+E，避免抢掉老用户的手指记忆
         QShortcut(QKeySequence("Ctrl+E"), self, self.edit_selected)
+        QShortcut(QKeySequence("Ctrl+Shift+E"), self, self.toggle_eq_panel)
         QShortcut(QKeySequence("Ctrl+K"), self, self.show_command_palette)
         QShortcut(QKeySequence("Ctrl+P"), self, self.toggle_settings_panel)
         QShortcut(QKeySequence("Ctrl+S"), self, self.settings_panel.save)
         QShortcut(QKeySequence("Ctrl+Shift+D"), self, self.run_cleanup)
         QShortcut(QKeySequence("F1"), self, self.show_about)
+        # 播放快捷键（空格在 eventFilter 里处理，避免抢掉输入框的空格）
+        QShortcut(QKeySequence("Ctrl+Left"), self, self.player_prev)
+        QShortcut(QKeySequence("Ctrl+Right"), self, self.player_next)
+        QShortcut(QKeySequence("Ctrl+Up"), self, lambda: self.player_volume_step(1.0))
+        QShortcut(QKeySequence("Ctrl+Down"), self, lambda: self.player_volume_step(-1.0))
+        QShortcut(QKeySequence("Ctrl+L"), self, self.show_lyrics_tab)
+        # 空格是全局键，需要应用级过滤器（受焦点的控件会把空格吃掉）
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def show_lyrics_tab(self) -> None:
+        """切到歌词页签（Ctrl+L）。"""
+        self.right_tabs.setVisible(True)
+        self.right_tabs.setCurrentWidget(self.player_lyrics)
+        self.btn_toggle_panel.setChecked(True)
+
+    def show_queue_tab(self) -> None:
+        self.right_tabs.setVisible(True)
+        self.right_tabs.setCurrentWidget(self.player_queue)
+        self.btn_toggle_panel.setChecked(True)
+
+    def _space_should_play(self, widget) -> bool:
+        """空格是否应该触发播放：输入框/按钮/勾选框聚焦时必须让位。"""
+        from PySide6.QtWidgets import (
+            QAbstractButton,
+            QAbstractSpinBox,
+            QLineEdit,
+            QPlainTextEdit,
+            QTextEdit,
+        )
+
+        if widget is None:
+            return True
+        return not isinstance(
+            widget, (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QAbstractButton)
+        )
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # 轮询只在窗口可见时跑：最小化后还在按 100 ms 查引擎是白烧 CPU
+        if getattr(self, "player_bridge", None) is not None:
+            self.player_bridge.start()
         if not getattr(self, "_titlebar_done", False):
             from .win_effects import apply_dark_titlebar
 
             apply_dark_titlebar(int(self.winId()))
             self._titlebar_done = True
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        if getattr(self, "player_bridge", None) is not None:
+            self.player_bridge.stop()
 
     # ------------------------------------------------------------ 导入
 
@@ -986,6 +1512,14 @@ class MainWindow(QMainWindow):
         self.brand_bar.set_status(
             "处理中" if running else "就绪", theme.PURPLE if running else theme.FG_DIM
         )
+        # 批处理互斥（TC-GUI-22）：只禁止**新的起播**，正在播的曲目继续播。
+        # 暂停它属于过度打断 —— 用户按下「一键全自动」不等于想静音。
+        if getattr(self, "player_bridge", None) is not None:
+            self.player_bridge.set_busy(bool(running))
+        if getattr(self, "player_bar", None) is not None:
+            self.player_bar.set_playback_enabled(not running)
+        if running:
+            self._append_log("INFO", "批处理进行中：期间不能开始新的播放（当前曲目继续）")
 
     def stop(self) -> None:
         """停止当前所有可取消的后台任务（批处理、鉴定、封面、分轨、扫描）。"""
@@ -1340,6 +1874,18 @@ class MainWindow(QMainWindow):
             self.table.setCurrentIndex(index)
 
         menu = QMenu(self)
+        # 置顶的播放四项（架构 6.2：播放入口只在播放条与右键菜单）
+        menu.addAction(i18n.tr_text("播放"), self.play_current_row)
+        menu.addAction(
+            i18n.tr_text("下一首播"), lambda: self.add_selected_to_queue(play_next=True)
+        )
+        menu.addAction(
+            i18n.tr_text("稍后播放"), lambda: self.add_selected_to_queue(play_next=False)
+        )
+        menu.addAction(
+            i18n.tr_text("加入队列"), lambda: self.add_selected_to_queue(play_next=False)
+        )
+        menu.addSeparator()
         menu.addAction(i18n.tr_text("编辑标签") + "\tCtrl+E", self.edit_selected)
         menu.addAction(i18n.tr_text("批量编辑标签…"), self.batch_edit_selected)
         menu.addAction(i18n.tr_text("查看候选匹配"), self.show_candidates)
@@ -1827,9 +2373,22 @@ class MainWindow(QMainWindow):
         add("操作", "收起 / 展开日志", "", self._toggle_log)
         add("操作", "关于音序管家", "F1", self.show_about)
 
-        for index, (title, _) in enumerate(("匹配", "歌词", "写入", "外观")):
+        for index, (title, _) in enumerate(("匹配", "歌词", "写入", "外观", "播放")):
             add("设置", f"打开参数页：{i18n.tr_text(title)}", "", lambda i=index: self._show_settings_tab(i))
         add("设置", "侧栏显示 / 隐藏", "Ctrl+P", self.toggle_settings_panel)
+
+        # ---- 播放（FR-UI-002 / FR-UI-006 / FR-TOOL-001）----
+        add("播放", i18n.tr_text("播放 / 暂停"), "空格", self.player_toggle)
+        add("播放", i18n.tr_text("上一首"), "Ctrl+←", self.player_prev)
+        add("播放", i18n.tr_text("下一首"), "Ctrl+→", self.player_next)
+        add("播放", i18n.tr_text("音量 +1 dB"), "Ctrl+↑", lambda: self.player_volume_step(1.0))
+        add("播放", i18n.tr_text("音量 -1 dB"), "Ctrl+↓", lambda: self.player_volume_step(-1.0))
+        add("播放", i18n.tr_text("静音 / 取消静音"), "", self.player_mute)
+        add("播放", i18n.tr_text("均衡器"), "Ctrl+Shift+E", self.toggle_eq_panel)
+        add("播放", i18n.tr_text("信号路径"), "", self.toggle_signal_panel)
+        add("播放", i18n.tr_text("歌词"), "Ctrl+L", self.show_lyrics_tab)
+        add("播放", i18n.tr_text("队列"), "", self.show_queue_tab)
+        add("播放", i18n.tr_text("用当前列表替换队列"), "", self.replace_queue_with_tracks)
 
         add("筛选", "判定：全部", "", lambda: self._select_verdict_filter("all"))
         add("筛选", "判定：真无损", "", lambda: self._select_verdict_filter("true"))
@@ -1898,6 +2457,9 @@ class MainWindow(QMainWindow):
         self.model.refresh_all()
         if getattr(self, "inspector", None) is not None:
             self.inspector.refresh()
+        # 播放区的动态文案（状态、模式、计数器、偏移）不是控件属性，要单独刷
+        if getattr(self, "player_bridge", None) is not None:
+            self._apply_playback_i18n()
         try:
             self.settings.save()
         except OSError:
@@ -1934,6 +2496,13 @@ class MainWindow(QMainWindow):
             card.restyle()
         if getattr(self, "inspector", None) is not None:
             self.inspector.refresh()
+        # 播放条/队列/信号面板的颜色来自 theme 常量，切主题必须重刷（TC-GUI-27）
+        if getattr(self, "player_bar", None) is not None:
+            self.player_bar.apply_theme()
+            self.player_queue.update()
+            self.player_queue.model.layoutChanged.emit()
+            self.player_eq.refresh_texts()
+            self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
         try:
             from .win_effects import apply_titlebar
 
@@ -2327,8 +2896,25 @@ class MainWindow(QMainWindow):
             if clicked is save_btn:
                 self.settings_panel.save()
         self._save_view_state()
+        self._save_playback_session()
         remove_listener(self._log_listener)
         event.accept()
+
+    def _save_playback_session(self) -> None:
+        """退出：写会话 → 关引擎（先关流再退，避免 PortAudio 卸载噪音）。"""
+        bridge = getattr(self, "player_bridge", None)
+        if bridge is None:
+            return
+        try:
+            if bool(getattr(self.settings, "playback_restore_session", True)):
+                if bridge.save_session():
+                    log.debug("播放会话已保存")
+        except Exception:  # noqa: BLE001 - 退出路径不能抛
+            log.exception("保存播放会话失败")
+        try:
+            bridge.shutdown()
+        except Exception:  # noqa: BLE001
+            log.exception("关闭播放引擎失败")
 
     def _save_view_state(self) -> None:
         """退出时保存列宽、隐藏列与排序，下次打开保持原样。"""

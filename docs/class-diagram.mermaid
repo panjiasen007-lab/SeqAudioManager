@@ -1,0 +1,246 @@
+%% v1.6 播放能力 · 类图（对应 docs/1.6-架构设计.md 第三节）
+%% 约定：player/* 不依赖 PySide6；UI 层通过 PlayerBridge 单向依赖引擎。
+classDiagram
+    class PlayerState {
+        <<enumeration>>
+        IDLE
+        LOADING
+        PLAYING
+        PAUSED
+        ERROR
+    }
+
+    class PlayMode {
+        <<enumeration>>
+        SEQUENTIAL
+        SHUFFLE
+        REPEAT_ONE
+        REPEAT_ALL
+    }
+
+    class StageStatus {
+        <<enumeration>>
+        PASSTHROUGH
+        CHANGED
+        BYPASSED
+        ERROR
+    }
+
+    class DecodeSpec {
+        +Path path
+        +int start_ms
+        +int duration_ms
+        +int sample_rate
+        +int channels
+        +str sample_fmt
+        +str codec
+        +bool is_dsd
+        +from_track(track, settings) DecodeSpec
+        +to_display() str
+    }
+
+    class FfmpegDecoder {
+        -DecodeSpec spec
+        -Popen proc
+        +start() None
+        +read_block() ndarray
+        +stop() None
+        +returncode int
+    }
+
+    class PcmRingBuffer {
+        -ndarray _buf
+        -int _read_total
+        -int _write_total
+        +write(block) int
+        +read_into(out) int
+        +clear() None
+        +available int
+        +free int
+        +frames_written int
+    }
+
+    class OutputConfig {
+        +str backend
+        +str device
+        +bool exclusive
+        +int samplerate
+        +int channels
+        +str dtype
+        +int blocksize
+        +str latency
+    }
+
+    class AudioOutput {
+        +OutputConfig config
+        +open(cfg, callback) None
+        +close() None
+        +start() None
+        +stop() None
+        +latency_ms() float
+        +device_format() dict
+        +is_open bool
+    }
+
+    class GainStage {
+        +float gain_db
+        +bool bypass
+        +set_db(db) None
+        +process(buf) None
+    }
+
+    class BiquadEq {
+        +list gains_db
+        +bool bypass
+        +prepare(sr) None
+        +set_gains(gains) None
+        +process(buf) None
+    }
+
+    class RampController {
+        +int ramp_ms
+        +arm(direction) None
+        +process(buf) None
+    }
+
+    class CrossfadeController {
+        +float seconds
+        +begin(out_tail, in_head) None
+        +process(buf) None
+    }
+
+    class QueueItem {
+        +Path path
+        +int cue_track
+        +str title
+        +str artist
+        +str album
+        +float duration
+        +int sample_rate
+        +int channels
+        +int bit_depth
+        +to_dict() dict
+    }
+
+    class PlayQueue {
+        -list items
+        -int index
+        +PlayMode mode
+        +load(tracks) None
+        +append(track) None
+        +insert_after_current(track) None
+        +append_last(track) None
+        +remove_at(i) None
+        +move(src, dst) None
+        +next(auto_advance) QueueItem
+        +prev() QueueItem
+        +set_mode(m) None
+        +total_sec() float
+    }
+
+    class SignalStage {
+        +str key
+        +str label
+        +str detail
+        +StageStatus status
+    }
+
+    class Counters {
+        +int underruns
+        +int dropped_frames
+        +int resample_events
+        +int decode_errors
+        +float gain_db
+        +float last_gap_ms
+    }
+
+    class SignalPath {
+        +list stages
+        +Counters counters
+        +build_from(spec, output, dsp_state) SignalPath
+        +is_bitperfect_claimable() bool
+        +to_text() str
+    }
+
+    class PlayerSnapshot {
+        +PlayerState state
+        +QueueItem item
+        +int position_ms
+        +int duration_ms
+        +float volume_db
+        +SignalPath signal
+    }
+
+    class PlayerEngine {
+        -PlayQueue queue
+        -PcmRingBuffer ring
+        -FfmpegDecoder decoder
+        -AudioOutput output
+        -Queue commands
+        -PlayerState _state
+        +open_track(track, autoplay, start_ms) None
+        +play() None
+        +pause() None
+        +stop() None
+        +seek(ms) None
+        +next() None
+        +prev() None
+        +set_volume_db(db) None
+        +set_bypass(on) None
+        +set_eq(gains) None
+        +set_output(device, backend, exclusive) None
+        +reconnect() None
+        +state() PlayerState
+        +position_ms() int
+        +snapshot() PlayerSnapshot
+        +shutdown() None
+    }
+
+    class PlaybackSession {
+        +int SCHEMA_VERSION
+        +str track_path
+        +int cue_track
+        +int position_ms
+        +str mode
+        +list queue
+        +int queue_index
+        +str device
+        +float volume_db
+        +capture(engine) PlaybackSession
+        +save() None
+        +load(settings) PlaybackSession
+    }
+
+    class PlayerBridge {
+        +playerStateChanged(object)
+        +playerPosition(int)
+        +playerTrack(object)
+        +playerSignalPath(object)
+        +playerError(str)
+        +play_item(track, start_ms) None
+        +toggle() None
+        +seek(ms) None
+    }
+
+    class PlayerBar {
+        +set_current(track) None
+        +set_state(state) None
+        +set_position(ms) None
+        +set_playback_enabled(bool) None
+    }
+
+    PlayerEngine *-- PlayQueue
+    PlayerEngine *-- PcmRingBuffer
+    PlayerEngine *-- FfmpegDecoder
+    PlayerEngine *-- AudioOutput
+    PlayerEngine ..> SignalPath
+    PlayerEngine ..> PlaybackSession
+    PlayerEngine ..> PlayerState
+    PlayQueue *-- QueueItem
+    PlayQueue ..> PlayMode
+    SignalPath *-- SignalStage
+    SignalPath *-- Counters
+    FfmpegDecoder ..> DecodeSpec
+    AudioOutput ..> OutputConfig
+    PlayerBridge --> PlayerEngine
+    PlayerBar --> PlayerBridge

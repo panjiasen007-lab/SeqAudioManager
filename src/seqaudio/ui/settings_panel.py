@@ -45,7 +45,7 @@ class SettingsPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
 
-        # 参数分页：匹配 / 歌词 / 写入 / 外观；保存条固定在底部
+        # 参数分页：匹配 / 歌词 / 写入 / 外观 / 播放；保存条固定在底部
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         groups = (
@@ -61,6 +61,15 @@ class SettingsPanel(QWidget):
                 ],
             ),
             ("外观", [self._build_appearance_card(), self._build_ui_card()]),
+            (
+                "播放",
+                [
+                    self._build_output_card(),
+                    self._build_buffer_card(),
+                    self._build_playback_card(),
+                    self._build_library_card(),
+                ],
+            ),
         )
         for title, cards in groups:
             page = QWidget()
@@ -394,6 +403,176 @@ class SettingsPanel(QWidget):
         card.add_widget(hint)
         return card
 
+    # ------------------------------------------------------------ 播放页（v1.6）
+
+    def _build_output_card(self) -> Card:
+        card = Card("输出设备", "输出后端与设备", theme.CYAN)
+
+        self.device_combo = QComboBox()
+        self.device_combo.setMinimumWidth(200)
+        self.device_combo.setToolTip(
+            "留空表示使用系统默认设备。列表来自 PortAudio，"
+            "同一物理设备在不同后端下会出现多次"
+        )
+        self.device_combo.currentIndexChanged.connect(self._notify)
+
+        self.backend_combo = QComboBox()
+        # 后端键与 Settings 里存的值严格一致（不要写中文或枚举名）
+        for key, label, hint in (
+            ("wasapi", "WASAPI", "dev_hint_wasapi"),
+            ("directsound", "DirectSound", "dev_hint_directsound"),
+            ("mme", "MME", "dev_hint_mme"),
+            ("wdmks", "WDM-KS", "dev_hint_wdmks"),
+        ):
+            self.backend_combo.addItem(i18n.tr_text(label), key)
+            self.backend_combo.setItemData(
+                self.backend_combo.count() - 1,
+                i18n.tr(hint),
+                Qt.ToolTipRole,
+            )
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+
+        self.backend_hint = QLabel("")
+        self.backend_hint.setObjectName("hint")
+        self.backend_hint.setWordWrap(True)
+
+        self.exclusive_check = QCheckBox("独占输出（WASAPI 独占模式）")
+        self.exclusive_check.toggled.connect(self._on_exclusive_changed)
+        self.exclusive_hint = QLabel(
+            "独占会抢占其他应用的声音（会议软件、浏览器会突然没声），默认关闭。"
+        )
+        self.exclusive_hint.setObjectName("hint")
+        self.exclusive_hint.setWordWrap(True)
+        self.exclusive_hint.setVisible(False)
+
+        self.follow_rate_check = QCheckBox("采样率跟随源文件")
+        self.follow_rate_check.setToolTip(
+            "开启：按源文件采样率开流，避免重采样；设备不支持时自动回退并在信号路径标注"
+        )
+        self.follow_rate_check.toggled.connect(self._notify)
+
+        card.add_form(
+            [
+                ("输出后端", self.backend_combo),
+                ("输出设备", self.device_combo),
+            ]
+        )
+        card.add_widget(self.backend_hint)
+        card.add_widget(self.exclusive_check)
+        card.add_widget(self.exclusive_hint)
+        card.add_widget(self.follow_rate_check)
+        return card
+
+    def _build_buffer_card(self) -> Card:
+        card = Card("缓冲与解码", "延迟与 CPU 的折中", theme.PURPLE)
+
+        self.buffer_spin = QSpinBox()
+        self.buffer_spin.setRange(10, 500)
+        self.buffer_spin.setSingleStep(10)
+        self.buffer_spin.setSuffix(" ms")
+        self.buffer_spin.setToolTip(
+            "缓冲越深越稳（不容易爆音），但拖动进度条与按钮响应会变钝；"
+            "官方建议 40 ms 起，机械硬盘或网络盘建议 80 ms 以上"
+        )
+        self.buffer_spin.valueChanged.connect(self._notify)
+
+        self.dsd_rate_combo = QComboBox()
+        for rate in (88200, 176400, 352800):
+            self.dsd_rate_combo.addItem(f"{rate / 1000:g} kHz", rate)
+        self.dsd_rate_combo.setToolTip(
+            "DSD 只做 DSD→PCM 转换，不升频到 DSD。176.4 kHz 是默认值（DSD64/128 倍频）"
+        )
+        self.dsd_rate_combo.currentIndexChanged.connect(self._notify)
+
+        self.int_pipeline_check = QCheckBox("优先整数通路")
+        self.int_pipeline_check.setToolTip(
+            "音量旁路且无 DSP 时用整数样本直通；开启后 DSP 与软件音量不可用"
+        )
+        self.int_pipeline_check.toggled.connect(self._notify)
+        self.int_pipeline_hint = QLabel(
+            "开启后 DSP 与软件音量不可用（信号路径会标注「整数通路不可用」）。"
+        )
+        self.int_pipeline_hint.setObjectName("hint")
+        self.int_pipeline_hint.setWordWrap(True)
+
+        card.add_form(
+            [
+                ("缓冲大小", self.buffer_spin),
+                ("DSD→PCM 采样率", self.dsd_rate_combo),
+            ]
+        )
+        card.add_widget(self.int_pipeline_check)
+        card.add_widget(self.int_pipeline_hint)
+        return card
+
+    def _build_playback_card(self) -> Card:
+        card = Card("播放行为", "启动与恢复", theme.OK)
+
+        self.restore_session_check = QCheckBox("启动时恢复上次的队列与位置")
+        self.restore_session_check.setToolTip(
+            "只恢复队列与位置，不会自动播放；关掉后每次启动都是空队列"
+        )
+        self.restore_session_check.toggled.connect(self._notify)
+        card.add_widget(self.restore_session_check)
+
+        hint = QLabel(
+            "播放相关设置会立即生效，不需要重启；参数面板底部的「保存参数」负责落盘。"
+        )
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        card.add_widget(hint)
+        return card
+
+    def _build_library_card(self) -> Card:
+        card = Card("曲库", "启动时自动载入", theme.ACCENT)
+
+        self.autoload_check = QCheckBox("启动时自动载入上次的曲库")
+        self.autoload_check.toggled.connect(self._notify)
+        card.add_widget(self.autoload_check)
+
+        self.recent_sort_check = QCheckBox("启用「最近播放」排序")
+        self.recent_sort_check.toggled.connect(self._notify)
+        card.add_widget(self.recent_sort_check)
+        return card
+
+    def set_output_devices(self, devices) -> None:
+        """刷新输出设备下拉（设备枚举在 ``PlayerBridge`` 里，本面板不 import player）。"""
+        current = self.device_combo.currentData()
+        if current is None:
+            current = getattr(self.settings, "playback_device", "") or ""
+        self._loading = True
+        try:
+            self.device_combo.clear()
+            self.device_combo.addItem(i18n.tr_text("系统默认设备"), "")
+            for entry in devices or []:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or "")
+                if not name:
+                    continue
+                label = str(entry.get("label") or name)
+                self.device_combo.addItem(label, name)
+            index = self.device_combo.findData(current)
+            self.device_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self._loading = False
+
+    def _current_backend_key(self) -> str:
+        return str(self.backend_combo.currentData() or "mme")
+
+    def _on_backend_changed(self, _index: int) -> None:
+        key = self._current_backend_key()
+        self.backend_hint.setText(i18n.tr(f"dev_hint_{key}"))
+        self._notify()
+
+    def _on_exclusive_changed(self, checked: bool) -> None:
+        self.exclusive_hint.setVisible(bool(checked))
+        if checked:
+            self.exclusive_hint.setText(
+                "独占会抢占其他应用的声音（会议软件、浏览器会突然没声），默认关闭。"
+            )
+        self._notify()
+
     def _build_save_bar(self) -> QWidget:
         """底部保存条：修改参数后必须点「保存」才生效，未保存时高亮提示。"""
         bar = QWidget()
@@ -552,6 +731,48 @@ class SettingsPanel(QWidget):
                 max(0, self.font_scale_combo.findData(float(settings.font_scale or 1.0)))
             )
             self._refresh_appearance_preview()
+
+            # ---- 播放页 ----
+            backend = str(getattr(settings, "playback_output_backend", "mme") or "mme")
+            self.backend_combo.setCurrentIndex(
+                max(0, self.backend_combo.findData(backend))
+            )
+            self.backend_hint.setText(i18n.tr(f"dev_hint_{self._current_backend_key()}"))
+            device = str(getattr(settings, "playback_device", "") or "")
+            index = self.device_combo.findData(device)
+            self.device_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.exclusive_check.setChecked(bool(getattr(settings, "playback_exclusive", False)))
+            self.exclusive_hint.setVisible(self.exclusive_check.isChecked())
+            self.follow_rate_check.setChecked(
+                bool(getattr(settings, "playback_follow_source_rate", True))
+            )
+            self.buffer_spin.setValue(
+                max(
+                    self.buffer_spin.minimum(),
+                    min(
+                        self.buffer_spin.maximum(),
+                        int(getattr(settings, "playback_buffer_ms", 80) or 80),
+                    ),
+                )
+            )
+            self.dsd_rate_combo.setCurrentIndex(
+                max(
+                    0,
+                    self.dsd_rate_combo.findData(
+                        int(getattr(settings, "playback_dsd_pcm_rate", 176400) or 176400)
+                    ),
+                )
+            )
+            self.int_pipeline_check.setChecked(
+                bool(getattr(settings, "playback_int_pipeline", False))
+            )
+            self.restore_session_check.setChecked(
+                bool(getattr(settings, "playback_restore_session", True))
+            )
+            self.autoload_check.setChecked(bool(getattr(settings, "library_autoload", True)))
+            self.recent_sort_check.setChecked(
+                bool(getattr(settings, "library_recent_sort", True))
+            )
         finally:
             self._loading = False
 
@@ -602,4 +823,20 @@ class SettingsPanel(QWidget):
         settings.ensure_folder_cover = self.cover_check.isChecked()
 
         settings.ui_font, settings.mono_font, settings.font_scale = self._appearance_values()
+
+        # ---- 播放页（字段名必须与 core.config.Settings 的 playback_* 严格对应）----
+        settings.playback_output_backend = self._current_backend_key()
+        settings.playback_device = str(self.device_combo.currentData() or "")
+        settings.playback_exclusive = self.exclusive_check.isChecked()
+        settings.playback_follow_source_rate = self.follow_rate_check.isChecked()
+        settings.playback_buffer_ms = int(self.buffer_spin.value())
+        settings.playback_dsd_pcm_rate = int(
+            self.dsd_rate_combo.currentData() or 176400
+        )
+        settings.playback_int_pipeline = self.int_pipeline_check.isChecked()
+        settings.playback_restore_session = self.restore_session_check.isChecked()
+
+        # ---- 曲库 ----
+        settings.library_autoload = self.autoload_check.isChecked()
+        settings.library_recent_sort = self.recent_sort_check.isChecked()
         return settings
