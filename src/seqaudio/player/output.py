@@ -36,6 +36,8 @@ from .constants import (
     BLOCK_FRAMES_DEFAULT,
     DB_FLOOR_MUTE,
     DEFAULT_CHANNELS,
+    OutputMode,
+    normalize_output_mode,
 )
 from .devices import (
     DeviceBusyError,
@@ -59,7 +61,12 @@ DspHook = Callable[[np.ndarray, int], None]
 
 @dataclass
 class OutputConfig:
-    """一条输出流的完整参数（架构文档 3.1 类图）。"""
+    """一条输出流的完整参数（架构文档 3.1 类图 + v1.7 独占三参数）。
+
+    ``exclusive`` 是 v1.6 的布尔旧字段，**保留只为兼容**：真正的语义在 ``mode``。
+    构造时两者互相镜像（``exclusive=True`` → ``mode=EXCLUSIVE``），别再直接读
+    ``exclusive`` 判断独占等级 —— 严格/宽松要靠 ``mode`` 区分。
+    """
 
     backend: str = ""
     device: str = ""
@@ -69,9 +76,35 @@ class OutputConfig:
     dtype: str = "int16"
     blocksize: int = BLOCK_FRAMES_DEFAULT
     latency: str = "high"
+    #: 三档输出模式（v1.7）。``exclusive`` 为真但 mode 未给时按宽松独占处理。
+    mode: OutputMode = OutputMode.SHARED
+    #: 采样率是否已由上游（引擎的探测层）定案。True 时 ``prepare()`` 不再自行探测。
+    rate_decided: bool = False
+    #: 是否要求 PortAudio 原样使用请求的样本格式（严格独占恒为 True）。
+    explicit_format: bool = False
+
+    def __post_init__(self) -> None:
+        self.mode = normalize_output_mode(self.mode)
+        if self.exclusive and self.mode is OutputMode.SHARED:
+            # 旧字段镜像：v1.6 的 `exclusive=True` 一律视为宽松独占
+            self.mode = OutputMode.EXCLUSIVE
+        self.exclusive = self.mode.is_exclusive
+        if self.mode.explicit_format:
+            self.explicit_format = True
+
+    @property
+    def mode_label(self) -> str:
+        return self.mode.mode_label
 
 
-def map_portaudio_error(exc: BaseException) -> DeviceError:
+def map_portaudio_error(
+    exc: BaseException,
+    *,
+    mode: OutputMode | str | None = None,
+    dtype: str = "",
+    rate: int = 0,
+    supported_rates: tuple[int, ...] = (),
+) -> DeviceError:
     """把 PortAudio 的报错映射成「能让用户采取下一步动作」的异常。
 
     PortAudio 只给一句英文 + 一个负错误码，而且**不同后端会借用同一个码**：
@@ -96,7 +129,29 @@ def map_portaudio_error(exc: BaseException) -> DeviceError:
     if isinstance(exc, (DeviceError,)):
         return exc
     text = str(exc).lower()
+    mode_value = normalize_output_mode(mode) if mode is not None else None
+
+    # -9997 是**双义**的（设计 §4.4）：严格模式下 float32 会被 explicit_sample_format
+    # 拒绝，PortAudio 报的却是 "Invalid sample rate"。若这里仍说"采样率不支持"，
+    # 用户会去改采样率 —— 改一辈子也没用，因为问题在样本格式。
     if "-9997" in text or "invalid sample rate" in text:
+        if mode_value is not None and mode_value.explicit_format:
+            is_float = str(dtype).startswith("float") or str(dtype) in ("f32", "f32le")
+            if is_float:
+                return RateUnsupportedError(
+                    "严格独占要求整数样本格式，float32 不被接受："
+                    "请开启「整数通路」（int16/int32），或改用宽松独占。"
+                    f"（{exc}）"
+                )
+            hint = ""
+            if supported_rates:
+                hint = "；该设备在独占模式下实测支持：" + "/".join(
+                    str(item) for item in supported_rates
+                ) + " Hz"
+            rate_text = f"{int(rate)} Hz" if rate else "该采样率"
+            return RateUnsupportedError(
+                f"该设备在独占模式下不接受 {rate_text}{hint}（{exc}）"
+            )
         return RateUnsupportedError(f"设备不支持该采样率：{exc}")
     if "-9998" in text or "invalid channel count" in text or "channel count" in text:
         return DeviceError(f"设备不支持的声道数：{exc}")
@@ -105,11 +160,20 @@ def map_portaudio_error(exc: BaseException) -> DeviceError:
     if "removed" in text or "unplugged" in text or "no longer available" in text:
         return DeviceLostError(f"输出设备已断开（可能被拔出）：{exc}")
     if "-9996" in text or "invalid device" in text or "device index" in text:
+        if mode_value is not None and mode_value.is_exclusive:
+            return DeviceError(
+                "该设备不支持独占模式（驱动或系统保留了它）：请改用共享模式，"
+                f"或换一个输出设备/后端再试（{exc}）"
+            )
         return DeviceError(
             "无法打开该输出设备：后端/驱动拒绝了它。"
             f"请换一个输出后端（如 MME / DirectSound）或另一台设备再试：{exc}"
         )
     if "-9985" in text or "busy" in text or "unavailable" in text:
+        if mode_value is not None and mode_value.is_exclusive:
+            return DeviceBusyError(
+                f"该设备已被其它程序独占，请关闭那个程序后重试（{exc}）"
+            )
         return DeviceBusyError(f"输出设备忙或被其它程序占用：{exc}")
     if "-9999" in text or "unanticipated host error" in text:
         return DeviceError(f"输出后端驱动内部错误（建议换一个后端再试）：{exc}")
@@ -138,6 +202,7 @@ class AudioOutput:
         device: str | int = "",
         backend: str = "",
         exclusive: bool = False,
+        mode: OutputMode | str | None = None,
         blocksize: int = BLOCK_FRAMES_DEFAULT,
         latency: str = "high",
         hook: Optional[DspHook] = None,
@@ -145,6 +210,15 @@ class AudioOutput:
         self.ring = ring
         self._device = device
         self._backend = backend
+        # 请求值（用户想要的）与**实际值**（PortAudio 真正接受的）必须分开存：
+        # v1.6 把请求值当实际值上报，勾了独占但降级共享时界面照样显示"独占"（会骗人）。
+        self._mode_requested = (
+            normalize_output_mode(mode)
+            if mode not in (None, "")
+            else (OutputMode.EXCLUSIVE if exclusive else OutputMode.SHARED)
+        )
+        self._mode_actual = OutputMode.SHARED
+        self._exclusive_actual = False
         self._exclusive = bool(exclusive)
         self._blocksize = int(blocksize) if int(blocksize) > 0 else BLOCK_FRAMES_DEFAULT
         self._latency = latency
@@ -166,6 +240,8 @@ class AudioOutput:
         # ---- 非回调线程写的诊断信息 ----
         self._want_rate = 0
         self._fallback = False
+        self._system_mix_rate = 0
+        self._mode_downgrade_note = ""
         self._volume_db = 0.0
         self._volume_warned = False
         self._error_text = ""
@@ -198,6 +274,35 @@ class AudioOutput:
     def frames_out(self) -> int:
         return int(self._frames_out)
 
+    @property
+    def mode_requested(self) -> OutputMode:
+        """用户请求的模式（可能因设备/后端限制而降级）。"""
+        return self._mode_requested
+
+    @property
+    def mode_actual(self) -> OutputMode:
+        """**实际**生效的模式：只在流真的按该模式打开后才不是 SHARED。"""
+        return self._mode_actual
+
+    @property
+    def exclusive_actual(self) -> bool:
+        """流是否真的拿到了独占（信号路径与徽标只认这个值）。"""
+        return bool(self._exclusive_actual)
+
+    def actual_mode(self) -> OutputMode:
+        """``mode_actual`` 的方法形式（设计文档 11.1 类图用的是它）。"""
+        return self._mode_actual
+
+    @property
+    def system_mix_rate(self) -> int:
+        """设备默认（= 系统混音）采样率。独占时它就是"被绕开的那个率"。"""
+        return int(self._system_mix_rate)
+
+    @property
+    def downgraded(self) -> bool:
+        """请求了独占但实际是共享（面板要标红并说明原因）。"""
+        return self._mode_requested.is_exclusive and not self._exclusive_actual
+
     # ------------------------------------------------------------ 开流
 
     def _resolve_target(self) -> DeviceInfo:
@@ -213,13 +318,68 @@ class AudioOutput:
             return resolve_device(raw, self._backend)
         return resolve_device("", self._backend)
 
-    def prepare(self, rate: int, channels: int = 0) -> int:
+    def _extra_settings_for(self, mode: OutputMode) -> Any:
+        """模式 → ``sd.WasapiSettings``（唯一构造点，设计 §4.2）。
+
+        返回 ``None`` 表示「共享」或「设备不是 WASAPI」：
+
+        * 共享：不带 ``extra_settings``；
+        * 宽松独占：``exclusive=True, auto_convert=False, explicit_sample_format=False``；
+        * 严格独占：同上但 ``explicit_sample_format=True``（**只接受整数格式**）。
+
+        ``auto_convert`` 恒为 False：本项目从不借助系统做格式转换，共享模式的
+        重采样由 ffmpeg 完成并写进信号路径，转成什么样用户查得到。
+        """
+        if not mode.is_exclusive:
+            return None
+        device_backend = self._device_info.backend_key if self._device_info else ""
+        if device_backend != BACKEND_WASAPI:
+            # 非 WASAPI 后端没有独占概念：如实降级为共享，不抛错（T01 ⑤）
+            log.info(
+                "后端 %r 不支持独占，按共享模式打开（设备：%s）",
+                device_backend or self._backend or "默认",
+                self._device_info.name if self._device_info else self._device,
+            )
+            self._mode_actual = OutputMode.SHARED
+            self._exclusive_actual = False
+            self._mode_downgrade_note = "该后端不支持独占（仅 WASAPI 支持）"
+            return None
+        sd = sounddevice()
+        try:
+            return sd.WasapiSettings(
+                exclusive=True,
+                auto_convert=False,
+                explicit_sample_format=mode.explicit_format,
+            )
+        except Exception as exc:  # noqa: BLE001 - 老版本/驱动不支持这些参数
+            log.warning("构造 WASAPI 独占设置失败，改用共享模式：%s", exc)
+            self._mode_actual = OutputMode.SHARED
+            self._exclusive_actual = False
+            self._mode_downgrade_note = f"无法构造独占参数：{exc}"
+            return None
+
+    def prepare(
+        self,
+        rate: int,
+        channels: int = 0,
+        *,
+        mode: OutputMode | str | None = None,
+        rate_decided: bool = False,
+    ) -> int:
         """**只开流、不启动回调**，返回设备实际采样率。
 
         引擎先 ``prepare()`` 再起解码器预填，最后 ``begin()`` —— 这样「解码器
         已经在写、却还没有消费者」的窗口只有一个开流动作（几十毫秒），
         不会顶到解码线程 500 ms 的停滞阈值（T03 实测过：先起解码器再开流，
         慢设备上会丢掉 480 帧）。
+
+        Args:
+            rate: 目标采样率（``rate_decided=True`` 时就是最终值，不再探测）。
+            channels: 声道数，0 = 用环形缓冲的声道数。
+            mode: 覆盖构造时的输出模式（引擎按设置传，避免实例被复用后模式串味）。
+            rate_decided: 上游（引擎探测层）已经定案，本层不得再调 ``pick_rate``。
+                设计 §4.2「探测一次」原则：两次探测之间设备可能变化，也是
+                v1.6 里 44.1k→48k 抖动的来源。
         """
         with self._lock:
             if self._stream is not None:
@@ -233,8 +393,35 @@ class AudioOutput:
             if dtype not in ("int16", "int32", "float32"):
                 raise DeviceError(f"PortAudio 不支持的输出 dtype：{dtype}")
 
+            if mode is not None:
+                self._mode_requested = normalize_output_mode(mode)
+            requested_mode = self._mode_requested
+            # 严格独占 + 浮点 = 必然 -9997（设计 §2.2 补测 C）。在**开流之前**
+            # 拦下来，给能行动的中文原因，而不是让 PortAudio 抛一句
+            # "Invalid sample rate" 让用户去改采样率。
+            if requested_mode.explicit_format and dtype == "float32":
+                raise DeviceError(
+                    "严格独占要求整数样本格式（int16/int32），float32 不被接受："
+                    "请开启「整数通路」，或改用宽松独占"
+                )
+
             device = self._resolve_target()
-            actual_rate, fallback = pick_rate(device, int(rate))
+            self._device_info = device
+            self._system_mix_rate = int(device.rate)
+            plan_mode = requested_mode
+            if rate_decided:
+                # 上游（引擎）已经定案：不再探测，也不改模式
+                actual_rate, fallback = int(rate), False
+            else:
+                # 独立使用者（测试/工具直接 new AudioOutput）也要模式感知：
+                # 否则「请求 44.1k 独占」会先被共享模式探测定罪，回退成 48k。
+                from .devices import plan_output
+
+                plan = plan_output(device, int(rate), channels=ch, mode=requested_mode)
+                actual_rate, fallback = plan.rate, plan.fallback
+                plan_mode = plan.mode
+                if plan.note and not self._mode_downgrade_note:
+                    self._mode_downgrade_note = plan.note
             config = OutputConfig(
                 backend=(
                     self._backend
@@ -242,7 +429,9 @@ class AudioOutput:
                     else device.backend_key
                 ),
                 device=str(self._device) if self._device not in ("", None) else str(device.index),
-                exclusive=self._exclusive,
+                exclusive=plan_mode.is_exclusive,
+                mode=plan_mode,
+                rate_decided=bool(rate_decided),
                 samplerate=int(actual_rate),
                 channels=ch,
                 dtype=dtype,
@@ -262,8 +451,15 @@ class AudioOutput:
         try:
             stream.start()
         except Exception as exc:  # noqa: BLE001
-            mapped = map_portaudio_error(exc)
+            mapped = map_portaudio_error(
+                exc,
+                mode=self._mode_requested,
+                dtype=str(self._config.dtype) if self._config else str(self.ring.dtype),
+                rate=int(self._config.samplerate) if self._config else 0,
+            )
             self._error_text = str(mapped)
+            self._mode_actual = OutputMode.SHARED
+            self._exclusive_actual = False
             self._teardown_stream()
             raise mapped from exc
 
@@ -309,20 +505,19 @@ class AudioOutput:
             # 索引是 PortAudio 的全局索引，直接反查即可（按名字反查会失配）
             self._device_info = device_by_index(index) or resolve_device("", cfg.backend)
 
-        extra_settings = None
-        if cfg.exclusive:
-            device_backend = self._device_info.backend_key if self._device_info else ""
-            if device_backend == BACKEND_WASAPI:
-                try:
-                    extra_settings = sd.WasapiSettings(exclusive=True)
-                except Exception as exc:  # noqa: BLE001 - 驱动不支持独占
-                    log.warning("构造 WASAPI 独占设置失败，改用共享模式：%s", exc)
-                    extra_settings = None
-            else:
-                log.info(
-                    "后端 %r 不支持独占，按共享模式打开（设备：%s）",
-                    device_backend or cfg.backend or "默认", cfg.device,
-                )
+        # 三参数的唯一构造点在 _extra_settings_for()：open() 只负责用它开流
+        requested_mode = normalize_output_mode(cfg.mode)
+        # cfg 明确要独占 → 它是用户的请求；cfg 已被降级成共享时**保留**用户原始请求
+        # （否则「请求独占/实际共享」这个最有用的信息就丢了，面板没法解释降级原因）。
+        if requested_mode.is_exclusive:
+            self._mode_requested = requested_mode
+        self._mode_downgrade_note = self._mode_downgrade_note or ""
+        if requested_mode.explicit_format and str(cfg.dtype) == "float32":
+            raise DeviceError(
+                "严格独占要求整数样本格式（int16/int32），float32 不被接受："
+                "请开启「整数通路」，或改用宽松独占"
+            )
+        extra_settings = self._extra_settings_for(requested_mode)
 
         kwargs: dict[str, Any] = {
             "samplerate": int(cfg.samplerate),
@@ -340,12 +535,24 @@ class AudioOutput:
         try:
             stream = sd.OutputStream(**kwargs)
         except Exception as exc:  # noqa: BLE001
-            mapped = map_portaudio_error(exc)
+            mapped = map_portaudio_error(
+                exc,
+                mode=requested_mode,
+                dtype=str(cfg.dtype),
+                rate=int(cfg.samplerate),
+            )
             self._error_text = str(mapped)
+            self._mode_actual = OutputMode.SHARED
+            self._exclusive_actual = False
             raise mapped from exc
 
         self._stream = stream
-        self._config = replace(cfg, device=str(index))
+        self._config = replace(cfg, device=str(index), mode=requested_mode)
+        # 实际值：只有真的把独占参数交给了 PortAudio 且开流成功才算独占
+        self._mode_actual = requested_mode if extra_settings is not None else OutputMode.SHARED
+        self._exclusive_actual = self._mode_actual.is_exclusive
+        if requested_mode.is_exclusive and not self._exclusive_actual and not self._mode_downgrade_note:
+            self._mode_downgrade_note = "设备/后端未接受独占参数"
         self._error_text = ""
         self._paused = False
         self._frames_out = 0
@@ -353,14 +560,20 @@ class AudioOutput:
         self._pa_flags = 0
         self._last_underrun_frame = -1
         log.info(
-            "输出流已建立：%s %d Hz %d ch %s，块 %d，延迟提示 %s",
+            "输出流已建立：%s %s %d Hz %d ch %s，块 %d，延迟提示 %s",
             self._config.backend or "默认后端",
+            self._mode_actual.value,
             self._config.samplerate,
             self._config.channels,
             self._config.dtype,
             self._config.blocksize,
             self._config.latency,
         )
+        if self._exclusive_actual:
+            log.info(
+                "已取得设备独占（%s），系统混音率 %d Hz 已被绕开",
+                self._mode_actual.value, self._system_mix_rate or 0,
+            )
         return self._config
 
     # ------------------------------------------------------------ 关流
@@ -502,7 +715,14 @@ class AudioOutput:
             "latency_ms": round(self.latency_ms(), 1),
             "device": self._device_info.label if self._device_info else "",
             "backend": str(cfg.backend) if cfg else self._backend,
-            "exclusive": bool(cfg.exclusive) if cfg else False,
+            # 只报**实际**值：请求了独占但降级共享时这里必须是 False
+            "exclusive": bool(self._exclusive_actual),
+            "mode": self._mode_actual.value,
+            "mode_requested": self._mode_requested.value,
+            "explicit_format": bool(self._mode_actual.explicit_format),
+            "system_mix_rate": int(self._system_mix_rate),
+            "downgraded": bool(self.downgraded),
+            "mode_note": self._mode_downgrade_note,
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -524,7 +744,14 @@ class AudioOutput:
             "device": self._device_info.label if self._device_info else "",
             "device_index": self._device_info.index if self._device_info else -1,
             "backend": str(cfg.backend) if cfg else self._backend,
-            "exclusive": bool(cfg.exclusive) if cfg else False,
+            # 只报**实际**值：请求了独占但降级共享时这里必须是 False
+            "exclusive": bool(self._exclusive_actual),
+            "mode": self._mode_actual.value,
+            "mode_requested": self._mode_requested.value,
+            "explicit_format": bool(self._mode_actual.explicit_format),
+            "system_mix_rate": int(self._system_mix_rate),
+            "downgraded": bool(self.downgraded),
+            "mode_note": self._mode_downgrade_note,
             "blocksize": int(cfg.blocksize) if cfg else self._blocksize,
             "latency_ms": round(self.latency_ms(), 1),
             "underruns": int(self._underruns),

@@ -719,6 +719,22 @@ def _pick_sample_rate(info, settings, is_dsd: bool) -> int:
     return source if source > 0 else SR_44K
 
 
+def int_sample_fmt_for(bit_depth: int) -> str:
+    """位深 → 整数通路的样本格式（严格独占强制整数时用）。
+
+    ``s24`` 走 int32 容器（3 字节样本 numpy/PortAudio 都不支持）；未知位深按
+    ``s16`` 处理（宁可窄一点也不要拿错的位深去声明）。
+    """
+    depth = int(bit_depth or 0)
+    if depth == 16:
+        return "s16"
+    if 17 <= depth <= 24:
+        return "s24"
+    if 25 <= depth <= 32:
+        return "s32"
+    return "s16"
+
+
 def _pick_sample_fmt(info, settings, is_dsd: bool) -> str:
     """样本格式：整数通路只在「音量旁路 + 无 EQ + 无淡变 + 非 DSD」时成立。
 
@@ -732,13 +748,9 @@ def _pick_sample_fmt(info, settings, is_dsd: bool) -> str:
     if is_dsd or not int_pipeline_allowed(settings):
         return DEFAULT_SAMPLE_FMT
     depth = int(getattr(info, "bit_depth", 0) or 0)
-    if depth == 16:
-        return "s16"
-    if depth in (17, 18, 19, 20, 21, 22, 23, 24):
-        return "s24"
-    if depth in (25, 26, 27, 28, 29, 30, 31, 32):
-        return "s32"
+    if 1 <= depth <= 32:
+        return int_sample_fmt_for(depth)
     return DEFAULT_SAMPLE_FMT
 
 
-__all__ = ["DecodeSpec", "FfmpegDecoder", "DecodeError", "probe_codec"]
+__all__ = ["DecodeSpec", "FfmpegDecoder", "DecodeError", "probe_codec", "int_sample_fmt_for"]

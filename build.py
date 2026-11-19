@@ -179,6 +179,25 @@ def build_onedir(debug: bool = False) -> Path:
                 ".dll", ".dylib", ".so",
             ):
                 junk.unlink()
+        # v1.7 T06：把"这一版只带 win64 非 ASIO DLL"这件事**断言**下来。
+        # 理由：ASIO 变体（libportaudio64bit-asio.dll）从没在任何机器上验过；
+        # 一旦有人"顺手取消清理"把它带进包，用户看到的就是"有 ASIO 选项但一开就炸"。
+        leftovers = sorted(item.name for item in pa_dir.iterdir())
+        print(f"  · PortAudio 进包清单：{leftovers}")
+        forbidden = [
+            name
+            for name in leftovers
+            if name.endswith(("-asio.dll", "32bit.dll", "arm64.dll", ".dylib", ".so"))
+        ]
+        if forbidden:
+            raise SystemExit(
+                "PortAudio 目录里出现了未验证的二进制："
+                f"{forbidden}。v1.7 明确不做 ASIO/DLL 替换，请恢复 build_onedir() 的清理逻辑。"
+            )
+        if "libportaudio64bit.dll" not in leftovers:
+            raise SystemExit(
+                "PortAudio DLL 没有打进包：播放功能会在装完后才报 PortAudio library not found"
+            )
 
     # 便携版该有的说明文件
     _write_text(app_dir / "使用说明.txt", README_TXT)

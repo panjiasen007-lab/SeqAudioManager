@@ -37,6 +37,7 @@ from typing import Any, Callable, Optional, Sequence
 from ..core.config import Settings
 from . import devices as devices_mod
 from .constants import (
+    BACKEND_WASAPI,
     BLOCK_FRAMES_DEFAULT,
     EVENT_ERROR,
     EVENT_GAP,
@@ -47,11 +48,13 @@ from .constants import (
     EVENT_TRACK,
     PREFILL_BLOCKS,
     RING_SECONDS,
+    OutputMode,
     PlayMode,
     PlayerState,
     StageStatus,
+    normalize_output_mode,
 )
-from .decoder import DecodeError, DecodeSpec, FfmpegDecoder
+from .decoder import DecodeError, DecodeSpec, FfmpegDecoder, int_sample_fmt_for
 from .dsp import DspChain, int_pipeline_allowed
 from .devices import (
     DeviceBusyError,
@@ -194,6 +197,12 @@ class PlayerEngine:
         self._last_position_ms = -1
         self._last_gap_ms = 0.0
         self._int_downgraded = False   # 用户要整数通路、但被 DSP 挤回浮点
+        self._plan: Any = None         # 本次起播的输出决定（devices.OutputPlan）
+        self._strict_locked = False    # 严格独占：DSP/音量被锁在旁路
+        self._force_shared = False     # 独占开流失败过 → 本会话内直接用共享
+        self._released_on_pause = False
+        self._pending_choice = ""      # fallback="ask" 时要弹的非模态提示
+        self._exclusive_refused_note = ""  # 独占开流失败的原因（降级留痕）
         self._underrun_seen = 0        # 当前这条流的欠载数（回调自增）
         self._underrun_base = 0        # 已拆掉的流累计欠载数
         self._closed = False
@@ -321,6 +330,15 @@ class PlayerEngine:
 
     def resume(self) -> bool:
         """从暂停恢复；非暂停状态调用无副作用。"""
+        if (
+            self._state is PlayerState.PAUSED
+            and self._released_on_pause
+            and self._item is not None
+        ):
+            # 暂停时释放过设备：重开流并从冻结的位置续播
+            position = self.position_ms()
+            self._released_on_pause = False
+            return self._start_item(self._item, position)
         if self._state is not PlayerState.PAUSED or self._decoder is None or self._output is None:
             return self._state is PlayerState.PLAYING
         try:
@@ -334,22 +352,51 @@ class PlayerEngine:
         return True
 
     def pause(self) -> bool:
-        """暂停：斜坡淡出 → 停喂数据 → 回调写静音（不关流）。幂等。"""
+        """暂停：斜坡淡出 → 停喂数据 → 回调写静音（不关流）。幂等。
+
+        独占模式下若 `playback_release_on_pause=True`（Q3 定稿默认），则**关流释放
+        设备**：否则用户暂停后浏览器/会议一直没声，而他根本不知道是自己占了设备。
+        代价是恢复时要重开流（约 +100 ms）。
+        """
         if self._state is PlayerState.PAUSED:
             return True
         if self._state is not PlayerState.PLAYING or self._output is None:
             return False
         self._fade_out_and_wait()
+        position = self.position_ms()
+        release = self._should_release_on_pause()
         try:
-            if self._output is not None:
-                self._output.pause()
-            if self._decoder is not None:
-                self._decoder.pause_feeding()
+            if release:
+                self._release_for_pause(position)
+            else:
+                if self._output is not None:
+                    self._output.pause()
+                if self._decoder is not None:
+                    self._decoder.pause_feeding()
         except Exception as exc:  # noqa: BLE001
             self._fail(f"暂停失败：{exc}")
             return False
         self._set_state(PlayerState.PAUSED)
         return True
+
+    def _should_release_on_pause(self) -> bool:
+        """是否要在暂停时释放设备：只对「真独占」且用户没关掉该选项时才做。"""
+        try:
+            exclusive = bool(
+                self._output is not None and getattr(self._output, "exclusive_actual", False)
+            )
+        except Exception:  # noqa: BLE001
+            exclusive = False
+        release_setting = bool(getattr(self.settings, "playback_release_on_pause", True))
+        return exclusive and release_setting
+
+    def _release_for_pause(self, position_ms: int) -> None:
+        """关流释放设备，但把位置记在 `_ring_base_ms` 上（暂停时位置必须冻结）。"""
+        log.info("暂停即释放独占设备（position=%d ms）", position_ms)
+        self._teardown_playback()
+        self._ring_base_ms = int(position_ms)
+        self._rate = self._rate or 0
+        self._released_on_pause = True
 
     def stop(self) -> bool:
         """停止：淡出 → 关流 → IDLE，位置归零。重复调用安全。"""
@@ -364,6 +411,7 @@ class PlayerEngine:
         self._rate = 0
         self._channels = 0
         self._eof_pending = False
+        self._released_on_pause = False
         self._signal = SignalPath.blank()
         self._set_state(PlayerState.IDLE)
         self._emit(EVENT_TRACK, None)
@@ -415,6 +463,9 @@ class PlayerEngine:
     def set_volume(self, db: float) -> float:
         """设置软件音量（dB）。本期只有 ``volume_mode="software"`` 才真的改样本。"""
         value = max(-60.0, min(12.0, float(db)))
+        if self._strict_locked:
+            log.info("严格独占下软件音量被锁定为 0 dB（否则「未加软件增益」不成立）")
+            value = 0.0
         self._volume_db = value
         if str(getattr(self.settings, "playback_volume_mode", "bypass")) == "software":
             self._dsp.set_gain_db(value)
@@ -439,6 +490,9 @@ class PlayerEngine:
         self._refresh_signal()
 
     def set_eq_enabled(self, enabled: bool) -> None:
+        if self._strict_locked and enabled:
+            log.info("严格独占下 EQ 被强制旁路（否则「未加软件增益」不成立）")
+            enabled = False
         self._dsp.set_eq_enabled(bool(enabled))
         self._refresh_signal()
 
@@ -465,6 +519,8 @@ class PlayerEngine:
 
     def reconnect(self) -> bool:
         """重新打开设备并从当前位置续播（设备拔出后用户点「重新连接」）。"""
+        self._force_shared = False        # 换设备/重连时给独占一次新机会
+        self._exclusive_refused_note = ""
         item = self._item
         if item is None:
             return False
@@ -588,7 +644,18 @@ class PlayerEngine:
             "backend": output_snapshot.get(
                 "backend", str(getattr(self.settings, "playback_output_backend", ""))
             ),
-            "exclusive": bool(getattr(self.settings, "playback_exclusive", False)),
+            "exclusive": bool(output_snapshot.get("exclusive", False)),
+            # 注意键名：`mode` 是**播放模式**（顺序/随机…），输出模式单独叫
+            # `output_mode` —— v1.6 的 UI/会话已经按 `mode` 读播放模式，不能抢名字。
+            "output_mode": str(output_snapshot.get("mode", "") or self._output_mode().value),
+            "output_mode_requested": str(
+                getattr(self._plan, "requested_mode", self._output_mode()).value
+            ),
+            "mode_note": str(getattr(self._plan, "note", "") or ""),
+            "system_mix_rate": int(output_snapshot.get("system_mix_rate", 0) or 0),
+            "wording_level": self._signal.wording_level(),
+            "wording_text": self._signal.wording_text(),
+            "exclusive_choice_pending": self._pending_choice,
             "fallback": bool(self._fallback),
             "busy": bool(self._busy),
             "error": self._error,
@@ -656,6 +723,70 @@ class PlayerEngine:
         if gains:
             self._dsp.set_eq_gains(gains)
 
+    # ------------------------------------------------------------ 输出模式（v1.7）
+
+    def _output_mode(self) -> OutputMode:
+        """由设置解析出**本次**输出模式（含严格模式的可行性校验）。
+
+        ``playback_exclusive`` 是 v1.6 的布尔旧值，只做镜像：真正的语义在
+        ``playback_output_mode``。若后端不是 WASAPI，独占没有意义 → 返回 SHARED
+        （并记日志，不抛错，T01 ⑤）。
+        """
+        mode = normalize_output_mode(
+            getattr(self.settings, "playback_output_mode", "shared")
+        )
+        if mode is OutputMode.SHARED and bool(
+            getattr(self.settings, "playback_exclusive", False)
+        ):
+            mode = OutputMode.EXCLUSIVE
+        if not mode.is_exclusive:
+            return OutputMode.SHARED
+        device = self._resolve_device()
+        backend = (
+            device.backend_key
+            if device is not None
+            else str(getattr(self.settings, "playback_output_backend", "") or "")
+        )
+        if backend and backend != BACKEND_WASAPI:
+            log.info("当前后端 %r 不支持独占，按共享模式播放", backend)
+            return OutputMode.SHARED
+        return mode
+
+    def set_output_mode(self, mode: OutputMode | str) -> OutputMode:
+        """切换输出模式（设置面板保存后调用；正在播则重连）。"""
+        value = normalize_output_mode(mode)
+        self.settings.playback_output_mode = value.value
+        self.settings.playback_exclusive = value.is_exclusive
+        if self._item is not None and self._state in (PlayerState.PLAYING, PlayerState.PAUSED):
+            self.reconnect()
+        return value
+
+    def output_mode(self) -> OutputMode:
+        """当前（下次起播会用的）输出模式。"""
+        return self._output_mode()
+
+    def _apply_strict_constraints(self, spec: DecodeSpec) -> DecodeSpec:
+        """严格独占的连带约束（Q6）：强制整数通路 + DSP 全旁路。
+
+        为什么是强绑定：``explicit_sample_format=True`` 只接受整数格式（实测
+        float32 直接 -9997）；而"未加软件增益"要成立，音量和 EQ 必须真的不动样本。
+        这不是产品口味问题，是话术成立的前提。
+        """
+        if not self._plan or not self._plan.mode.explicit_format:
+            self._strict_locked = False
+            return spec
+        self._strict_locked = True
+        if spec.sample_fmt not in ("s16", "s24", "s32"):
+            int_fmt = int_sample_fmt_for(int(getattr(self._item, "bit_depth", 0) or 0))
+            log.info(
+                "严格独占要求整数通路：样本格式 %s → %s（DSP/音量强制旁路）",
+                spec.sample_fmt, int_fmt,
+            )
+            spec = replace(spec, sample_fmt=int_fmt)
+        self._dsp.set_gain_db(0.0)
+        self._dsp.set_eq_enabled(False)
+        return spec
+
     def _build_spec(self, item: QueueItem, offset_ms: int) -> DecodeSpec:
         """按队列项 + 偏移构造解码参数（含采样率/声道/样本格式的最终裁决）。"""
         spec = DecodeSpec.from_item(item, self.settings, start_ms=offset_ms)
@@ -692,19 +823,36 @@ class PlayerEngine:
             if device_rate > 0:
                 want = device_rate
         self._want_rate = int(want)
+        mode = OutputMode.SHARED if self._force_shared else self._output_mode()
         try:
-            rate, fallback = devices_mod.pick_rate(device, want)
+            # 一次定案：采样率 + 实际模式 + 回退层级（设计 §4.2「探测一次」）
+            plan = devices_mod.plan_output(
+                device, want, channels=spec.channels, mode=mode
+            )
         except RateUnsupportedError as exc:
             raise PlayerError(str(exc)) from exc
-        self._fallback = bool(fallback)
-        if fallback:
-            log.warning(
-                "源采样率 %d 不被设备支持，回退 %d Hz（%s）",
-                want, rate, device.label if device else "默认设备",
-            )
+        self._plan = plan
+        self._fallback = bool(plan.fallback)
+        policy = str(getattr(self.settings, "playback_exclusive_fallback", "auto") or "auto")
+        if plan.requested_mode.is_exclusive and (
+            plan.mode_fallback or plan.rate_fallback
+        ):
+            if policy == "never":
+                # 用户明确要求「只报错」：不静默降级
+                raise PlayerError(
+                    "独占无法按原参数打开，且设置为「只报错」：" + (plan.note or "设备不支持")
+                )
+            log.warning("独占降级：%s", plan.note or "设备不支持原参数")
+            self._pending_choice = plan.note if policy == "ask" else ""
+        else:
+            self._pending_choice = ""
+        if plan.rate_fallback:
             self._signal.bump("resample_events", 1)
+        if not plan.mode.is_exclusive and mode.is_exclusive:
+            log.info("独占不可用，本次按共享模式播放：%s", plan.note)
+        spec = replace(spec, sample_rate=int(plan.rate))
         # 关键：解码器按**设备真实率**出 PCM，重采样交给 ffmpeg（避免变调）
-        return replace(spec, sample_rate=int(rate))
+        return self._apply_strict_constraints(spec)
 
     def _dsp_will_process(self) -> bool:
         """这次起播 DSP 是否真的会改样本（= 整数通路是否可行，取反）。"""
@@ -733,11 +881,13 @@ class PlayerEngine:
         if self._output_factory is not None:
             return self._output_factory(ring, device, hook)
         settings = self.settings
+        mode = self._plan.mode if self._plan is not None else self._output_mode()
         return AudioOutput(
             ring,
             device=device.index if device is not None else "",
             backend=str(getattr(settings, "playback_output_backend", "") or ""),
-            exclusive=bool(getattr(settings, "playback_exclusive", False)),
+            exclusive=mode.is_exclusive,
+            mode=mode,
             blocksize=self._block_frames,
             hook=hook,
         )
@@ -752,6 +902,13 @@ class PlayerEngine:
 
     def _start_item(self, item: QueueItem, offset_ms: int = 0) -> bool:
         """起播/续播一首：开解码器 → 预填 → 开流 → PLAYING。"""
+        backend = str(getattr(self.settings, "playback_output_backend", "") or "")
+        if backend == "asio" and not devices_mod.backend_present("asio"):
+            # 用户手工把后端写成 asio（或从别处同步来的配置）：不崩，给准确原因
+            self._fail(
+                "当前 PortAudio 构建不含 ASIO：本版未启用 ASIO（需替换 DLL，见 v1.7 说明）"
+            )
+            return False
         if not Path(item.path).exists():
             self._fail(f"文件不存在：{item.path}")
             return False
@@ -787,15 +944,63 @@ class PlayerEngine:
         try:
             output = self._make_output(ring, device)
             if hasattr(output, "prepare"):
-                actual_rate = int(output.prepare(spec.sample_rate, spec.channels))
+                # rate_decided=True：采样率已由 plan_output 一次定案，输出层不得再探
+                # （两次探测之间设备可能变化，那正是 v1.6 里 44.1k→48k 抖动的来源）
+                mode_arg = self._plan.mode if self._plan is not None else self._output_mode()
+                try:
+                    actual_rate = int(
+                        output.prepare(
+                            spec.sample_rate,
+                            spec.channels,
+                            mode=mode_arg,
+                            rate_decided=True,
+                        )
+                    )
+                except TypeError as exc:
+                    # 注入的测试替身可能还是 v1.6 的两参数签名：退回去调，
+                    # 但只对「不认识这个关键字」放行，别把真错误吞了
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    actual_rate = int(output.prepare(spec.sample_rate, spec.channels))
             else:  # 注入的极简假输出：退回一步到位
                 actual_rate = int(output.start(spec.sample_rate, spec.channels))
         except (DeviceBusyError, DeviceLostError, RateUnsupportedError, DeviceError) as exc:
+            # 探测说"独占可用"、真开流却失败（本机 Nahimic 44.1k 独占就是这样：
+            # Pa_IsFormatSupported 给假阳性、开流报 -9996）。这类情况**不能**直接
+            # 进 ERROR —— 用户要的是听歌，不是听错误。降级共享重试一次，并留痕。
+            if self._plan is not None and self._plan.mode.is_exclusive and not self._force_shared:
+                log.warning("独占开流失败，降级共享重试：%s", exc)
+                self._force_shared = True
+                self._discard_output(output)
+                self._teardown_playback()
+                self._exclusive_refused_note = str(exc)
+                return self._start_item(item, offset_ms)
             self._fail(f"打开输出设备失败：{exc}")
             return False
         except Exception as exc:  # noqa: BLE001 - 未知异常也要转 ERROR 而不是崩
             self._fail(f"打开输出设备失败：{exc}")
             return False
+
+        actual_mode = (
+            output.actual_mode() if hasattr(output, "actual_mode") else None
+        )
+        if (
+            actual_mode is not None
+            and self._plan is not None
+            and actual_mode is not self._plan.mode
+        ):
+            # 计划说独占、PortAudio 实际给了共享：必须是"降级"而不是"独占成功"
+            log.warning(
+                "输出模式实际为 %s（计划 %s），按实际值上报信号路径",
+                actual_mode.value, self._plan.mode.value,
+            )
+            self._plan = replace(self._plan, mode=actual_mode, level=max(4, self._plan.level),
+                                 fallback=True,
+                                 note=(self._plan.note or "设备未接受独占，已按共享打开"))
+            if str(getattr(self.settings, "playback_exclusive_fallback", "auto")) == "never":
+                self._discard_output(output)
+                self._fail("独占无法生效（设备未接受独占参数），且设置为「只报错」")
+                return False
 
         if actual_rate != int(spec.sample_rate):
             # 理论上 pick_rate 已裁决过；真出现说明设备在两次查询之间变了，
@@ -1036,6 +1241,17 @@ class PlayerEngine:
                 output_snapshot = dict(self._output.snapshot())
             except Exception:  # noqa: BLE001
                 output_snapshot = {}
+        # v1.7 关键修复：`exclusive` 从此只传**实际值**。
+        # 之前这里传的是 settings.playback_exclusive（请求值），于是勾了独占却降级
+        # 共享时，面板照样显示"独占" —— 信号路径说谎比不说更糟。
+        actual_mode = str(output_snapshot.get("mode", "") or "shared")
+        actual_exclusive = bool(output_snapshot.get("exclusive", False))
+        mode_label = {
+            "shared": "shared",
+            "exclusive": "loose",
+            "exclusive_strict": "strict",
+        }.get(actual_mode, "shared")
+        plan = self._plan
         self._signal.configure(
             source=spec.to_display(),
             codec=spec.codec,
@@ -1057,7 +1273,25 @@ class PlayerEngine:
             downmix_from=0,
             backend=str(getattr(settings, "playback_output_backend", "") or ""),
             device=output_snapshot.get("device", "") or (device.name if device else ""),
-            exclusive=bool(getattr(settings, "playback_exclusive", False)),
+            exclusive=actual_exclusive,
+            exclusive_actual=actual_exclusive,
+            mode_label=mode_label,
+            system_mix_rate=int(
+                output_snapshot.get("system_mix_rate", 0)
+                or (device.rate if device is not None else 0)
+            ),
+            mode_note=str(
+                getattr(plan, "note", "")
+                or output_snapshot.get("mode_note", "")
+                or ""
+            ),
+            exclusive_refused=bool(
+                self._exclusive_refused_note
+                or (
+                    getattr(plan, "note", "")
+                    and "不支持独占" in str(getattr(plan, "note", ""))
+                )
+            ),
             latency_ms=float(output_snapshot.get("latency_ms", 0.0) or 0.0),
             device_dtype=str(output_snapshot.get("dtype", "") or ""),
             int_pipeline=spec.sample_fmt in ("s16", "s24", "s32"),

@@ -157,7 +157,7 @@ def _selftest() -> int:
     return 0
 
 
-def _audio_smoke(src: str) -> int:
+def _audio_smoke(src: str, mode: str = "") -> int:
     """`--audio-smoke <音频文件>`：真实播放 3 秒并落盘结果（发版冒烟用）。
 
     校验脚本查不到 PYZ 归档里的 sounddevice 模块，「DLL 漏带」的症状又是
@@ -176,7 +176,15 @@ def _audio_smoke(src: str) -> int:
         from .player.session import clear_session
 
         info = probe(Path(src), with_cue=False)
-        engine = PlayerEngine(Settings(), on_event=None)
+        settings = Settings()
+        report["requested_mode"] = mode or settings.playback_output_mode
+        if mode:
+            # 冒烟专用：强制 WASAPI + 指定模式，让"独占到底成没成"变成可判定的事实
+            settings.playback_output_backend = "wasapi"
+            settings.playback_output_mode = mode
+            if mode == "exclusive_strict":
+                settings.playback_int_pipeline = True
+        engine = PlayerEngine(settings, on_event=None)
         ok = engine.play(info)  # probe 直接返回 Track，不要取 .original（那是 Tags）
         report["play_accepted"] = bool(ok)
         if ok:
@@ -189,6 +197,14 @@ def _audio_smoke(src: str) -> int:
                 position_ms=snap.get("position_ms"),
                 underruns=snap.get("output", {}).get("underruns"),
                 signal_summary=snap.get("signal_summary"),
+                # v1.7：独占冒烟要能回答"到底拿到独占没有"
+                output_mode=snap.get("output_mode"),
+                output_mode_requested=snap.get("output_mode_requested"),
+                exclusive=snap.get("exclusive"),
+                system_mix_rate=snap.get("system_mix_rate"),
+                wording_level=snap.get("wording_level"),
+                mode_note=snap.get("mode_note"),
+                error=snap.get("error"),
             )
             engine.stop()
         engine.shutdown()
@@ -197,11 +213,20 @@ def _audio_smoke(src: str) -> int:
         report["error"] = f"{type(exc).__name__}: {exc}"
         report["ok"] = False
     else:
-        report["ok"] = (
+        rate_ok = report.get("rate") in (44100, 48000, 88200, 96000, 176400, 192000)
+        report["ok"] = bool(
             report.get("play_accepted") is True
             and report.get("underruns") == 0
-            and report.get("rate") in (44100, 48000, 88200, 96000, 176400, 192000)
+            and rate_ok
         )
+        if mode.startswith("exclusive"):
+            # 显式要求独占时，"降级成共享"不算通过（否则冒烟就是在自欺欺人）
+            report["ok"] = bool(report["ok"] and report.get("exclusive") is True)
+            if not report.get("exclusive"):
+                report.setdefault(
+                    "error",
+                    "请求独占但实际未取得独占：" + str(report.get("mode_note") or "设备不支持"),
+                )
     target = Path(tempfile.gettempdir()) / "seqaudio_audio_smoke.json"
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if report.get("ok") else 1
@@ -399,7 +424,12 @@ def main(argv: list[str] | None = None) -> int:
     if "--audio-smoke" in args:
         index = args.index("--audio-smoke")
         target = args[index + 1] if index + 1 < len(args) else ""
-        return _audio_smoke(target)
+        # 可选的 --mode=shared|exclusive|exclusive_strict（T06 独占冒烟）
+        mode = ""
+        for token in args:
+            if token.startswith("--mode="):
+                mode = token.split("=", 1)[1].strip()
+        return _audio_smoke(target, mode=mode)
     if "--selftest-file" in args:
         index = args.index("--selftest-file")
         target = args[index + 1] if index + 1 < len(args) else ""

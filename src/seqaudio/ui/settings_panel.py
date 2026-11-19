@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -14,14 +17,19 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.config import Settings
+from ..player import devices as player_devices
+from ..player.constants import OutputMode
 from ..core.model import ConflictMode, LyricsMode
 from ..core.rename import DEFAULT_TEMPLATE
 from . import fonts, i18n, theme
@@ -423,27 +431,115 @@ class SettingsPanel(QWidget):
             ("directsound", "DirectSound", "dev_hint_directsound"),
             ("mme", "MME", "dev_hint_mme"),
             ("wdmks", "WDM-KS", "dev_hint_wdmks"),
+            ("asio", i18n.tr("dev_hint_asio"), "dev_hint_asio_missing"),
         ):
             self.backend_combo.addItem(i18n.tr_text(label), key)
-            self.backend_combo.setItemData(
-                self.backend_combo.count() - 1,
-                i18n.tr(hint),
-                Qt.ToolTipRole,
-            )
+            index = self.backend_combo.count() - 1
+            self.backend_combo.setItemData(index, i18n.tr(hint), Qt.ToolTipRole)
+            if key == "asio" and not player_devices.backend_present("asio"):
+                # 当前 PortAudio 构建不含 ASIO：**置灰 + 说明**，不做 DLL 替换（Q5）
+                model_item = self.backend_combo.model().item(index)
+                if model_item is not None:
+                    model_item.setEnabled(False)
         self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
 
         self.backend_hint = QLabel("")
         self.backend_hint.setObjectName("hint")
         self.backend_hint.setWordWrap(True)
 
-        self.exclusive_check = QCheckBox("独占输出（WASAPI 独占模式）")
+        # ---- 输出模式：三选一（v1.7）----
+        # 为什么不是一个复选框：独占有两档，严格档要求整数通路、DSP 全旁路，
+        # 与"开了独占就能用"是两件事（见 docs/1.7-独占输出设计.md §4.1）。
+        self.mode_group = QButtonGroup(self)
+        self.mode_shared = QRadioButton(i18n.tr("dev_mode_shared"))
+        self.mode_exclusive = QRadioButton(i18n.tr("dev_mode_exclusive"))
+        self.mode_strict = QRadioButton(i18n.tr("dev_mode_exclusive_strict"))
+        self.mode_strict.setToolTip(i18n.tr("dev_mode_strict_hint"))
+        for index, button in enumerate(
+            (self.mode_shared, self.mode_exclusive, self.mode_strict)
+        ):
+            self.mode_group.addButton(button, index)
+            button.toggled.connect(self._on_output_mode_changed)
+        self.mode_row = QWidget()
+        mode_layout = QHBoxLayout(self.mode_row)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(12)
+        for button in (self.mode_shared, self.mode_exclusive, self.mode_strict):
+            mode_layout.addWidget(button)
+        mode_layout.addStretch(1)
+
+        # 兼容 v1.6 的旧用例/调用方：隐藏的布尔镜像，setChecked(True) == 选「独占」
+        self.exclusive_check = QCheckBox("独占输出")
+        self.exclusive_check.setVisible(False)
         self.exclusive_check.toggled.connect(self._on_exclusive_changed)
+
         self.exclusive_hint = QLabel(
-            "独占会抢占其他应用的声音（会议软件、浏览器会突然没声），默认关闭。"
+            "独占会抢占其他应用的声音（会议软件、浏览器会突然没声）；"
+            "停止或暂停即释放设备（可在下方关闭「暂停即释放」）。"
         )
         self.exclusive_hint.setObjectName("hint")
         self.exclusive_hint.setWordWrap(True)
         self.exclusive_hint.setVisible(False)
+
+        self.fallback_combo = QComboBox()
+        for key, label in (
+            ("auto", "自动回退共享（信号路径留痕）"),
+            ("ask", "每次询问"),
+            ("never", "不回退，直接报错"),
+        ):
+            self.fallback_combo.addItem(i18n.tr_text(label), key)
+        self.fallback_combo.setToolTip(
+            "独占不可用时怎么办。auto 也会在信号路径与日志里写明降级原因，不静默。"
+        )
+        self.fallback_combo.currentIndexChanged.connect(self._notify)
+
+        self.release_on_pause_check = QCheckBox("暂停时释放设备（推荐）")
+        self.release_on_pause_check.setToolTip(
+            "关闭：暂停仍占着设备（恢复更快，约 +100 ms 差异）；"
+            "开启：暂停即让出设备，浏览器/会议软件马上能出声"
+        )
+        self.release_on_pause_check.toggled.connect(self._notify)
+
+        # ---- 设备能力矩阵（零出声探测）----
+        self.capability_box = QWidget()
+        capability_layout = QVBoxLayout(self.capability_box)
+        capability_layout.setContentsMargins(0, 6, 0, 0)
+        capability_layout.setSpacing(6)
+        self.capability_title = QLabel(i18n.tr("dev_cap_title"))
+        self.capability_title.setObjectName("hint")
+        capability_layout.addWidget(self.capability_title)
+        self.capability_table = QTableWidget(0, 4)
+        self.capability_table.setHorizontalHeaderLabels(
+            [
+                i18n.tr("dev_cap_rate"),
+                i18n.tr("dev_cap_shared"),
+                i18n.tr("dev_cap_exclusive"),
+                i18n.tr("dev_cap_strict"),
+            ]
+        )
+        self.capability_table.verticalHeader().setVisible(False)
+        self.capability_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.capability_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.capability_table.setMaximumHeight(150)
+        self.capability_table.horizontalHeader().setStretchLastSection(True)
+        capability_layout.addWidget(self.capability_table)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        self.probe_button = QPushButton(i18n.tr("dev_probe_again"))
+        self.probe_button.setObjectName("ghost")
+        self.probe_button.clicked.connect(self._refresh_capability)
+        self.test_button = QPushButton(i18n.tr("dev_test_device"))
+        self.test_button.setObjectName("ghost")
+        self.test_button.clicked.connect(self._test_device)
+        button_row.addWidget(self.probe_button)
+        button_row.addWidget(self.test_button)
+        button_row.addStretch(1)
+        capability_layout.addLayout(button_row)
+        self.capability_hint = QLabel("")
+        self.capability_hint.setObjectName("hint")
+        self.capability_hint.setWordWrap(True)
+        capability_layout.addWidget(self.capability_hint)
+        self.capability_box.setVisible(False)
 
         self.follow_rate_check = QCheckBox("采样率跟随源文件")
         self.follow_rate_check.setToolTip(
@@ -458,8 +554,12 @@ class SettingsPanel(QWidget):
             ]
         )
         card.add_widget(self.backend_hint)
+        card.add_widget(self.mode_row)
         card.add_widget(self.exclusive_check)
         card.add_widget(self.exclusive_hint)
+        card.add_widget(self.fallback_combo)
+        card.add_widget(self.release_on_pause_check)
+        card.add_widget(self.capability_box)
         card.add_widget(self.follow_rate_check)
         return card
 
@@ -571,15 +671,176 @@ class SettingsPanel(QWidget):
     def _on_backend_changed(self, _index: int) -> None:
         key = self._current_backend_key()
         self.backend_hint.setText(i18n.tr(f"dev_hint_{key}"))
+        if not self._loading:
+            mode = self._current_output_mode()
+            # 非 WASAPI 后端：独占/严格置灰，并退回共享
+            self._apply_mode_constraints(mode)
+            if key != "wasapi" and mode.is_exclusive:
+                self._set_output_mode(OutputMode.SHARED)
+                self.capability_box.setVisible(False)
+            elif self.capability_box.isVisible():
+                self._refresh_capability()
         self._notify()
 
+    # ------------------------------------------------------------ 输出模式（v1.7）
+
+    def _current_output_mode(self) -> OutputMode:
+        """面板上的三选一 → ``OutputMode``。"""
+        if self.mode_strict.isChecked():
+            return OutputMode.EXCLUSIVE_STRICT
+        if self.mode_exclusive.isChecked():
+            return OutputMode.EXCLUSIVE
+        return OutputMode.SHARED
+
+    def _set_output_mode(self, mode: OutputMode) -> None:
+        """设置三选一（不触发探测，避免 load_from 期间反复扫设备）。"""
+        button = {
+            OutputMode.SHARED: self.mode_shared,
+            OutputMode.EXCLUSIVE: self.mode_exclusive,
+            OutputMode.EXCLUSIVE_STRICT: self.mode_strict,
+        }[mode]
+        if not button.isChecked():
+            button.setChecked(True)
+
     def _on_exclusive_changed(self, checked: bool) -> None:
-        self.exclusive_hint.setVisible(bool(checked))
-        if checked:
-            self.exclusive_hint.setText(
-                "独占会抢占其他应用的声音（会议软件、浏览器会突然没声），默认关闭。"
-            )
+        """v1.6 布尔镜像的槽：``True`` 等价于选「宽松独占」。"""
+        if self._loading:
+            return
+        if checked and self._current_output_mode() is OutputMode.SHARED:
+            self._set_output_mode(OutputMode.EXCLUSIVE)
+
+    def _on_output_mode_changed(self, _checked: bool = False) -> None:
+        """模式切换：联动严格模式的强制项、能力矩阵与提示。"""
+        if self._loading:
+            return
+        mode = self._current_output_mode()
+        self.exclusive_hint.setVisible(mode.is_exclusive)
+        self.exclusive_check.blockSignals(True)
+        self.exclusive_check.setChecked(mode.is_exclusive)
+        self.exclusive_check.blockSignals(False)
+        self._apply_mode_constraints(mode)
+        self.capability_box.setVisible(mode.is_exclusive)
+        if mode.is_exclusive:
+            self._refresh_capability()
         self._notify()
+
+    def _apply_mode_constraints(self, mode: OutputMode) -> None:
+        """严格模式的强制项：整数通路必勾且锁定；后端不支持时置灰独占。"""
+        backend = self._current_backend_key()
+        wasapi = backend == "wasapi"
+        for button in (self.mode_exclusive, self.mode_strict):
+            button.setEnabled(wasapi)
+        if not wasapi:
+            self.capability_hint.setText(i18n.tr("dev_hint_exclusive_wasapi_only"))
+        # 严格：要求整数通路（float32 会被 explicit_sample_format 拒绝）
+        if mode.explicit_format:
+            self.int_pipeline_check.blockSignals(True)
+            self.int_pipeline_check.setChecked(True)
+            self.int_pipeline_check.blockSignals(False)
+            self.int_pipeline_check.setEnabled(False)
+            self.int_pipeline_check.setToolTip(i18n.tr("dev_mode_strict_int_hint"))
+        else:
+            self.int_pipeline_check.setEnabled(True)
+            self.int_pipeline_check.setToolTip(
+                "整数通路只在「音量旁路 + 无 EQ」时生效；DSP 一开就自动回浮点"
+            )
+
+    # ------------------------------------------------------------ 能力矩阵
+
+    def _capability_device(self):
+        """面板当前选中的设备（名字 → DeviceInfo；空 = 后端默认）。"""
+        try:
+            return player_devices.resolve_device(
+                str(self.device_combo.currentData() or ""), self._current_backend_key()
+            )
+        except Exception:  # noqa: BLE001 - 没有设备时不该让设置页打不开
+            return None
+
+    def _refresh_capability(self) -> None:
+        """零出声探测并渲染能力矩阵（设计 §9.1）。"""
+        device = self._capability_device()
+        if device is None:
+            self.capability_hint.setText(i18n.tr("dev_no_output_device"))
+            return
+        try:
+            capability = player_devices.probe_cache().get(device, refresh=True)
+        except Exception as exc:  # noqa: BLE001
+            self.capability_hint.setText(str(exc))
+            return
+        rates = (44100, 48000, 96000, 192000)
+        self.capability_table.setRowCount(len(rates))
+        unlocked: list[int] = []
+        for row, rate in enumerate(rates):
+            self.capability_table.setItem(
+                row, 0, QTableWidgetItem(f"{rate / 1000:g} kHz")
+            )
+            for column, mode in (
+                (1, OutputMode.SHARED),
+                (2, OutputMode.EXCLUSIVE),
+                (3, OutputMode.EXCLUSIVE_STRICT),
+            ):
+                ok = capability.supports(rate, mode)
+                item = QTableWidgetItem("✓" if ok else "✗")
+                item.setTextAlignment(Qt.AlignCenter)
+                self.capability_table.setItem(row, column, item)
+            if capability.supports(rate, OutputMode.EXCLUSIVE) and not capability.supports(
+                rate, OutputMode.SHARED
+            ):
+                unlocked.append(rate)
+        # Q2：把「独占解锁的高采样率」讲出来，但只能限定为本设备实测
+        if unlocked:
+            rate_text = "/".join(f"{rate / 1000:g}k" for rate in unlocked)
+            self.capability_hint.setText(
+                i18n.tr_format("dev_cap_unlocked", rates=rate_text)
+            )
+        else:
+            self.capability_hint.setText(i18n.tr("dev_cap_none_unlocked"))
+
+    def _show_cached_capability(self) -> None:
+        """有缓存就渲染，没有就提示去点「重新探测」——load 阶段不扫设备。"""
+        device = self._capability_device()
+        if device is None:
+            self.capability_hint.setText(i18n.tr("dev_no_output_device"))
+            return
+        cache = player_devices.probe_cache()
+        if not cache.has(device):
+            self.capability_hint.setText(i18n.tr("dev_cap_not_probed"))
+            self.capability_table.setRowCount(0)
+            return
+        capability = cache.get(device)
+        rates = (44100, 48000, 96000, 192000)
+        self.capability_table.setRowCount(len(rates))
+        for row, rate in enumerate(rates):
+            self.capability_table.setItem(row, 0, QTableWidgetItem(f"{rate / 1000:g} kHz"))
+            for column, mode in (
+                (1, OutputMode.SHARED),
+                (2, OutputMode.EXCLUSIVE),
+                (3, OutputMode.EXCLUSIVE_STRICT),
+            ):
+                item = QTableWidgetItem("✓" if capability.supports(rate, mode) else "✗")
+                item.setTextAlignment(Qt.AlignCenter)
+                self.capability_table.setItem(row, column, item)
+
+    def _test_device(self) -> None:
+        """真开一条 1 s 静音流（唯一允许的真开流探测，用户显式点击才走）。"""
+        device = self._capability_device()
+        mode = self._current_output_mode()
+        if device is None:
+            self.capability_hint.setText(i18n.tr("dev_no_output_device"))
+            return
+        self.capability_hint.setText(i18n.tr("dev_testing"))
+        QApplication.processEvents()  # 让提示先画出来，别让用户以为卡死
+        ok, reason, actual = player_devices.backend_available(
+            self._current_backend_key(), mode=mode, device=device
+        )
+        if ok:
+            self.capability_hint.setText(
+                i18n.tr_format("dev_test_ok", rate=actual, mode=mode.value)
+            )
+        else:
+            self.capability_hint.setText(
+                i18n.tr_format("dev_test_failed", reason=reason)
+            )
 
     def _build_save_bar(self) -> QWidget:
         """底部保存条：修改参数后必须点「保存」才生效，未保存时高亮提示。"""
@@ -749,8 +1010,30 @@ class SettingsPanel(QWidget):
             device = str(getattr(settings, "playback_device", "") or "")
             index = self.device_combo.findData(device)
             self.device_combo.setCurrentIndex(index if index >= 0 else 0)
-            self.exclusive_check.setChecked(bool(getattr(settings, "playback_exclusive", False)))
-            self.exclusive_hint.setVisible(self.exclusive_check.isChecked())
+            # 三值模式：以 playback_output_mode 为准，旧布尔只作镜像兜底
+            mode = OutputMode(
+                str(getattr(settings, "playback_output_mode", "shared") or "shared")
+            ) if str(getattr(settings, "playback_output_mode", "shared")) in {
+                item.value for item in OutputMode
+            } else OutputMode.SHARED
+            if mode is OutputMode.SHARED and bool(
+                getattr(settings, "playback_exclusive", False)
+            ):
+                mode = OutputMode.EXCLUSIVE
+            self._set_output_mode(mode)
+            self.exclusive_check.blockSignals(True)
+            self.exclusive_check.setChecked(mode.is_exclusive)
+            self.exclusive_check.blockSignals(False)
+            self.exclusive_hint.setVisible(mode.is_exclusive)
+            fallback = str(getattr(settings, "playback_exclusive_fallback", "auto") or "auto")
+            index = self.fallback_combo.findData(fallback)
+            self.fallback_combo.setCurrentIndex(index if index >= 0 else 0)
+            self.release_on_pause_check.setChecked(
+                bool(getattr(settings, "playback_release_on_pause", True))
+            )
+            self._apply_mode_constraints(mode)
+            self.capability_box.setVisible(mode.is_exclusive)
+            self._show_cached_capability()
             self.auto_lyrics_check.setChecked(
                 bool(getattr(settings, "playback_auto_lyrics", True))
             )
@@ -838,7 +1121,15 @@ class SettingsPanel(QWidget):
         # ---- 播放页（字段名必须与 core.config.Settings 的 playback_* 严格对应）----
         settings.playback_output_backend = self._current_backend_key()
         settings.playback_device = str(self.device_combo.currentData() or "")
-        settings.playback_exclusive = self.exclusive_check.isChecked()
+        mode = self._current_output_mode()
+        settings.playback_output_mode = mode.value
+        # 布尔镜像：面板永远同时写两个字段，避免「设了模式但旧字段还在说独占」
+        settings.playback_exclusive = mode.is_exclusive
+        settings.playback_exclusive_fallback = str(
+            self.fallback_combo.currentData() or "auto"
+        )
+        settings.playback_release_on_pause = self.release_on_pause_check.isChecked()
+        settings.playback_strict_require_int = True
         settings.playback_auto_lyrics = self.auto_lyrics_check.isChecked()
         settings.playback_follow_source_rate = self.follow_rate_check.isChecked()
         settings.playback_buffer_ms = int(self.buffer_spin.value())

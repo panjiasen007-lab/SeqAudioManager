@@ -583,8 +583,10 @@ def main() -> int:
     if playback_card.buffer_spin.value() != 120:
         print("✗ 播放页缓冲 roundtrip 失败：", playback_card.buffer_spin.value())
         ok = False
-    if playback_card.backend_combo.count() != 4:
-        print("✗ 后端下拉不是 4 项：", playback_card.backend_combo.count())
+    # v1.7 T05：后端下拉多了「ASIO」（当前 PortAudio 构建不含它，置灰 + 说明），
+    # 因此是 5 项而不是 4 项。
+    if playback_card.backend_combo.count() != 5:
+        print("✗ 后端下拉不是 5 项：", playback_card.backend_combo.count())
         ok = False
     # 还原，避免污染真实 config.json 与后续用例
     for key, value in keep.items():

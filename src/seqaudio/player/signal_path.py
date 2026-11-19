@@ -30,6 +30,18 @@ log = logging.getLogger(__name__)
 TEXT_NO_SOFTWARE_CHANGE = "未做软件改动"
 #: 采样率回退时的说明模板
 TEXT_FALLBACK_RATE = "已重采样 {src}→{dst}（设备不支持源采样率）"
+#: L1：绕开系统混音器（两个独立读数互相印证：设备默认率 vs 本流率）
+TEXT_L1 = "已绕开系统混音器（系统混音 {mix} Hz · 本流 {rate} Hz）"
+#: L2：本进程未重采样/未改率/未加增益
+TEXT_L2 = "本进程未重采样、未改采样率、未加软件增益（{container} 位容器 / 有效位深 {depth} 位）"
+#: L3（**永久禁止**）：只有回环录音比对才能说的那几句
+TEXT_L3_FORBIDDEN = "（该类表述已禁用：本进程无法证明设备侧的位一致性）"
+#: output 级快照
+TEXT_OUTPUT_STRICT = "WASAPI · 独占（严格）"
+TEXT_OUTPUT_LOOSE = "WASAPI · 独占"
+TEXT_OUTPUT_SHARED = "WASAPI · 共享（系统混音器）"
+TEXT_OUTPUT_REFUSED = "WASAPI · 共享（该设备不支持独占）"
+TEXT_OUTPUT_ASIO_MISSING = "ASIO · 不可用（当前 PortAudio 构建不含 ASIO）"
 #: 整数通路被 DSP 挤掉时的说明（面板必须说清楚为什么「位完美」没生效）
 TEXT_INT_PIPELINE_UNAVAILABLE = "整数通路不可用（DSP 已启用，改用浮点）"
 #: 绝不允许出现的说法
@@ -58,13 +70,26 @@ STAGE_LABELS = {
 
 
 def assert_wording(text: str) -> str:
-    """把禁用的措辞降级为合规说法（防某处手滑写死）。"""
+    """把禁用的措辞降级为合规说法（防某处手滑写死）。
+
+    除了逐条黑名单，还做两条**启发式**拦截（设计 §7.3）：同一句里同时出现
+    「位」与「完美」（各种拼法/空格变体），以及「24bit 直通」这类表述 ——
+    它们都指向同一个无法证明的承诺。宁可错杀，不可放过：这种承诺一旦出现在
+    界面上就是可被证伪的营销话术。
+    """
     value = str(text or "")
     lowered = value.lower()
     for banned in FORBIDDEN_CLAIMS:
         if banned.lower() in lowered:
             log.warning("信号路径文案含禁用措辞 %r，已替换：%s", banned, value)
             return TEXT_NO_SOFTWARE_CHANGE
+    compact = lowered.replace(" ", "")
+    if ("位" in compact and "完美" in compact) or ("bit" in compact and "perfect" in compact):
+        log.warning("信号路径文案触发「位完美」启发式拦截：%s", value)
+        return TEXT_NO_SOFTWARE_CHANGE
+    if "直通dac" in compact or "直通 dac" in lowered:
+        log.warning("信号路径文案声称「直通 DAC」：%s", value)
+        return TEXT_NO_SOFTWARE_CHANGE
     return value
 
 
@@ -138,6 +163,7 @@ class SignalPath:
     ) -> None:
         self.stages: list[SignalStage] = list(stages or [])
         self.counters: Counters = counters or Counters()
+        self._context: dict[str, Any] = {}
         if not self.stages:
             self.stages = [SignalStage(key=key) for key in STAGE_KEYS]
 
@@ -176,6 +202,11 @@ class SignalPath:
         device_dtype: str = "",
         int_pipeline: bool = False,
         format_note: str = "",
+        exclusive_actual: bool = False,
+        mode_label: str = "",
+        system_mix_rate: int = 0,
+        mode_note: str = "",
+        exclusive_refused: bool = False,
     ) -> "SignalPath":
         """按真实链路重建 9 级描述（引擎开流成功后调用一次）。"""
         want = int(rate_want or 0)
@@ -260,16 +291,55 @@ class SignalPath:
             )
         )
 
-        backend_text = BACKEND_LABELS.get(str(backend or "").lower(), str(backend or "") or "默认后端")
-        output_detail = " · ".join(
-            part for part in (backend_text, "独占" if exclusive else "共享", device) if part
+        backend_key = str(backend or "").lower()
+        backend_text = BACKEND_LABELS.get(backend_key, str(backend or "") or "默认后端")
+        # `exclusive` 是 v1.6 的旧参数，语义上等同「实际独占」；新代码用 exclusive_actual
+        actual_exclusive = bool(exclusive_actual or exclusive)
+        label = str(mode_label or ("shared" if not actual_exclusive else "loose"))
+        if backend_key == "asio" and not actual_exclusive:
+            output_status = StageStatus.ERROR
+            output_detail = TEXT_OUTPUT_ASIO_MISSING
+        elif actual_exclusive:
+            head = TEXT_OUTPUT_STRICT if label == "strict" else TEXT_OUTPUT_LOOSE
+            output_detail = " · ".join(part for part in (head, device) if part)
+            output_status = StageStatus.PASSTHROUGH
+        elif exclusive_refused:
+            output_detail = " · ".join(
+                part for part in (TEXT_OUTPUT_REFUSED, device) if part
+            )
+            output_status = StageStatus.FALLBACK
+        elif backend_key == "wasapi":
+            # 请求了独占却落在共享：必须标 FALLBACK（面板不能显示"独占"）
+            output_detail = " · ".join(
+                part for part in (TEXT_OUTPUT_SHARED, device) if part
+            )
+            output_status = (
+                StageStatus.FALLBACK if mode_note else StageStatus.PASSTHROUGH
+            )
+        else:
+            output_detail = " · ".join(
+                part for part in (backend_text, "共享", device) if part
+            )
+            output_status = StageStatus.PASSTHROUGH
+        if mode_note:
+            output_detail = f"{output_detail}（{mode_note}）" if output_detail else mode_note
+        stages.append(
+            SignalStage("output", detail=output_detail or "—", status=output_status)
         )
-        stages.append(SignalStage("output", detail=output_detail or "—"))
 
+        mix_rate = int(system_mix_rate or 0)
+        if actual and mix_rate and mix_rate != actual and actual_exclusive:
+            rate_text = f"{actual} Hz（系统混音 {mix_rate} Hz，已绕开）"
+        elif actual and want and actual != want:
+            rate_text = f"{actual} Hz（源 {want} Hz）"
+        elif actual:
+            rate_text = f"{actual} Hz"
+        else:
+            rate_text = ""
         device_detail = " · ".join(
             part
             for part in (
-                f"{actual} Hz" if actual else "",
+                rate_text,
                 f"{channels} ch" if channels else "",
                 device_dtype,
                 f"延迟 {latency_ms:.0f} ms" if latency_ms else "",
@@ -285,6 +355,16 @@ class SignalPath:
         )
 
         self.stages = stages
+        self._context = {
+            "exclusive_actual": actual_exclusive,
+            "mode_label": label,
+            "system_mix_rate": mix_rate,
+            "rate_want": want,
+            "rate_actual": actual,
+            "int_pipeline": bool(int_pipeline),
+            "sample_fmt": str(sample_fmt or ""),
+            "mode_note": str(mode_note or ""),
+        }
         return self
 
     # ------------------------------------------------------------ 运行期修正
@@ -317,6 +397,62 @@ class SignalPath:
             log.debug("未知计数器 %r", counter)
 
     # ------------------------------------------------------------ 读数
+
+    # ------------------------------------------------------------ 话术分级（v1.7 §7）
+
+    def wording_level(self) -> str:
+        """返回 ``"L2"`` / ``"L1"`` / ``"L0"``（**永远不会返回 L3**）。
+
+        * **L2**：严格独占 + 整数通路 + DSP 全旁路 + 率一致。本进程内可枚举，
+          但不含"设备侧未转换"。
+        * **L1**：实际独占 + 率一致 + 设备默认率与本流率不同（说明真的绕开了混音器）。
+        * **L0**：其余情况 —— 只能说「未做软件改动」。
+        """
+        ctx = self._context or {}
+        exclusive = bool(ctx.get("exclusive_actual"))
+        want = int(ctx.get("rate_want") or 0)
+        actual = int(ctx.get("rate_actual") or 0)
+        rate_match = bool(want and actual and want == actual)
+        mix_rate = int(ctx.get("system_mix_rate") or 0)
+        gain_changed = self.stage("gain") is not None and self.stage("gain").status is StageStatus.CHANGED
+        eq_changed = self.stage("eq") is not None and self.stage("eq").status is StageStatus.CHANGED
+        fade_changed = self.stage("fade") is not None and self.stage("fade").status is StageStatus.CHANGED
+
+        if (
+            exclusive
+            and str(ctx.get("mode_label")) == "strict"
+            and bool(ctx.get("int_pipeline"))
+            and rate_match
+            and not (gain_changed or eq_changed or fade_changed)
+        ):
+            return "L2"
+        if exclusive and rate_match and mix_rate and mix_rate != actual:
+            return "L1"
+        return "L0"
+
+    def wording_key(self) -> str:
+        """话术的 i18n 键（界面按当前语言渲染；L3 永远不会有键）。"""
+        return {
+            "L2": "sig_l2_no_resample",
+            "L1": "sig_l1_bypass_mixer",
+        }.get(self.wording_level(), "sig_l0_untouched")
+
+    def wording_text(self) -> str:
+        """当前状态**允许说**的那句话（L0/L1/L2 之一）。"""
+        level = self.wording_level()
+        ctx = self._context or {}
+        if level == "L2":
+            fmt = str(ctx.get("sample_fmt", ""))
+            wide = fmt.startswith(("s24", "s32"))
+            container = "32" if wide else "16"
+            depth = "24" if wide else "16"
+            return TEXT_L2.format(container=container, depth=depth)
+        if level == "L1":
+            return TEXT_L1.format(
+                mix=int(ctx.get("system_mix_rate") or 0),
+                rate=int(ctx.get("rate_actual") or 0),
+            )
+        return TEXT_NO_SOFTWARE_CHANGE
 
     def is_bitperfect_claimable(self) -> bool:
         """是否没有任何一级被「改变」——决定要不要显示「未做软件改动」标签。
@@ -372,6 +508,15 @@ __all__ = [
     "TEXT_INT_PIPELINE_UNAVAILABLE",
     "TEXT_FALLBACK_RATE",
     "FORBIDDEN_CLAIMS",
+    "TEXT_L1",
+    "TEXT_L2",
+    "TEXT_L2",
+    "TEXT_L3_FORBIDDEN",
+    "TEXT_OUTPUT_STRICT",
+    "TEXT_OUTPUT_LOOSE",
+    "TEXT_OUTPUT_SHARED",
+    "TEXT_OUTPUT_REFUSED",
+    "TEXT_OUTPUT_ASIO_MISSING",
     "BACKEND_LABELS",
     "assert_wording",
 ]

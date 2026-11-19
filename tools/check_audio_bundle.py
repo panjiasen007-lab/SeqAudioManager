@@ -26,6 +26,67 @@ CHECKS = [
     ("cffi 后端", "_cffi_backend*.pyd", 100_000),
 ]
 
+#: 必须存在于 PYZ 归档里的纯 Python 模块（它们不落独立文件，只能查归档）
+REQUIRED_MODULES = ("sounddevice", "_sounddevice", "_sounddevice_data", "cffi")
+
+
+def _read_zlib(reader_cls, path: Path) -> set[str] | None:
+    try:
+        reader = reader_cls(str(path))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARN  读取 {path.name} 失败：{exc}")
+        return None
+    toc = getattr(reader, "toc", None) or {}
+    return set(toc.keys()) if hasattr(toc, "keys") else None
+
+
+def _pyz_modules(internal: Path) -> set[str] | None:
+    """读 PYZ 归档里的模块名表；读不到返回 None（不算失败）。
+
+    为什么需要这一步：``sounddevice.py`` / ``_sounddevice_data/__init__.py`` 都是
+    纯 Python 模块，PyInstaller 会把它们编译进 PYZ 归档，磁盘上没有同名文件。
+    只查文件会得出"缺模块"的假警报，而只靠 ``--selftest`` 又要先跑起来 ——
+    发版检查最好能"静态"回答这个问题。
+
+    PyInstaller 5 把 PYZ 落成 ``_internal/PYZ-00.pyz``；6.x 的 onedir 直接把它
+    嵌在 exe 的 CArchive 里（entry 名 ``PYZ.pyz``）——两种布局都要能读。
+    """
+    try:
+        from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
+    except Exception:  # noqa: BLE001 - 没装 PyInstaller 就退化为只查文件
+        return None
+
+    for candidate in sorted(internal.glob("PYZ-*.pyz")):
+        modules = _read_zlib(ZlibArchiveReader, candidate)
+        if modules:
+            return modules
+
+    import tempfile
+
+    for exe in sorted(internal.parent.glob("*.exe")):
+        try:
+            archive = CArchiveReader(str(exe))
+            entries = list(getattr(archive, "toc", {}) or {})
+        except Exception:  # noqa: BLE001
+            continue
+        name = next((item for item in entries if "pyz" in str(item).lower()), None)
+        if not name:
+            continue
+        try:
+            payload = archive.extract(str(name))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  WARN  从 {exe.name} 提取 PYZ 失败：{exc}")
+            continue
+        if not payload:
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = Path(tmp) / "PYZ.pyz"
+            dump.write_bytes(payload)
+            modules = _read_zlib(ZlibArchiveReader, dump)
+            if modules:
+                return modules
+    return None
+
 
 def _resolve(internal: Path, pattern: str) -> Path | None:
     """路径含通配符时取第一个匹配（如 _cffi_backend.cp313-win_amd64.pyd）。"""
@@ -60,13 +121,31 @@ def main(argv: list[str]) -> int:
         if not ok:
             failed += 1
 
-    # 确认没有把 7 个平台变体全带进去（正常只应有 1 个 DLL）
+    # 模块层检查（PYZ 归档）
+    modules = _pyz_modules(internal)
+    if modules is None:
+        print("  WARN  模块层检查跳过（读不到 PYZ 归档；请改用 --selftest 补充确认）")
+    else:
+        for name in REQUIRED_MODULES:
+            ok = name in modules
+            print(f"  {'PASS' if ok else 'FAIL'}  {'模块 ' + name:<18} PYZ-00.pyz")
+            if not ok:
+                failed += 1
+
+    # 确认没有把 7 个平台/位数/ASIO 变体全带进去（v1.7 只允许 win64 非 ASIO 那一个）
     pa_dir = internal / "_sounddevice_data" / "portaudio-binaries"
     if pa_dir.is_dir():
-        dlls = [p.name for p in pa_dir.iterdir() if p.suffix.lower() in (".dll", ".dylib", ".so")]
-        if len(dlls) > 1:
-            print(f"\n  WARN  portaudio-binaries 里带了 {len(dlls)} 个二进制：{dlls}")
-            print("        应只保留 libportaudio64bit.dll，其余平台变体请核对 build.py 的排除规则")
+        dlls = [
+            p.name for p in pa_dir.iterdir() if p.suffix.lower() in (".dll", ".dylib", ".so")
+        ]
+        extra = [name for name in dlls if name != "libportaudio64bit.dll"]
+        if extra:
+            # v1.7 T06：ASIO/32bit/arm64 变体从未被验证过，出现即视为失败
+            print(f"  FAIL  PortAudio 变体过多：{sorted(dlls)}")
+            print("        只允许 libportaudio64bit.dll（v1.7 明确不做 ASIO/DLL 替换）")
+            failed += 1
+        else:
+            print(f"  PASS  {'PortAudio 变体':<18} 仅 {dlls[0] if dlls else '（缺失）'}")
 
     print()
     if failed:

@@ -642,7 +642,9 @@ class TestFoundation(unittest.TestCase):
             self.assertEqual(getattr(settings, name), expected, f"{name} 默认值不符")
         playback = [f.name for f in dataclasses.fields(Settings) if f.name.startswith("playback_")]
         library = [f.name for f in dataclasses.fields(Settings) if f.name.startswith("library_")]
-        self.assertEqual(len(playback), 32, f"playback_* 应为 32 个，实际 {len(playback)}")
+        # 32（v1.6）+ 5（v1.7 独占：output_mode / exclusive_fallback /
+        # release_on_pause / strict_require_int / device_probe_cache）
+        self.assertEqual(len(playback), 37, f"playback_* 应为 37 个，实际 {len(playback)}")
         self.assertEqual(len(library), 3, f"library_* 应为 3 个，实际 {len(library)}")
         # 可变默认值必须是独立对象（否则两个实例会共享同一个 list）
         self.assertIsNot(Settings().playback_eq_gains, Settings().playback_eq_gains)

@@ -115,7 +115,16 @@ class Settings:
     # MME/DirectSound 同一物理设备实测可接受 44100/48000/88200/96000/176400/192000，
     # 186 ms 上报延迟对音乐播放可接受。想独占/低延迟可自行切 WASAPI 并在面板看到回退标注。
     playback_output_backend: str = "mme"           # mme/directsound/wasapi/wdmks
-    playback_exclusive: bool = False               # WASAPI 独占（可选而非默认）
+    playback_exclusive: bool = False               # WASAPI 独占（v1.6 布尔旧值，v1.7 起是镜像）
+    # ---- 独占输出（v1.7）----
+    # 三档模式才是真语义；`playback_exclusive` 保留为镜像（面板/会话兼容）。
+    # 这里同样不 import player.constants（core 不认识 player），字符串字面量与
+    # `OutputMode` 的一致性由测试守护。
+    playback_output_mode: str = "shared"           # shared / exclusive / exclusive_strict
+    playback_exclusive_fallback: str = "auto"      # auto / ask / never（回退策略，auto 也必留痕）
+    playback_release_on_pause: bool = True         # 暂停即释放设备（Q3 定稿：默认释放）
+    playback_strict_require_int: bool = True       # 严格独占强制整数通路（Q6/DSP 全旁路）
+    playback_device_probe_cache: dict = field(default_factory=dict)  # 能力矩阵缓存
     playback_device: str = ""                      # 设备名，空 = 系统默认
     playback_follow_source_rate: bool = True       # 采样率跟随
     playback_dsd_pcm_rate: int = 176400            # DSD→PCM 目标率（88.2k/176.4k/352.8k）
@@ -184,6 +193,10 @@ class Settings:
         instance = cls()
         for key, value in clean.items():
             setattr(instance, key, value)
+        # v1.6 → v1.7 迁移：老配置只有布尔 `playback_exclusive`。
+        # 布尔为真而模式仍是默认值时，视为「宽松独占」，否则升级后用户的独占设置会凭空丢失。
+        if instance.playback_exclusive and instance.playback_output_mode == "shared":
+            instance.playback_output_mode = "exclusive"
         return instance
 
     def save(self, path: Optional[Path] = None) -> None:

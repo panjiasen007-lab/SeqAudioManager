@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import enum
+import logging
 
 # ---------------------------------------------------------------- 采样率
 
@@ -97,8 +98,14 @@ BACKEND_WASAPI = "wasapi"
 BACKEND_DIRECTSOUND = "directsound"
 BACKEND_MME = "mme"
 BACKEND_WDMKS = "wdmks"
+#: ASIO：v1.7 只做「能力可见 + 明确不可用」（设计 §5）。
+#: 官方 sounddevice wheel 的 PortAudio 构建**不含** ASIO，所以本机 backend_present("asio")
+#: 恒为 False；用户若自己换了带 ASIO 的 DLL，这段代码也能识别并正常工作。
+BACKEND_ASIO = "asio"
 
-BACKEND_KEYS = (BACKEND_WASAPI, BACKEND_DIRECTSOUND, BACKEND_MME, BACKEND_WDMKS)
+BACKEND_KEYS = (
+    BACKEND_WASAPI, BACKEND_DIRECTSOUND, BACKEND_MME, BACKEND_WDMKS, BACKEND_ASIO,
+)
 
 #: 后端键 -> PortAudio hostapi 名里的识别片段（大小写不敏感）。
 #: 各平台 hostapi 名不同，用「包含匹配」而不是等值匹配才不会在新版 PortAudio 上失配。
@@ -107,6 +114,7 @@ BACKEND_HOSTAPI_HINTS = {
     BACKEND_DIRECTSOUND: ("directsound", "direct sound"),
     BACKEND_MME: ("mme", "mm e"),
     BACKEND_WDMKS: ("wdm-ks", "wdmks", "wdm ks"),
+    BACKEND_ASIO: ("asio",),
 }
 
 # ---------------------------------------------------------------- 样本格式
@@ -161,6 +169,84 @@ def numpy_dtype_name(sample_fmt: str) -> str:
     """
     text = str(sample_fmt or "")
     return PCM_FMT_TO_NUMPY.get(text, text)
+
+# ---------------------------------------------------------------- 独占输出模式（v1.7）
+
+#: WASAPI 的三个独占参数说明见 `docs/1.7-独占输出设计.md` §4.1。
+#: ``auto_convert`` 恒为 False（本项目不借助系统转换，重采样一律由 ffmpeg 做，路径可查）。
+
+
+class OutputMode(str, enum.Enum):
+    """输出模式（v1.7）。
+
+    三档不是「三个开关」，而是三个**互斥**的开流参数组合：
+
+    * ``SHARED``：``extra_settings=None``，走系统混音器；
+    * ``EXCLUSIVE``（宽松）：``WasapiSettings(exclusive=True)``，
+      允许 PortAudio 协商样本格式（因此浮点也能开）；
+    * ``EXCLUSIVE_STRICT``（严格）：``exclusive=True, explicit_sample_format=True``。
+      **实测 float32 会被拒绝（-9997）**，所以严格模式与整数通路是强绑定
+      （见设计 §2.2 补测 C），不是两个独立开关。
+
+    ``exclusive=False, explicit=True`` 是无效组合（共享 + explicit 全部失败），
+    配置层与面板都不允许出现。
+    """
+
+    SHARED = "shared"
+    EXCLUSIVE = "exclusive"
+    EXCLUSIVE_STRICT = "exclusive_strict"
+
+    @property
+    def i18n_key(self) -> str:
+        return f"dev_mode_{self.value}"
+
+    @property
+    def is_exclusive(self) -> bool:
+        """是否要求独占（宽松或严格）。"""
+        return self is not OutputMode.SHARED
+
+    @property
+    def explicit_format(self) -> bool:
+        """是否要求 PortAudio 原样使用请求的样本格式（不做格式协商）。"""
+        return self is OutputMode.EXCLUSIVE_STRICT
+
+    @property
+    def mode_label(self) -> str:
+        """信号路径用的短标签：``shared`` / ``loose`` / ``strict``。"""
+        return {
+            OutputMode.SHARED: "shared",
+            OutputMode.EXCLUSIVE: "loose",
+            OutputMode.EXCLUSIVE_STRICT: "strict",
+        }[self]
+
+
+def normalize_output_mode(value: object, default: OutputMode = OutputMode.SHARED) -> OutputMode:
+    """把任意输入（枚举/字符串/布尔/None）收敛成 ``OutputMode``。
+
+    * ``True``/``False``：来自 v1.6 的旧字段 ``playback_exclusive``；
+    * 认不出的字符串：记 WARNING 并回 ``default``（不抛，配置层不能因为一个
+      拼错的值就让整个设置页打不开）。
+    """
+    if isinstance(value, OutputMode):
+        return value
+    if isinstance(value, bool):
+        return OutputMode.EXCLUSIVE if value else OutputMode.SHARED
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    # 别名：能力矩阵的表头/信号路径用的是 short label（shared/loose/strict），
+    # 调用方（测试、日志、面板）常直接把它传回来，这里统一认。
+    aliases = {"loose": OutputMode.EXCLUSIVE, "strict": OutputMode.EXCLUSIVE_STRICT}
+    if text in aliases:
+        return aliases[text]
+    try:
+        return OutputMode(text)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "未知输出模式 %r，按 %s 处理", value, default.value
+        )
+        return default
+
 
 # ---------------------------------------------------------------- 枚举
 
@@ -275,10 +361,11 @@ __all__ = [
     "RAMP_MS_MIN", "RAMP_MS_MAX", "RAMP_MS_DEFAULT",
     "CROSSFADE_MIN_SEC", "CROSSFADE_MAX_SEC", "DB_FLOOR_MUTE",
     "BACKEND_WASAPI", "BACKEND_DIRECTSOUND", "BACKEND_MME", "BACKEND_WDMKS",
+    "BACKEND_ASIO",
     "BACKEND_KEYS", "BACKEND_HOSTAPI_HINTS",
     "PCM_FMT_TO_FFMPEG", "PCM_FMT_TO_PIPE", "PCM_FMT_TO_NUMPY",
     "SD_OUTPUT_DTYPES", "DEFAULT_SAMPLE_FMT", "numpy_dtype_name",
-    "PlayerState", "PlayMode", "StageStatus",
+    "PlayerState", "PlayMode", "StageStatus", "OutputMode", "normalize_output_mode",
     "STAGE_KEYS", "STAGE_I18N_KEYS",
     "EVENT_STATE", "EVENT_TRACK", "EVENT_POSITION", "EVENT_SIGNAL", "EVENT_ERROR",
     "EVENT_QUEUE", "EVENT_GAP", "EVENT_NAMES",
