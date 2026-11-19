@@ -1,0 +1,786 @@
+{
+  "generated_at": "2026-11-19T23:36:01+08:00",
+  "python": "3.13.14",
+  "sounddevice": "0.5.6",
+  "platform": "Windows 11",
+  "rates": [
+    44100,
+    48000,
+    88200,
+    96000,
+    176400,
+    192000
+  ],
+  "modes": [
+    "shared",
+    "exclusive",
+    "strict"
+  ],
+  "devices": [
+    {
+      "index": 18,
+      "name": "扬声器 (Nahimic mirroring device)",
+      "backend": "Windows WASAPI",
+      "max_output_channels": 2,
+      "channels_probed": 2,
+      "default_samplerate": 48000,
+      "wasapi": true,
+      "modes": {
+        "shared": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "exclusive": {
+          "44100": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "strict": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "open_check": {
+          "44100": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid device [PaErrorCode -9996]"
+          },
+          "48000": {
+            "open": "OK",
+            "error": ""
+          },
+          "88200": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          }
+        }
+      }
+    },
+    {
+      "index": 19,
+      "name": "扬声器 (Strix 7.1)",
+      "backend": "Windows WASAPI",
+      "max_output_channels": 8,
+      "channels_probed": 8,
+      "default_samplerate": 48000,
+      "wasapi": true,
+      "modes": {
+        "shared": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "exclusive": {
+          "44100": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "strict": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "open_check": {
+          "44100": {
+            "open": "OK",
+            "error": ""
+          },
+          "48000": {
+            "open": "OK",
+            "error": ""
+          },
+          "88200": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          }
+        }
+      }
+    },
+    {
+      "index": 20,
+      "name": "3 - C27HG7x (AMD High Definition Audio Device)",
+      "backend": "Windows WASAPI",
+      "max_output_channels": 2,
+      "channels_probed": 2,
+      "default_samplerate": 48000,
+      "wasapi": true,
+      "modes": {
+        "shared": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "exclusive": {
+          "44100": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "strict": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "open_check": {
+          "44100": {
+            "open": "OK",
+            "error": ""
+          },
+          "48000": {
+            "open": "OK",
+            "error": ""
+          },
+          "88200": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          }
+        }
+      }
+    },
+    {
+      "index": 21,
+      "name": "扬声器 (Realtek(R) Audio)",
+      "backend": "Windows WASAPI",
+      "max_output_channels": 2,
+      "channels_probed": 2,
+      "default_samplerate": 48000,
+      "wasapi": true,
+      "modes": {
+        "shared": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "exclusive": {
+          "44100": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "96000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "176400": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "192000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          }
+        },
+        "strict": {
+          "44100": {
+            "ok": true,
+            "dtypes": [
+              "int32"
+            ],
+            "error": ""
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": true,
+            "dtypes": [
+              "int32"
+            ],
+            "error": ""
+          },
+          "96000": {
+            "ok": true,
+            "dtypes": [
+              "int32"
+            ],
+            "error": ""
+          },
+          "176400": {
+            "ok": true,
+            "dtypes": [
+              "int32"
+            ],
+            "error": ""
+          },
+          "192000": {
+            "ok": true,
+            "dtypes": [
+              "int32"
+            ],
+            "error": ""
+          }
+        },
+        "open_check": {
+          "44100": {
+            "open": "OK",
+            "error": ""
+          },
+          "48000": {
+            "open": "OK",
+            "error": ""
+          },
+          "88200": {
+            "open": "OK",
+            "error": ""
+          },
+          "96000": {
+            "open": "OK",
+            "error": ""
+          },
+          "176400": {
+            "open": "OK",
+            "error": ""
+          },
+          "192000": {
+            "open": "OK",
+            "error": ""
+          }
+        }
+      }
+    },
+    {
+      "index": 22,
+      "name": "Realtek Digital Output (Realtek(R) Audio)",
+      "backend": "Windows WASAPI",
+      "max_output_channels": 2,
+      "channels_probed": 2,
+      "default_samplerate": 48000,
+      "wasapi": true,
+      "modes": {
+        "shared": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "exclusive": {
+          "44100": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "48000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "88200": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "96000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]; int16: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": true,
+            "dtypes": [
+              "int32",
+              "int16",
+              "float32"
+            ],
+            "error": ""
+          }
+        },
+        "strict": {
+          "44100": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "48000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "88200": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "96000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "176400": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "ok": false,
+            "dtypes": [],
+            "error": "int32: Invalid sample rate [PaErrorCode -9997]"
+          }
+        },
+        "open_check": {
+          "44100": {
+            "open": "OK",
+            "error": ""
+          },
+          "48000": {
+            "open": "OK",
+            "error": ""
+          },
+          "88200": {
+            "open": "OK",
+            "error": ""
+          },
+          "96000": {
+            "open": "OK",
+            "error": ""
+          },
+          "176400": {
+            "open": "FAIL",
+            "error": "Error opening OutputStream: Invalid sample rate [PaErrorCode -9997]"
+          },
+          "192000": {
+            "open": "OK",
+            "error": ""
+          }
+        }
+      }
+    }
+  ]
+}

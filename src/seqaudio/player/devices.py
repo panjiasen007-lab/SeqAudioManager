@@ -711,6 +711,34 @@ def _check_rate(device, rate, channels, mode) -> bool:
     return supports_rate(device, rate, channels=channels, mode=mode)
 
 
+def describe_no_option(
+    device: DeviceInfo,
+    candidates: tuple[int, ...],
+    channels: int,
+    mode: OutputMode,
+    skipped: set[int] | frozenset[int] = (),
+) -> str:
+    """「所有候选都打不开」的中文说明——**必须列出全部维度**。
+
+    TC-EX-13 的教训：只报采样率会让 6 声道失败的用户去改采样率，改一辈子也改不好。
+    归因错维度比不报错更糟（和 v1.6 那个 ``-9997`` 双义是同一类问题）。
+    """
+    dims: list[str] = []
+    if candidates:
+        dims.append("采样率 " + "/".join(str(rate) for rate in candidates) + " Hz")
+    if channels:
+        dims.append(f"{channels} 声道")
+    dims.append("独占模式" if mode.is_exclusive else "共享模式")
+    text = f"设备 {device.label} 在上述候选下都打不开：" + "；".join(dims)
+    if channels > 2:
+        text += f"。该设备可能不支持 {channels} 声道——可在设置里开启「多声道下混为 2.0」后重试"
+    if mode.is_exclusive:
+        text += "。也可以改用共享输出"
+    if skipped:
+        text += f"（本次已跳过层级 {sorted(int(level) for level in skipped)}）"
+    return text
+
+
 def plan_output(
     device: DeviceInfo | None,
     want: int,
@@ -743,7 +771,9 @@ def plan_output(
         try:
             device = pick_default_device()
         except NoOutputDeviceError as exc:
-            raise RateUnsupportedError(str(exc)) from exc
+            raise RateUnsupportedError(
+                "系统里没有可用的输出设备（或 PortAudio 未加载）：无法开始播放"
+            ) from exc
     requested_mode = normalize_output_mode(mode)
     check = probe or _check_rate
     ch = int(channels) if int(channels) > 0 else 0
@@ -809,8 +839,7 @@ def plan_output(
     if plans:
         return plans[0]
     raise RateUnsupportedError(
-        f"设备 {device.label} 在共享/独占模式下都不支持候选采样率 {candidates}"
-        + (f"（本次已跳过层级 {sorted(skipped)}）" if skipped else ""),
+        describe_no_option(device, candidates, ch, requested_mode, skipped),
         tried=candidates,
     )
 

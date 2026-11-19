@@ -46,6 +46,11 @@ class SettingsPanel(QWidget):
         self.settings = settings
         self._loading = False
         self._dirty = False
+        # E11：严格模式被自动降级时那条说明是"sticky"的——后续能力摘要/测试结果
+        # 都不能把它冲掉；只有用户主动切模式或换设备/后端才清。
+        self._sticky_notice = ""
+        self._last_base_hint = ""
+        self._auto_downgrading = False
         self.setMinimumWidth(380)
         self.setMaximumWidth(560)
 
@@ -678,6 +683,8 @@ class SettingsPanel(QWidget):
 
     def _on_device_changed(self, _index: int) -> None:
         """换设备：能力矩阵要跟着重探（严格项可能从可用变不可用，反之亦然）。"""
+        if not self._loading:
+            self._clear_sticky_notice()   # E11：用户换了设备，旧设备的降级说明不再适用
         # 用 isHidden() 而不是 isVisible()：面板未 show() 时（离屏测试、构造期）
         # isVisible() 恒为 False，会让能力刷新整段失效。
         if not self._loading and not self.capability_box.isHidden():
@@ -688,6 +695,7 @@ class SettingsPanel(QWidget):
         key = self._current_backend_key()
         self.backend_hint.setText(i18n.tr(f"dev_hint_{key}"))
         if not self._loading:
+            self._clear_sticky_notice()   # E11：用户换了后端，旧后端的降级说明不再适用
             mode = self._current_output_mode()
             # 非 WASAPI 后端：独占/严格置灰，并退回共享
             self._apply_mode_constraints(mode)
@@ -729,6 +737,9 @@ class SettingsPanel(QWidget):
         """模式切换：联动严格模式的强制项、能力矩阵与提示。"""
         if self._loading:
             return
+        # E11：内部自动降级不算"用户切模式"，不能把刚写下的降级说明清掉
+        if not self._auto_downgrading:
+            self._clear_sticky_notice()
         mode = self._current_output_mode()
         self.exclusive_hint.setVisible(mode.is_exclusive)
         self.exclusive_check.blockSignals(True)
@@ -741,6 +752,24 @@ class SettingsPanel(QWidget):
             self._refresh_capability()
         self._notify()
 
+    # ------------------------------------------------------------ 提示（sticky）
+    # E11：strict 被自动降级后，那条说明必须一直留在能力提示里。此前
+    # _apply_capability_to_controls 先写"已降级"，随后 _refresh_capability 的
+    # "解锁了 96k/192k" 摘要把它覆盖，用户完全不知道自己的严格档被改掉了。
+    def _set_capability_hint(self, text: str) -> None:
+        """所有能力提示的统一出口：sticky 说明永远置顶，不被常规摘要冲掉。"""
+        self._last_base_hint = text
+        if self._sticky_notice:
+            text = f"{self._sticky_notice}\n{text}" if text else self._sticky_notice
+        self.capability_hint.setText(text)
+
+    def _clear_sticky_notice(self) -> None:
+        """只有用户主动切模式/换设备/换后端才清除 sticky 说明。"""
+        if not self._sticky_notice:
+            return
+        self._sticky_notice = ""
+        self.capability_hint.setText(self._last_base_hint)
+
     def _apply_mode_constraints(self, mode: OutputMode) -> None:
         """严格模式的强制项：整数通路必勾且锁定；后端不支持时置灰独占。"""
         backend = self._current_backend_key()
@@ -748,7 +777,7 @@ class SettingsPanel(QWidget):
         for button in (self.mode_exclusive, self.mode_strict):
             button.setEnabled(wasapi)
         if not wasapi:
-            self.capability_hint.setText(i18n.tr("dev_hint_exclusive_wasapi_only"))
+            self._set_capability_hint(i18n.tr("dev_hint_exclusive_wasapi_only"))
         # 严格：要求整数通路（float32 会被 explicit_sample_format 拒绝）
         if mode.explicit_format:
             self.int_pipeline_check.blockSignals(True)
@@ -777,12 +806,12 @@ class SettingsPanel(QWidget):
         """零出声探测并渲染能力矩阵（设计 §9.1）。"""
         device = self._capability_device()
         if device is None:
-            self.capability_hint.setText(i18n.tr("dev_no_output_device"))
+            self._set_capability_hint(i18n.tr("dev_no_output_device"))
             return
         try:
             capability = player_devices.probe_cache().get(device, refresh=True)
         except Exception as exc:  # noqa: BLE001
-            self.capability_hint.setText(str(exc))
+            self._set_capability_hint(str(exc))
             return
         # 6 档（含 88.2k/176.4k）：dev22 实测「独占 192k ✓ 但 176.4k ✗」，
         # 所以**逐档如实渲染、绝不按"越高越容易"推断**。
@@ -811,11 +840,11 @@ class SettingsPanel(QWidget):
         # Q2：把「独占解锁的高采样率」讲出来，但只能限定为本设备实测
         if unlocked:
             rate_text = "/".join(f"{rate / 1000:g}k" for rate in unlocked)
-            self.capability_hint.setText(
+            self._set_capability_hint(
                 i18n.tr_format("dev_cap_unlocked", rates=rate_text)
             )
         else:
-            self.capability_hint.setText(i18n.tr("dev_cap_none_unlocked"))
+            self._set_capability_hint(i18n.tr("dev_cap_none_unlocked"))
         # 放在"解锁"提示之后：设备不支持严格时的说明更重要，不能被覆盖掉
         self._apply_capability_to_controls(capability)
 
@@ -823,11 +852,11 @@ class SettingsPanel(QWidget):
         """有缓存就渲染，没有就提示去点「重新探测」——load 阶段不扫设备。"""
         device = self._capability_device()
         if device is None:
-            self.capability_hint.setText(i18n.tr("dev_no_output_device"))
+            self._set_capability_hint(i18n.tr("dev_no_output_device"))
             return
         cache = player_devices.probe_cache()
         if not cache.has(device):
-            self.capability_hint.setText(i18n.tr("dev_cap_not_probed"))
+            self._set_capability_hint(i18n.tr("dev_cap_not_probed"))
             self.capability_table.setRowCount(0)
             return
         capability = cache.get(device)
@@ -862,8 +891,16 @@ class SettingsPanel(QWidget):
             else i18n.tr("dev_strict_unsupported")
         )
         if not strict_ok and self.mode_strict.isChecked():
-            self._set_output_mode(OutputMode.EXCLUSIVE)
-            self.capability_hint.setText(i18n.tr("dev_strict_auto_downgraded"))
+            # E11：这条说明必须 sticky——先记下，再切模式（切模式会触发
+            # _on_output_mode_changed → _refresh_capability → 写能力摘要），
+            # 最后统一由 _set_capability_hint 置顶渲染，保证不会被摘要冲掉。
+            self._sticky_notice = i18n.tr("dev_strict_auto_downgraded")
+            self._auto_downgrading = True
+            try:
+                self._set_output_mode(OutputMode.EXCLUSIVE)
+            finally:
+                self._auto_downgrading = False
+            self._set_capability_hint("")
 
     def _update_mode_status(self) -> None:
         """面板顶部常驻一行「当前模式」，让用户随时知道自己选的是什么。"""
@@ -880,19 +917,19 @@ class SettingsPanel(QWidget):
         device = self._capability_device()
         mode = self._current_output_mode()
         if device is None:
-            self.capability_hint.setText(i18n.tr("dev_no_output_device"))
+            self._set_capability_hint(i18n.tr("dev_no_output_device"))
             return
-        self.capability_hint.setText(i18n.tr("dev_testing"))
+        self._set_capability_hint(i18n.tr("dev_testing"))
         QApplication.processEvents()  # 让提示先画出来，别让用户以为卡死
         ok, reason, actual = player_devices.backend_available(
             self._current_backend_key(), mode=mode, device=device
         )
         if ok:
-            self.capability_hint.setText(
+            self._set_capability_hint(
                 i18n.tr_format("dev_test_ok", rate=actual, mode=mode.value)
             )
         else:
-            self.capability_hint.setText(
+            self._set_capability_hint(
                 i18n.tr_format("dev_test_failed", reason=reason)
             )
 

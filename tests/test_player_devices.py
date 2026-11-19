@@ -598,6 +598,219 @@ class TestProbeFalsePositive(unittest.TestCase):
         self.assertEqual(dev_mod.supports_rate(device, plan.rate, mode=OutputMode.EXCLUSIVE), True)
 
 
+class _RateSelectiveOutput:
+    """只在「44100 + 独占」上抛 -9996 的假输出（模拟 dev18 的**按率**假阳性）。
+
+    skip 集若只按设备记，这台设备的 44.1k 失败会污染 48k —— 而 48k 本来
+    可以原生独占开流（面板会谎报 FALLBACK / 已重采样）。
+    """
+
+    calls: list[tuple[str, int]] = []
+
+    def __init__(self, ring, hook) -> None:
+        self.ring = ring
+        self.hook = hook
+        self.rate = 0
+        self.channels = ring.channels
+        self.started = False
+        self._actual_mode = OutputMode.SHARED
+
+    def prepare(self, rate, channels=0, *, mode=None, rate_decided=False):  # noqa: ANN001
+        from seqaudio.player.output import DeviceError
+
+        mode_value = mode if isinstance(mode, OutputMode) else OutputMode(str(mode or "shared"))
+        type(self).calls.append((mode_value.value, int(rate)))
+        if mode_value.is_exclusive and int(rate) == 44100:
+            raise DeviceError("Invalid device [PaErrorCode -9996]")
+        self.rate = int(rate)
+        self._actual_mode = mode_value
+        return self.rate
+
+    def begin(self) -> None:
+        self.started = True
+
+    def start(self, rate, channels=0) -> int:  # noqa: ANN001
+        actual = self.prepare(rate, channels)
+        self.begin()
+        return actual
+
+    def stop(self, abort: bool = False) -> None:
+        self.started = False
+
+    def pause(self) -> None:
+        self.started = False
+
+    def resume(self) -> None:
+        self.started = True
+
+    def actual_mode(self) -> OutputMode:
+        return self._actual_mode
+
+    @property
+    def exclusive_actual(self) -> bool:
+        return self._actual_mode.is_exclusive
+
+    def snapshot(self) -> dict:
+        return {
+            "is_open": self.started, "rate": self.rate, "want_rate": self.rate,
+            "fallback": False, "channels": 2, "dtype": str(self.ring.dtype),
+            "device": "rate-selective", "device_index": -1, "backend": "wasapi",
+            "exclusive": self._actual_mode.is_exclusive, "mode": self._actual_mode.value,
+            "system_mix_rate": 48000, "blocksize": 1024, "latency_ms": 0.0,
+            "underruns": 0, "frames_out": 0, "pa_flags": 0, "cb_errors": 0,
+            "cb_error": "", "paused": False, "volume_db": 0.0, "error": "",
+        }
+
+
+class TestSkipKeyDimensions(unittest.TestCase):
+    """skip 记忆的键必须是 (设备, 请求率, 请求模式)，否则会静默降质 + 面板说谎。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import subprocess
+        import tempfile
+
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            raise unittest.SkipTest("ffmpeg 不可用")
+        cls.tmp = Path(tempfile.mkdtemp(prefix="seq_key_"))
+        cls.file = cls.tmp / "sine.flac"
+        subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "sine=frequency=440:duration=1.2:sample_rate=44100",
+             "-ac", "2", "-c:a", "flac", str(cls.file)],
+            stdin=subprocess.DEVNULL, capture_output=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        import shutil
+
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _engine(self):
+        from seqaudio.player.engine import PlayerEngine
+
+        _RateSelectiveOutput.calls = []
+        settings = Settings()
+        settings.playback_output_backend = "wasapi"
+        settings.playback_output_mode = "exclusive"
+        settings.playback_int_pipeline = True
+        engine = PlayerEngine(
+            settings,
+            output_factory=lambda ring, device, hook: _RateSelectiveOutput(ring, hook),
+        )
+        return engine, settings
+
+    def _item(self, rate: int):
+        from seqaudio.player.queue import QueueItem
+
+        return QueueItem(
+            path=self.file, title=f"r{rate}", duration=1.2,
+            sample_rate=rate, channels=2, bit_depth=16,
+        )
+
+    def test_44100_failure_does_not_pollute_48000(self) -> None:
+        from seqaudio.player.queue import PlayQueue
+
+        engine, _ = self._engine()
+        try:
+            engine.set_queue(PlayQueue([self._item(44100)]))
+            self.assertTrue(engine.play())
+            engine.poll()
+            first = engine.snapshot()
+            degraded_rate = int(first["rate"])
+            self.assertNotEqual(degraded_rate, 44100, "44.1k 独占失败应降级到别的采样率")
+            self.assertIn("探测通过但开流被拒", str(first["signal_path"][7]["detail"]))
+
+            engine.stop()   # play() 在 PLAYING 时是幂等的，换曲前必须先停
+            # 紧接着播降级后的那个采样率：**必须走 level 1（真独占）**，
+            # 不能因为 44.1k 那次失败被跳过（否则面板会谎报"已重采样"）
+            _RateSelectiveOutput.calls = []
+            engine.set_queue(PlayQueue([self._item(degraded_rate)]))
+            self.assertTrue(engine.play())
+            engine.poll()
+            second = engine.snapshot()
+            output_stage = next(
+                stage for stage in second["signal_path"] if stage["key"] == "output"
+            )
+            self.assertEqual(_RateSelectiveOutput.calls[0], ("exclusive", degraded_rate),
+                             "换到别的采样率必须第一次就按独占（level 1）尝试")
+            self.assertEqual(output_stage["status"], "PASSTHROUGH",
+                             "该采样率原生独占成功，面板不得标 FALLBACK（否则就是谎报重采样）")
+            self.assertNotIn("探测通过但开流被拒", output_stage["detail"])
+        finally:
+            engine.shutdown()
+
+    def test_skip_key_carries_rate_and_mode(self) -> None:
+        from seqaudio.player.queue import PlayQueue
+
+        engine, settings = self._engine()
+        try:
+            engine.set_queue(PlayQueue([self._item(44100)]))
+            self.assertTrue(engine.play())
+            keys = set(engine._device_skip_levels)
+            self.assertTrue(keys, "44.1k 失败后应记住一个键")
+            for device_index, rate, mode in keys:
+                self.assertEqual(rate, 44100, "键必须带请求率")
+                self.assertEqual(mode, "exclusive", "键必须带请求模式")
+                self.assertEqual(engine._device_skip_levels[(device_index, rate, mode)], {1})
+            # 换率后另一组键不应存在
+            self.assertFalse(
+                any(key[1] == 192000 for key in keys), "别的采样率不该被污染"
+            )
+        finally:
+            engine.shutdown()
+
+    def test_same_key_second_start_skips_bad_level(self) -> None:
+        from seqaudio.player.queue import PlayQueue
+
+        engine, _ = self._engine()
+        try:
+            engine.set_queue(PlayQueue([self._item(44100)]))
+            self.assertTrue(engine.play())
+            engine.stop()
+
+            _RateSelectiveOutput.calls = []
+            self.assertTrue(engine.play())
+            # 第二次同参数：不应再试 (exclusive, 44100)
+            self.assertNotIn(("exclusive", 44100), _RateSelectiveOutput.calls,
+                             "同一组参数第二次起播必须跳过已失败的那一级")
+            self.assertTrue(_RateSelectiveOutput.calls, "仍应有开流尝试（只是跳过坏的那级）")
+        finally:
+            engine.shutdown()
+
+
+class TestNoOptionMessage(unittest.TestCase):
+    """TC-EX-13：失败归因必须列出全部维度（采样率 + 声道 + 模式）。"""
+
+    def test_message_includes_channels_and_downmix_hint(self) -> None:
+        device = dev_mod.DeviceInfo(
+            index=0, name="fake 5.1", channels=8, default_samplerate=48000.0,
+            hostapi_index=2, hostapi_name="Windows WASAPI",
+        )
+        with self.assertRaises(dev_mod.RateUnsupportedError) as ctx:
+            dev_mod.plan_output(
+                device, 48000, channels=6, mode="shared", probe=lambda *args: False
+            )
+        text = str(ctx.exception)
+        self.assertIn("6 声道", text, "必须点名声道数")
+        self.assertIn("下混", text, "必须给出可执行的下一步（下混重试）")
+        self.assertIn("采样率", text)
+        self.assertIn("48000", text)
+
+    def test_exclusive_message_mentions_mode(self) -> None:
+        device = dev_mod.DeviceInfo(
+            index=0, name="fake", channels=2, default_samplerate=48000.0,
+            hostapi_index=2, hostapi_name="Windows WASAPI",
+        )
+        with self.assertRaises(dev_mod.RateUnsupportedError) as ctx:
+            dev_mod.plan_output(device, 44100, mode="exclusive", probe=lambda *args: False)
+        text = str(ctx.exception)
+        self.assertIn("独占模式", text)
+        self.assertIn("共享", text, "应提示可以改用共享")
+
+
 class TestSettingsMigration(unittest.TestCase):
     """v1.6 布尔独占升级到 v1.7 三值模式不能丢设置。"""
 

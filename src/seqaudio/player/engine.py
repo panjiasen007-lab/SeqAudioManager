@@ -220,14 +220,22 @@ class PlayerEngine:
         self._strict_locked = False    # 严格独占：DSP/音量被锁在旁路
         self._force_shared = False     # 独占开流失败过 → 本会话内直接用共享
         self._released_on_pause = False
+        # _output_mode() 是查询函数，但 snapshot() 每次 UI 刷新都会调它（每秒多次）。
+        # 只记「已提示过的 (后端, 模式)」，变化时才打一行，避免日志被同一句话刷屏。
+        self._mode_downgrade_notified: tuple[str, str] | None = None
         self._pending_choice = ""      # fallback="ask" 时要弹的非模态提示
         self._exclusive_refused_note = ""  # 独占开流失败的原因（降级留痕）
-        self._open_failures: dict[int, int] = {}  # device_index -> 连续开流失败次数
+        #: (device_index, want_rate, mode) -> 连续开流失败次数
+        self._open_failures: dict[tuple, int] = {}
         self._probe_mismatch_total = 0           # 会话累计（stop 后仍保留）
-        #: device_index -> 开流失败过的层级（下次起播直接跳过，别每次切歌都白试一遍）
-        self._device_skip_levels: dict[int, set[int]] = {}
-        #: 学到的「这台设备探测说行、开流被拒」——后续起播的说明文字要用
-        self._device_refused: set[int] = set()
+        #: (device_index, want_rate, mode) -> 开流失败过的层级。
+        #: **键必须带率与模式**：dev22 上「192k 独占 ✓ / 176.4k 独占 ✗」说明同一
+        #: 设备同一 level 的成败与请求率强相关；只按设备记会让「44.1k 失败」污染
+        #: 「48k/192k 起播」——轻则白白跳过可用能力（静默降质），重则让 48k 落到
+        #: level 3 被标 FALLBACK 并写「已重采样」，而实际一个样本都没重采样（面板说谎）。
+        self._device_skip_levels: dict[tuple, set[int]] = {}
+        #: 同上三元键 -> 「这组参数探测说行、开流被拒」——说明文字要用
+        self._device_refused: dict[tuple, bool] = {}
         self._underrun_seen = 0        # 当前这条流的欠载数（回调自增）
         self._underrun_base = 0        # 已拆掉的流累计欠载数
         self._closed = False
@@ -363,7 +371,19 @@ class PlayerEngine:
             # 暂停时释放过设备：重开流并从冻结的位置续播
             position = self.position_ms()
             self._released_on_pause = False
-            return self._start_item(self._item, position)
+            started = self._start_item(self._item, position)
+            if not started and self._state is PlayerState.ERROR:
+                # 暂停期间设备可能被浏览器/会议软件抢走：必须进 ERROR（失败路径
+                # 已做）、不静默改共享、不跳下一首，并把位置原样留下——用户关掉
+                # 占用程序后点「播放」还能从这个位置续播。
+                self._ring_base_ms = position
+                reason = str(self._error or "")
+                if reason.startswith(("打开输出设备失败", "独占各级开流均失败")):
+                    self._fail(
+                        f"恢复播放失败：设备已被其它程序占用，位置已保留（{position} ms）。"
+                        "关闭占用该设备的程序后点「播放」可从原位置继续。"
+                    )
+            return started
         if self._state is not PlayerState.PAUSED or self._decoder is None or self._output is None:
             return self._state is PlayerState.PLAYING
         try:
@@ -551,8 +571,10 @@ class PlayerEngine:
         self._exclusive_refused_note = ""
         info = self._resolve_device()
         index = info.index if info is not None else -1
-        self._device_skip_levels.pop(index, None)
-        self._device_refused.discard(index)
+        for bucket in [item for item in self._device_skip_levels if item[0] == index]:
+            self._device_skip_levels.pop(bucket, None)
+        for bucket in [item for item in self._device_refused if item[0] == index]:
+            self._device_refused.pop(bucket, None)
         item = self._item
         if item is None:
             return False
@@ -772,6 +794,7 @@ class PlayerEngine:
         ):
             mode = OutputMode.EXCLUSIVE
         if not mode.is_exclusive:
+            self._mode_downgrade_notified = None
             return OutputMode.SHARED
         device = self._resolve_device()
         backend = (
@@ -780,8 +803,14 @@ class PlayerEngine:
             else str(getattr(self.settings, "playback_output_backend", "") or "")
         )
         if backend and backend != BACKEND_WASAPI:
-            log.info("当前后端 %r 不支持独占，按共享模式播放", backend)
+            # 同一 (后端, 请求模式) 只提示一次：这是查询函数，snapshot() 每秒调多次，
+            # 每次都 log 会把运行日志刷成同一句话（用户截图反馈）。
+            notice_key = (str(backend), mode.value)
+            if self._mode_downgrade_notified != notice_key:
+                self._mode_downgrade_notified = notice_key
+                log.info("当前后端 %r 不支持独占，按共享模式播放", backend)
             return OutputMode.SHARED
+        self._mode_downgrade_notified = None
         return mode
 
     def set_output_mode(self, mode: OutputMode | str) -> OutputMode:
@@ -912,7 +941,24 @@ class PlayerEngine:
         """这次起播 DSP 是否真的会改样本（= 整数通路是否可行，取反）。"""
         return not int_pipeline_allowed(self.settings, self._volume_db)
 
-    def _note_open_failure(self, message: str) -> None:
+    def _plan_key(self, item: QueueItem) -> tuple[int, int, str]:
+        """(设备, 请求率, 请求模式) —— 引擎跨起播记忆的键。
+
+        为什么必须带率与模式：dev22 上 192k 独占 ✓ 而 176.4k 独占 ✗，
+        说明「某一级能不能开」和请求率强相关；只按设备记会把一次失败的错误
+        扩散到其它采样率（静默降级 + 面板谎报重采样）。
+        """
+        device = self._resolve_device()
+        index = device.index if device is not None else -1
+        mode = self._output_mode()
+        want = int(getattr(item, "sample_rate", 0) or 0)
+        if bool(getattr(item, "is_dsd", False)):
+            want = int(getattr(self.settings, "playback_dsd_pcm_rate", 0) or 0)
+        elif not bool(getattr(self.settings, "playback_follow_source_rate", True)):
+            want = int(device.rate) if device is not None else want
+        return (index, want, mode.value)
+
+    def _note_open_failure(self, message: str, key: Optional[tuple] = None) -> None:
         """记录一次「开流失败」（= 探测与实际不一致），到阈值就作废该设备缓存。
 
         设计 §4.2：连续失败 2 次 → 失效重探。不接这条的话，假阳性设备会**每次
@@ -922,21 +968,23 @@ class PlayerEngine:
         self._probe_mismatch_total += 1
         device = self._device_info_for_counters()
         index = device.index if device is not None else -1
-        count = self._open_failures.get(index, 0) + 1
-        self._open_failures[index] = count
-        log.info("输出开流失败计数：设备 %s = %d（%s）", index, count, message)
+        bucket = key if key is not None else (index, 0, "")
+        count = self._open_failures.get(bucket, 0) + 1
+        self._open_failures[bucket] = count
+        log.info("输出开流失败计数：%s = %d（%s）", bucket, count, message)
         if count >= 2 and device is not None:
             try:
                 devices_mod.probe_cache().invalidate(device)
                 log.warning("设备 %s 连续 %d 次开流失败，已作废能力缓存并将在下次重探", index, count)
             except Exception:  # noqa: BLE001
                 pass
-            self._open_failures[index] = 0
+            self._open_failures[bucket] = 0
 
-    def _note_open_success(self) -> None:
-        device = self._device_info_for_counters()
-        if device is not None:
-            self._open_failures[device.index] = 0
+    def _note_open_success(self, key: Optional[tuple] = None) -> None:
+        if key is not None:
+            self._open_failures[key] = 0
+        else:
+            self._open_failures.clear()
 
     def _device_info_for_counters(self) -> Optional[DeviceInfo]:
         """当前设备（用于按设备记失败次数）；拿不到就返回 None。"""
@@ -998,19 +1046,19 @@ class PlayerEngine:
         **判据是开流成功**。每级只降一次，失败过的 level 放进 ``skip_levels``，
         绝不在同一组参数上原地重试。
         """
-        device = self._resolve_device()
-        device_index = device.index if device is not None else -1
-        # 上次在这台设备上失败过的层级直接跳过（假阳性设备因此不再每次卡 ~200 ms）
-        skip_levels: set[int] = set(self._device_skip_levels.get(device_index, set()))
+        key = self._plan_key(item)
+        # 同一 (设备, 率, 模式) 上失败过的层级直接跳过（假阳性设备因此不再每次卡 ~200 ms）。
+        # 注意：**别的采样率/模式不受影响**——那是"静默降质 + 面板说谎"的来源。
+        skip_levels: set[int] = set(self._device_skip_levels.get(key, set()))
         if skip_levels:
-            log.info("设备 %s 上次开流失败过层级 %s，本次直接跳过", device_index, sorted(skip_levels))
-        if device_index in self._device_refused:
+            log.info("参数 %s 上次开流失败过层级 %s，本次直接跳过", key, sorted(skip_levels))
+        if self._device_refused.get(key):
             self._exclusive_refused_note = "探测通过但开流被拒（已记录），已自动降级"
         last_message = ""
         for attempt in range(4):
             result = self._start_item_once(item, offset_ms, frozenset(skip_levels))
             if result.ok:
-                self._note_open_success()
+                self._note_open_success(key)
                 # 刻意**不**清 skip 集：这台设备"探测说行、开流被拒"是稳定特性，
                 # 学会一次就该一直用对的那级（否则每次切歌都要白试 ~200 ms）。
                 # 换设备/重连时清空（见 set_output / reconnect）。
@@ -1018,10 +1066,10 @@ class PlayerEngine:
             if not result.retryable:
                 return False                     # _start_item_once 里已经 _fail 过
             skip_levels.add(int(result.level))
-            self._device_skip_levels.setdefault(device_index, set()).add(int(result.level))
-            self._device_refused.add(device_index)
+            self._device_skip_levels.setdefault(key, set()).add(int(result.level))
+            self._device_refused[key] = True
             last_message = result.message
-            self._note_open_failure(result.message)
+            self._note_open_failure(result.message, key)
             log.warning(
                 "第 %d 级输出开流失败（%s），降级重试（第 %d/4 次）",
                 result.level, result.message, attempt + 2,

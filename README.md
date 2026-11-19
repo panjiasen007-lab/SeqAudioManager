@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.6.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,19 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.7.0 更新摘要
+
+**新增 WASAPI 独占输出（宽松 / 严格两档）。** 目标是绕开 Windows 混音器，减少系统重采样与混音干预。
+
+- **三种输出模式**：共享 / 独占 / 严格独占；默认「独占」，不可用时按四级回退链降级，并在信号路径如实留痕。
+- **严格独占**：强制整数通路（本机实测仅 `int32` 可用）、DSP 全旁路、禁 EQ；本机 5 台 WASAPI 设备中只有 1 台六档采样率全通过，属单设备进阶能力，默认不启用。
+- **实测能力矩阵**：5 台设备 × 6 档采样率 × 3 模式；独占在部分设备解锁 88.2/96/176.4/192 kHz。探测存在假阳性（dev18 的 44.1 kHz：探测通过、真开流 `-9996`），所以最终判据是**开流成功**，不是探测通过。
+- **跨起播记忆**：失败层级按「设备 × 请求采样率 × 模式」记录，切歌不再串味；连续失败自动作废缓存重探。
+- **话术分级**：L0/L1/L2 三档，只说实测到的事实；**不宣称** bit-perfect / 位完美 / 逐样本一致 / 24bit 直通 DAC。
+- **暂停即释放独占设备**（默认开启）：暂停期间设备被其它程序占用时进入 ERROR、保留播放位置，不静默改共享、不跳下一首。
+
+已知限制：ASIO 与 WDM-KS 本期未启用；严格独占在多数设备不可用；本机部分设备的 176.4 kHz 独占不支持。
 
 ### V1.6.0 更新摘要
 
@@ -858,6 +871,29 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.7.0 highlights
+
+**WASAPI exclusive output (loose / strict).** The goal is to bypass the Windows mixer and avoid
+its resampling and mixing stages.
+
+- **Three output modes**: shared / exclusive / strict exclusive. Exclusive is the default; when
+  unavailable, a four-level fallback degrades step by step and records the reason in the signal path.
+- **Strict exclusive** forces the integer path (only `int32` was usable in our tests), full DSP
+  bypass and no EQ. Only 1 of 5 local WASAPI devices passed all six rates — an advanced,
+  device-specific option, off by default.
+- **Measured capability matrix**: 5 devices × 6 rates × 3 modes; exclusive unlocked 88.2/96/176.4/
+  192 kHz on some devices. A probe false positive was observed (dev18 at 44.1 kHz: probe passed,
+  real open returned `-9996`), so the deciding criterion is a **successful stream open**, not the probe.
+- **Cross-track memory**: failed levels are keyed by device × requested rate × mode, so switching
+  tracks no longer poisons other rates; repeated failures invalidate the probe cache.
+- **Wording tiers** L0/L1/L2: only measured facts. We make **no** bit-perfect / sample-exact /
+  24-bit-DAC-passthrough claims.
+- **Release the device on pause** (on by default): if another app grabs it while paused, the player
+  enters ERROR, keeps the position, and never silently switches to shared or skips a track.
+
+Known limits: ASIO and WDM-KS are not enabled in this release; strict exclusive is unsupported on
+most devices; 176.4 kHz exclusive fails on some local devices.
 
 ### V1.6.0 highlights
 

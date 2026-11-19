@@ -257,6 +257,29 @@ class TestStrictCapabilityGating(_Panel):
         )
         self.assertIn("严格", self.panel.capability_hint.text())
 
+    def test_downgrade_notice_is_sticky_until_user_changes_mode(self) -> None:
+        """E11：严格自动降级的说明不能被后续能力摘要/测试结果冲掉。"""
+
+        class _Cap:
+            strict_usable = False
+
+        self._select_wasapi()
+        self.panel.mode_strict.setChecked(True)
+        self.panel._apply_capability_to_controls(_Cap())
+        self.assertIs(self.panel._current_output_mode(), OutputMode.EXCLUSIVE)
+        self.assertIn("严格", self.panel.capability_hint.text())
+
+        # 后续能力摘要 / 设备测试写提示，都不该把降级说明抹掉
+        self.panel._set_capability_hint("解锁了 96k/192k")
+        text = self.panel.capability_hint.text()
+        self.assertIn("严格", text, "降级说明必须置顶保留")
+        self.assertIn("解锁", text, "新的能力摘要也要照常显示")
+
+        # 只有用户主动切模式才清
+        self.panel.mode_shared.setChecked(True)
+        self.assertEqual(self.panel._sticky_notice, "")
+        self.assertNotIn("严格", self.panel.capability_hint.text())
+
     def test_capability_table_has_six_rates(self) -> None:
         wasapi = player_devices.list_output_devices("wasapi")
         if not wasapi:
