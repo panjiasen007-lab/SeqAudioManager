@@ -1033,6 +1033,10 @@ class SettingsPanel(QWidget):
             )
             self._apply_mode_constraints(mode)
             self.capability_box.setVisible(mode.is_exclusive)
+            # 跨会话复用上次的能力矩阵（指纹不符会自动忽略）
+            player_devices.probe_cache().load_dict(
+                getattr(settings, "playback_device_probe_cache", {}) or {}
+            )
             self._show_cached_capability()
             self.auto_lyrics_check.setChecked(
                 bool(getattr(settings, "playback_auto_lyrics", True))
@@ -1130,6 +1134,7 @@ class SettingsPanel(QWidget):
         )
         settings.playback_release_on_pause = self.release_on_pause_check.isChecked()
         settings.playback_strict_require_int = True
+        settings.playback_device_probe_cache = player_devices.probe_cache().to_dict()
         settings.playback_auto_lyrics = self.auto_lyrics_check.isChecked()
         settings.playback_follow_source_rate = self.follow_rate_check.isChecked()
         settings.playback_buffer_ms = int(self.buffer_spin.value())

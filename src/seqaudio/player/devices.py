@@ -592,6 +592,51 @@ class ProbeCache:
             self._items[key] = probe_capabilities(info, channels=ch)
         return self._items[key]
 
+    def to_dict(self) -> dict[str, Any]:
+        """序列化（跨会话复用：设计 §10 的 ``playback_device_probe_cache``）。
+
+        带上当前设备表指纹：下次启动若设备表变了（插拔/换驱动），这份缓存
+        会整体作废 —— 拿旧矩阵骗人比不缓存更糟。
+        """
+        current = device_fingerprint()
+        if current != self._fingerprint:
+            return {"fingerprint": current, "items": {}}
+        return {
+            "fingerprint": current,
+            "items": {
+                f"{index}:{channels}": capability.to_dict()
+                for (index, channels), capability in self._items.items()
+            },
+        }
+
+    def load_dict(self, data: Any) -> int:
+        """从序列化数据恢复；指纹不符或结构异常时**静默忽略**。返回恢复条数。"""
+        if not isinstance(data, dict):
+            return 0
+        current = device_fingerprint()
+        if str(data.get("fingerprint", "")) != current:
+            log.debug("设备表指纹已变化，丢弃上次会话的能力缓存")
+            return 0
+        items = data.get("items")
+        if not isinstance(items, dict):
+            return 0
+        restored = 0
+        for key, payload in items.items():
+            try:
+                index_text, channels_text = str(key).split(":", 1)
+                index, channels = int(index_text), int(channels_text)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            capability = DeviceCapability.from_dict(payload)
+            if capability.device_index < 0:
+                capability.device_index = index
+            self._items[(index, channels)] = capability
+            restored += 1
+        self._fingerprint = current
+        return restored
+
     def has(self, device: DeviceInfo | int, channels: int = 0) -> bool:
         """缓存里是否已有该设备的能力矩阵（不触发探测）。"""
         info = device if isinstance(device, DeviceInfo) else device_by_index(int(device))
