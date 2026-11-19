@@ -137,6 +137,8 @@ class Counters:
     decode_errors: int = 0
     gain_db: float = 0.0
     last_gap_ms: float = 0.0
+    #: 「探测说行、开流被拒」的次数（设计 §4.2：连续 2 次触发缓存作废）
+    probe_mismatch: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,6 +148,7 @@ class Counters:
             "decode_errors": int(self.decode_errors),
             "gain_db": round(float(self.gain_db), 2),
             "last_gap_ms": round(float(self.last_gap_ms), 2),
+            "probe_mismatch": int(self.probe_mismatch),
         }
 
 
@@ -202,11 +205,13 @@ class SignalPath:
         device_dtype: str = "",
         int_pipeline: bool = False,
         format_note: str = "",
+        effective_bit_depth: int = 0,
         exclusive_actual: bool = False,
         mode_label: str = "",
         system_mix_rate: int = 0,
         mode_note: str = "",
         exclusive_refused: bool = False,
+        exclusive_fallback: bool = False,
     ) -> "SignalPath":
         """按真实链路重建 9 级描述（引擎开流成功后调用一次）。"""
         want = int(rate_want or 0)
@@ -302,7 +307,10 @@ class SignalPath:
         elif actual_exclusive:
             head = TEXT_OUTPUT_STRICT if label == "strict" else TEXT_OUTPUT_LOOSE
             output_detail = " · ".join(part for part in (head, device) if part)
-            output_status = StageStatus.PASSTHROUGH
+            # 拿到了独占但降过级（换率/从严格退宽松）→ FALLBACK，面板要标红
+            output_status = (
+                StageStatus.FALLBACK if exclusive_fallback else StageStatus.PASSTHROUGH
+            )
         elif exclusive_refused:
             output_detail = " · ".join(
                 part for part in (TEXT_OUTPUT_REFUSED, device) if part
@@ -363,7 +371,9 @@ class SignalPath:
             "rate_actual": actual,
             "int_pipeline": bool(int_pipeline),
             "sample_fmt": str(sample_fmt or ""),
+            "effective_bit_depth": int(effective_bit_depth or 0),
             "mode_note": str(mode_note or ""),
+            "exclusive_fallback": bool(exclusive_fallback),
         }
         return self
 
@@ -442,10 +452,13 @@ class SignalPath:
         level = self.wording_level()
         ctx = self._context or {}
         if level == "L2":
+            # 容器由样本格式决定，**有效位深由源决定**：16bit 源进 32bit 容器时，
+            # 说"有效位深 32"是错的（数据只有 16 位有信息）。
             fmt = str(ctx.get("sample_fmt", ""))
             wide = fmt.startswith(("s24", "s32"))
             container = "32" if wide else "16"
-            depth = "24" if wide else "16"
+            source_depth = int(ctx.get("effective_bit_depth") or 0)
+            depth = str(source_depth) if source_depth else ("24" if wide else "16")
             return TEXT_L2.format(container=container, depth=depth)
         if level == "L1":
             return TEXT_L1.format(

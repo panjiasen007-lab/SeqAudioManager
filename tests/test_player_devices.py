@@ -258,7 +258,9 @@ class TestCapabilityMatrix(unittest.TestCase):
 
     def test_strict_dtypes_are_integer_only(self) -> None:
         """严格模式的 dtype 白名单里不能有 float（否则 100% -9997）。"""
-        self.assertEqual(tuple(dev_mod.STRICT_DTYPES), ("int16", "int32"))
+        # Q11 + QA 口径：严格列一律用 int32 探测/开流（16bit 源进 int32 容器）。
+        # 用 int16 探会造出"支持严格"的假阳性，然后强开 int32 失败。
+        self.assertEqual(tuple(dev_mod.STRICT_DTYPES), ("int32",))
 
 
 class TestProbeCache(unittest.TestCase):
@@ -509,10 +511,91 @@ class TestExclusiveOpenFailureFallback(unittest.TestCase):
                 stage for stage in snapshot["signal_path"] if stage["key"] == "output"
             )
             self.assertEqual(output_stage["status"], "FALLBACK")
-            # 先试独占、再试共享：两次 prepare 都要发生
-            self.assertEqual(_ExclusiveHostileOutput.calls[:2], ["exclusive", "shared"])
+            # 阶梯顺序：独占@源率(1) → 独占@回退率(3) → 共享(4)，每级只降一次
+            calls = _ExclusiveHostileOutput.calls
+            self.assertGreaterEqual(len(calls), 2, f"应发生多级降级：{calls}")
+            self.assertEqual(calls[0], "exclusive")
+            self.assertEqual(calls[-1], "shared", f"最后应落到共享：{calls}")
+            self.assertEqual(calls.count("shared"), 1, "共享只应尝试一次（同一级不原地重试）")
         finally:
             engine.shutdown()
+
+
+@unittest.skipUnless(HAS_DEVICE, "没有可用输出设备")
+class TestProbeFalsePositive(unittest.TestCase):
+    """E7：探测说行、开流被拒 → 降级重试，**不进 ERROR**（设计 §4.3 硬规则 1）。"""
+
+    def test_dev18_44100_exclusive_degrades(self) -> None:
+        device = _find("Nahimic")
+        if device is None:
+            self.skipTest("本机没有 Nahimic 设备")
+        if not dev_mod.supports_rate(device, 44100, mode=OutputMode.EXCLUSIVE):
+            self.skipTest("该设备探测就不支持 44.1k 独占（不构成假阳性样本）")
+        from seqaudio.core import probe as probe_mod
+        from seqaudio.player.engine import PlayerEngine
+        from seqaudio.player.queue import PlayQueue
+
+        import subprocess
+        import tempfile
+
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            self.skipTest("ffmpeg 不可用")
+        tmp = Path(tempfile.mkdtemp(prefix="seq_e7_"))
+        try:
+            src = tmp / "e7.flac"
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                 "-i", "sine=frequency=440:duration=1.5:sample_rate=44100",
+                 "-ac", "2", "-c:a", "flac", str(src)],
+                stdin=subprocess.DEVNULL, capture_output=True,
+            )
+            settings = Settings()
+            settings.playback_output_backend = "wasapi"
+            settings.playback_device = str(device.index)
+            settings.playback_output_mode = "exclusive"
+            settings.playback_int_pipeline = True
+            engine = PlayerEngine(settings)
+            try:
+                engine.set_queue(PlayQueue.from_tracks([probe_mod.probe(src)]))
+                self.assertTrue(engine.play(), "假阳性必须降级重试，不能直接 ERROR")
+                engine.poll()
+                snapshot = engine.snapshot()
+                self.assertNotEqual(snapshot["state"], "ERROR")
+                self.assertEqual(snapshot["rate"], 48000, "应降级到 48k 独占")
+                self.assertTrue(snapshot["exclusive"], "降级后仍是独占（只是换了采样率）")
+                output = next(
+                    stage for stage in snapshot["signal_path"] if stage["key"] == "output"
+                )
+                self.assertEqual(output["status"], "FALLBACK", "降级必须留痕（标红）")
+                self.assertIn("探测通过但开流被拒", output["detail"])
+                self.assertGreaterEqual(snapshot["counters"]["probe_mismatch"], 1)
+                self.assertFalse(snapshot["error"])
+            finally:
+                engine.shutdown()
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_non_monotonic_rate_fallback(self) -> None:
+        """E8：非单调 —— 独占支持 192k 但不支持 176.4k 时，回退不得靠"越高越容易"猜。"""
+        device = next(
+            (
+                candidate
+                for candidate in dev_mod.list_output_devices("wasapi")
+                if dev_mod.supports_rate(candidate, 192000, mode=OutputMode.EXCLUSIVE)
+                and not dev_mod.supports_rate(candidate, 176400, mode=OutputMode.EXCLUSIVE)
+            ),
+            None,
+        )
+        if device is None:
+            self.skipTest("本机没有「192k 独占可用但 176.4k 不可用」的设备")
+        plan = dev_mod.plan_output(device, 176400, mode="exclusive")
+        self.assertNotEqual(plan.rate, 176400)
+        self.assertTrue(plan.rate_fallback)
+        self.assertIn("176400", plan.note)
+        self.assertEqual(dev_mod.supports_rate(device, plan.rate, mode=OutputMode.EXCLUSIVE), True)
 
 
 class TestSettingsMigration(unittest.TestCase):
@@ -524,7 +607,10 @@ class TestSettingsMigration(unittest.TestCase):
 
     def test_old_config_without_keys(self) -> None:
         settings = Settings.from_dict({"language": "en"})
-        self.assertEqual(settings.playback_output_mode, "shared")
+        # Q9 拍板：默认改成「宽松独占」（44.1k 不再被系统混音到 48k），
+        # 配套首次启动说明 + 一键改回共享（notice_shown 初始必须为 False）
+        self.assertEqual(settings.playback_output_mode, "exclusive")
+        self.assertFalse(settings.playback_exclusive_notice_shown)
         self.assertEqual(settings.playback_exclusive_fallback, "auto")
         self.assertIs(settings.playback_release_on_pause, True, "Q3 定稿：默认暂停即释放")
         self.assertIs(settings.playback_strict_require_int, True)

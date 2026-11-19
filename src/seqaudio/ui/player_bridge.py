@@ -445,6 +445,17 @@ class PlayerBridge(QObject):
             lambda: self._engine.set_output(device=device, backend=backend, exclusive=exclusive),
         )
 
+    def set_output_mode(self, mode: str) -> str:
+        """切换输出模式（v1.7：shared / exclusive / exclusive_strict）。
+
+        引擎会同时把 ``settings.playback_output_mode`` 与布尔镜像写回去；
+        正在播则自动重连（设备/率可能一起变）。
+        """
+        value = self._safe(
+            "切换输出模式", lambda: self._engine.set_output_mode(str(mode)), str(mode)
+        )
+        return str(getattr(value, "value", value))
+
     def reconnect(self) -> bool:
         return bool(self._safe("重新连接设备", lambda: self._engine.reconnect(), False))
 

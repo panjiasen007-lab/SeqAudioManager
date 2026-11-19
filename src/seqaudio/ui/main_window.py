@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -1251,11 +1253,56 @@ class MainWindow(QMainWindow):
         # 轮询只在窗口可见时跑：最小化后还在按 100 ms 查引擎是白烧 CPU
         if getattr(self, "player_bridge", None) is not None:
             self.player_bridge.start()
+        if not getattr(self, "_exclusive_notice_done", False):
+            self._exclusive_notice_done = True
+            self._maybe_announce_exclusive()
         if not getattr(self, "_titlebar_done", False):
             from .win_effects import apply_dark_titlebar
 
             apply_dark_titlebar(int(self.winId()))
             self._titlebar_done = True
+
+    def _maybe_announce_exclusive(self) -> None:
+        """Q9：默认切到「宽松独占」后，首次启动必须说明它会抢占设备。
+
+        三条缓解缺一不可：① 弹一次说明；② 弹窗内可一键改回共享；
+        ③ 面板显式标注当前模式（见 SettingsPanel）。**不允许静默变更**。
+        离屏/无人值守环境（自动化测试）不弹窗，否则会把用例卡死。
+        """
+        if bool(getattr(self.settings, "playback_exclusive_notice_shown", False)):
+            return
+        mode = str(getattr(self.settings, "playback_output_mode", "") or "")
+        if mode not in ("exclusive", "exclusive_strict"):
+            return
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+            return
+        notchanged = False
+        try:
+            box = QMessageBox(self)
+            box.setWindowTitle(i18n.tr("exclusive_notice_title"))
+            box.setIcon(QMessageBox.Information)
+            box.setText(i18n.tr("exclusive_notice_text"))
+            keep = box.addButton(i18n.tr("exclusive_notice_keep"), QMessageBox.AcceptRole)
+            back = box.addButton(i18n.tr("exclusive_notice_back"), QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is back:
+                self.settings.playback_output_mode = "shared"
+                self.settings.playback_exclusive = False
+                self.settings_panel.load_from(self.settings)
+                if getattr(self, "player_bridge", None) is not None:
+                    self.player_bridge.set_output_mode("shared")
+                self._append_log("INFO", "已改回共享输出（不再独占设备）")
+            elif box.clickedButton() is keep:
+                self._append_log(
+                    "INFO",
+                    "输出模式：独占（会抢占其它应用的声音，停止/暂停即释放）",
+                )
+        finally:
+            self.settings.playback_exclusive_notice_shown = True
+            try:
+                self.settings.save()
+            except OSError as exc:  # noqa: BLE001 - 落盘失败不该挡住启动
+                self._append_log("WARN", f"保存独占说明状态失败：{exc}")
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)

@@ -120,7 +120,9 @@ class Settings:
     # 三档模式才是真语义；`playback_exclusive` 保留为镜像（面板/会话兼容）。
     # 这里同样不 import player.constants（core 不认识 player），字符串字面量与
     # `OutputMode` 的一致性由测试守护。
-    playback_output_mode: str = "shared"           # shared / exclusive / exclusive_strict
+    # Q9 拍板：默认走**宽松独占**（44.1k 不再被系统混音到 48k）。
+    # 三条缓解配套：首次启动弹一次说明、弹窗内可一键改回共享、面板显式标注当前模式。
+    playback_output_mode: str = "exclusive"        # shared / exclusive / exclusive_strict
     playback_exclusive_fallback: str = "auto"      # auto / ask / never（回退策略，auto 也必留痕）
     playback_release_on_pause: bool = True         # 暂停即释放设备（Q3 定稿：默认释放）
     playback_strict_require_int: bool = True       # 严格独占强制整数通路（Q6/DSP 全旁路）

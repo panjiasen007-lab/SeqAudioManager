@@ -91,6 +91,25 @@ ALLOWED_TRANSITIONS: dict[PlayerState, frozenset[PlayerState]] = {
 }
 
 
+class _Attempt:
+    """一次起播尝试的结果（内部用，不进 snapshot）。
+
+    ``retryable`` 为真表示"这一级开流失败、可以降级重试"，由 ``_start_item`` 的
+    外层循环处理；为假表示已经 ``_fail`` 过，不要再试（设计 §4.3 硬规则 1/2）。
+    """
+
+    __slots__ = ("ok", "retryable", "level", "message")
+
+    def __init__(self, ok: bool, retryable: bool = False, level: int = 0, message: str = "") -> None:
+        self.ok = ok
+        self.retryable = retryable
+        self.level = level
+        self.message = message
+
+    def __repr__(self) -> str:  # pragma: no cover - 调试用
+        return f"<_Attempt ok={self.ok} retryable={self.retryable} level={self.level}>"
+
+
 class PlayerError(RuntimeError):
     """引擎层错误（解码不可用、设备不可用、无曲目可播…）。"""
 
@@ -203,6 +222,12 @@ class PlayerEngine:
         self._released_on_pause = False
         self._pending_choice = ""      # fallback="ask" 时要弹的非模态提示
         self._exclusive_refused_note = ""  # 独占开流失败的原因（降级留痕）
+        self._open_failures: dict[int, int] = {}  # device_index -> 连续开流失败次数
+        self._probe_mismatch_total = 0           # 会话累计（stop 后仍保留）
+        #: device_index -> 开流失败过的层级（下次起播直接跳过，别每次切歌都白试一遍）
+        self._device_skip_levels: dict[int, set[int]] = {}
+        #: 学到的「这台设备探测说行、开流被拒」——后续起播的说明文字要用
+        self._device_refused: set[int] = set()
         self._underrun_seen = 0        # 当前这条流的欠载数（回调自增）
         self._underrun_base = 0        # 已拆掉的流累计欠载数
         self._closed = False
@@ -514,6 +539,9 @@ class PlayerEngine:
             self.settings.playback_output_backend = str(backend)
         if exclusive is not None:
             self.settings.playback_exclusive = bool(exclusive)
+        self._device_skip_levels.clear()
+        self._device_refused.clear()
+        self._open_failures.clear()
         if self._item is not None and self._state in (PlayerState.PLAYING, PlayerState.PAUSED):
             self.reconnect()
 
@@ -521,6 +549,10 @@ class PlayerEngine:
         """重新打开设备并从当前位置续播（设备拔出后用户点「重新连接」）。"""
         self._force_shared = False        # 换设备/重连时给独占一次新机会
         self._exclusive_refused_note = ""
+        info = self._resolve_device()
+        index = info.index if info is not None else -1
+        self._device_skip_levels.pop(index, None)
+        self._device_refused.discard(index)
         item = self._item
         if item is None:
             return False
@@ -757,6 +789,9 @@ class PlayerEngine:
         value = normalize_output_mode(mode)
         self.settings.playback_output_mode = value.value
         self.settings.playback_exclusive = value.is_exclusive
+        self._device_skip_levels.clear()
+        self._device_refused.clear()
+        self._open_failures.clear()
         if self._item is not None and self._state in (PlayerState.PLAYING, PlayerState.PAUSED):
             self.reconnect()
         return value
@@ -777,17 +812,26 @@ class PlayerEngine:
             return spec
         self._strict_locked = True
         if spec.sample_fmt not in ("s16", "s24", "s32"):
-            int_fmt = int_sample_fmt_for(int(getattr(self._item, "bit_depth", 0) or 0))
+            # Q11 拍板：严格模式**统一进 int32 容器**，不为 int16 源单独开分支
+            # （与 QA 严格列只用 int32 的口径一致；16bit 样本左移 8 位无损）。
+            int_fmt = "s32"
             log.info(
                 "严格独占要求整数通路：样本格式 %s → %s（DSP/音量强制旁路）",
                 spec.sample_fmt, int_fmt,
             )
             spec = replace(spec, sample_fmt=int_fmt)
+            self._int_downgraded = False   # 已经强制成整数了，别再标"不可用"
         self._dsp.set_gain_db(0.0)
         self._dsp.set_eq_enabled(False)
         return spec
 
-    def _build_spec(self, item: QueueItem, offset_ms: int) -> DecodeSpec:
+    def _build_spec(
+        self,
+        item: QueueItem,
+        offset_ms: int,
+        *,
+        skip_levels: frozenset[int] = frozenset(),
+    ) -> DecodeSpec:
         """按队列项 + 偏移构造解码参数（含采样率/声道/样本格式的最终裁决）。"""
         spec = DecodeSpec.from_item(item, self.settings, start_ms=offset_ms)
         settings = self.settings
@@ -823,14 +867,24 @@ class PlayerEngine:
             if device_rate > 0:
                 want = device_rate
         self._want_rate = int(want)
-        mode = OutputMode.SHARED if self._force_shared else self._output_mode()
+        mode = self._output_mode()
         try:
             # 一次定案：采样率 + 实际模式 + 回退层级（设计 §4.2「探测一次」）
             plan = devices_mod.plan_output(
-                device, want, channels=spec.channels, mode=mode
+                device, want, channels=spec.channels, mode=mode, skip_levels=skip_levels
             )
         except RateUnsupportedError as exc:
             raise PlayerError(str(exc)) from exc
+        if self._exclusive_refused_note:
+            # 上一轮是"探测说行、开流被拒"降级过来的：把这句写进 plan.note，
+            # 面板才能解释"为什么最后是 48000 Hz/共享"，而不是让用户以为设备不支持。
+            detail = (
+                f"探测通过但开流被拒（已记录），实际改用 {plan.rate} Hz"
+                f"（{plan.mode.value}）"
+            )
+            merged = detail
+            plan = replace(plan, note=merged)
+            self._exclusive_refused_note = ""
         self._plan = plan
         self._fallback = bool(plan.fallback)
         policy = str(getattr(self.settings, "playback_exclusive_fallback", "auto") or "auto")
@@ -857,6 +911,42 @@ class PlayerEngine:
     def _dsp_will_process(self) -> bool:
         """这次起播 DSP 是否真的会改样本（= 整数通路是否可行，取反）。"""
         return not int_pipeline_allowed(self.settings, self._volume_db)
+
+    def _note_open_failure(self, message: str) -> None:
+        """记录一次「开流失败」（= 探测与实际不一致），到阈值就作废该设备缓存。
+
+        设计 §4.2：连续失败 2 次 → 失效重探。不接这条的话，假阳性设备会**每次
+        起播**都先按错的 plan 试一遍，用户感受是"每次切歌都卡一下"。
+        """
+        self._signal.bump("probe_mismatch", 1)
+        self._probe_mismatch_total += 1
+        device = self._device_info_for_counters()
+        index = device.index if device is not None else -1
+        count = self._open_failures.get(index, 0) + 1
+        self._open_failures[index] = count
+        log.info("输出开流失败计数：设备 %s = %d（%s）", index, count, message)
+        if count >= 2 and device is not None:
+            try:
+                devices_mod.probe_cache().invalidate(device)
+                log.warning("设备 %s 连续 %d 次开流失败，已作废能力缓存并将在下次重探", index, count)
+            except Exception:  # noqa: BLE001
+                pass
+            self._open_failures[index] = 0
+
+    def _note_open_success(self) -> None:
+        device = self._device_info_for_counters()
+        if device is not None:
+            self._open_failures[device.index] = 0
+
+    def _device_info_for_counters(self) -> Optional[DeviceInfo]:
+        """当前设备（用于按设备记失败次数）；拿不到就返回 None。"""
+        try:
+            info = getattr(self._output, "device_info", None)
+            if info is not None:
+                return info
+        except Exception:  # noqa: BLE001
+            pass
+        return self._resolve_device()
 
     def _resolve_device(self) -> Optional[DeviceInfo]:
         try:
@@ -901,17 +991,64 @@ class PlayerEngine:
             log.exception("DSP 处理异常（已忽略该块）")
 
     def _start_item(self, item: QueueItem, offset_ms: int = 0) -> bool:
-        """起播/续播一首：开解码器 → 预填 → 开流 → PLAYING。"""
+        """起播/续播一首，带**最多 4 次**的独占降级重试（设计 §4.3）。
+
+        为什么必须重试而不是"探测决定一切"：``check_output_settings`` 有假阳性
+        （dev18 + 44100 + 独占：探测 ✓、开流 ``-9996``）。探测只用来排序候选，
+        **判据是开流成功**。每级只降一次，失败过的 level 放进 ``skip_levels``，
+        绝不在同一组参数上原地重试。
+        """
+        device = self._resolve_device()
+        device_index = device.index if device is not None else -1
+        # 上次在这台设备上失败过的层级直接跳过（假阳性设备因此不再每次卡 ~200 ms）
+        skip_levels: set[int] = set(self._device_skip_levels.get(device_index, set()))
+        if skip_levels:
+            log.info("设备 %s 上次开流失败过层级 %s，本次直接跳过", device_index, sorted(skip_levels))
+        if device_index in self._device_refused:
+            self._exclusive_refused_note = "探测通过但开流被拒（已记录），已自动降级"
+        last_message = ""
+        for attempt in range(4):
+            result = self._start_item_once(item, offset_ms, frozenset(skip_levels))
+            if result.ok:
+                self._note_open_success()
+                # 刻意**不**清 skip 集：这台设备"探测说行、开流被拒"是稳定特性，
+                # 学会一次就该一直用对的那级（否则每次切歌都要白试 ~200 ms）。
+                # 换设备/重连时清空（见 set_output / reconnect）。
+                return True
+            if not result.retryable:
+                return False                     # _start_item_once 里已经 _fail 过
+            skip_levels.add(int(result.level))
+            self._device_skip_levels.setdefault(device_index, set()).add(int(result.level))
+            self._device_refused.add(device_index)
+            last_message = result.message
+            self._note_open_failure(result.message)
+            log.warning(
+                "第 %d 级输出开流失败（%s），降级重试（第 %d/4 次）",
+                result.level, result.message, attempt + 2,
+            )
+            self._exclusive_refused_note = (
+                "探测通过但开流被拒（已记录），已自动降级"
+            )
+        self._fail(f"独占各级开流均失败：{last_message}")
+        return False
+
+    def _start_item_once(
+        self, item: QueueItem, offset_ms: int = 0, skip_levels: frozenset[int] = frozenset()
+    ) -> "_Attempt":
+        """按给定 skip 集尝试**一级**：开流 → 预填 → PLAYING。
+
+        返回 ``_Attempt``：``ok`` / ``retryable``（可降级）/ ``level``（失败层级）。
+        """
         backend = str(getattr(self.settings, "playback_output_backend", "") or "")
         if backend == "asio" and not devices_mod.backend_present("asio"):
             # 用户手工把后端写成 asio（或从别处同步来的配置）：不崩，给准确原因
             self._fail(
                 "当前 PortAudio 构建不含 ASIO：本版未启用 ASIO（需替换 DLL，见 v1.7 说明）"
             )
-            return False
+            return _Attempt(False)
         if not Path(item.path).exists():
             self._fail(f"文件不存在：{item.path}")
-            return False
+            return _Attempt(False)
         previous = self._item
         changed_track = previous is None or previous.key != item.key
         self._item = item
@@ -926,10 +1063,10 @@ class PlayerEngine:
         self._fade_out_and_wait()
         self._teardown_playback()
         try:
-            spec = self._build_spec(item, offset_ms)
+            spec = self._build_spec(item, offset_ms, skip_levels=skip_levels)
         except (PlayerError, DecodeError) as exc:
             self._fail(str(exc))
-            return False
+            return _Attempt(False)
 
         device = self._resolve_device()
         ring = PcmRingBuffer.from_seconds(
@@ -965,21 +1102,18 @@ class PlayerEngine:
             else:  # 注入的极简假输出：退回一步到位
                 actual_rate = int(output.start(spec.sample_rate, spec.channels))
         except (DeviceBusyError, DeviceLostError, RateUnsupportedError, DeviceError) as exc:
-            # 探测说"独占可用"、真开流却失败（本机 Nahimic 44.1k 独占就是这样：
-            # Pa_IsFormatSupported 给假阳性、开流报 -9996）。这类情况**不能**直接
-            # 进 ERROR —— 用户要的是听歌，不是听错误。降级共享重试一次，并留痕。
-            if self._plan is not None and self._plan.mode.is_exclusive and not self._force_shared:
-                log.warning("独占开流失败，降级共享重试：%s", exc)
-                self._force_shared = True
-                self._discard_output(output)
-                self._teardown_playback()
-                self._exclusive_refused_note = str(exc)
-                return self._start_item(item, offset_ms)
+            # 探测说"独占可用"、真开流却失败（dev18 44.1k 独占：探测 ✓、开流 -9996）。
+            # 这类假阳性由外层降级循环处理：不在同一级原地重试，只回报"这级失败"。
+            self._discard_output(output)
+            self._teardown_playback()
+            plan = self._plan
+            if plan is not None and plan.mode.is_exclusive:
+                return _Attempt(False, retryable=True, level=int(plan.level), message=str(exc))
             self._fail(f"打开输出设备失败：{exc}")
-            return False
+            return _Attempt(False)
         except Exception as exc:  # noqa: BLE001 - 未知异常也要转 ERROR 而不是崩
             self._fail(f"打开输出设备失败：{exc}")
-            return False
+            return _Attempt(False)
 
         actual_mode = (
             output.actual_mode() if hasattr(output, "actual_mode") else None
@@ -1000,7 +1134,7 @@ class PlayerEngine:
             if str(getattr(self.settings, "playback_exclusive_fallback", "auto")) == "never":
                 self._discard_output(output)
                 self._fail("独占无法生效（设备未接受独占参数），且设置为「只报错」")
-                return False
+                return _Attempt(False)
 
         if actual_rate != int(spec.sample_rate):
             # 理论上 pick_rate 已裁决过；真出现说明设备在两次查询之间变了，
@@ -1010,7 +1144,7 @@ class PlayerEngine:
             )
             self._discard_output(output)
             spec = replace(spec, sample_rate=int(actual_rate))
-            return self._start_item(item, offset_ms)
+            return self._start_item_once(item, offset_ms, skip_levels)
 
         self._rate = int(spec.sample_rate)
         self._channels = int(spec.channels)
@@ -1025,7 +1159,7 @@ class PlayerEngine:
         except (DecodeError, OSError) as exc:
             self._discard_output(output)
             self._fail(f"无法解码：{exc}")
-            return False
+            return _Attempt(False)
         self._decoder = decoder
 
         prefilled = self._wait_prefill(ring, decoder)
@@ -1044,9 +1178,9 @@ class PlayerEngine:
                 self._emit(EVENT_EOF, None)
                 self._emit(EVENT_TRACK, None)
                 self._emit(EVENT_POSITION, 0)
-                return False
+                return _Attempt(False)
             self._fail("解码器没有产出任何音频（解码失败）")
-            return False
+            return _Attempt(False)
 
         # DSP 必须在 begin() **之前**准备好：回调一启动就会调用它
         self._dsp.prepare(self._rate, self._channels, self._block_frames)
@@ -1059,12 +1193,15 @@ class PlayerEngine:
                 output.begin()
         except (DeviceBusyError, DeviceLostError, RateUnsupportedError, DeviceError) as exc:
             self._discard_output(output)
+            plan = self._plan
+            if plan is not None and plan.mode.is_exclusive:
+                return _Attempt(False, retryable=True, level=int(plan.level), message=str(exc))
             self._fail(f"启动输出流失败：{exc}")
-            return False
+            return _Attempt(False)
         except Exception as exc:  # noqa: BLE001
             self._discard_output(output)
             self._fail(f"启动输出流失败：{exc}")
-            return False
+            return _Attempt(False)
 
         self._output = output
         self._configure_signal(spec, device, actual_rate)
@@ -1076,7 +1213,7 @@ class PlayerEngine:
             item.display, self._rate, self._channels, offset_ms,
             "，已回退采样率" if self._fallback else "",
         )
-        return True
+        return _Attempt(True)
 
     def _discard_output(self, output: Any) -> None:
         """丢掉一个还没接管（或接管失败）的输出对象。"""
@@ -1285,6 +1422,7 @@ class PlayerEngine:
                 or output_snapshot.get("mode_note", "")
                 or ""
             ),
+            exclusive_fallback=bool(getattr(plan, "fallback", False)),
             exclusive_refused=bool(
                 self._exclusive_refused_note
                 or (
@@ -1298,6 +1436,7 @@ class PlayerEngine:
             format_note=(
                 TEXT_INT_PIPELINE_UNAVAILABLE if self._int_downgraded else ""
             ),
+            effective_bit_depth=int(getattr(self._item, "bit_depth", 0) or 0),
         )
         # 回退时 counters 里补一笔（引擎在 _build_spec 里已 bump，这里不重复加）
         self._sync_counters(output_snapshot)
@@ -1344,6 +1483,7 @@ class PlayerEngine:
             except Exception:  # noqa: BLE001
                 pass
         self._signal.counters.gain_db = float(self._dsp.gain.db)
+        self._signal.counters.probe_mismatch = self._probe_mismatch_total
 
     # ------------------------------------------------------------ 错误
 

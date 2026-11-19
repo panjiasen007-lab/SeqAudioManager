@@ -41,15 +41,35 @@ class _Panel(unittest.TestCase):
         # 设备下拉由主窗口/桥接灌入（面板本身不 import player），测试里自己灌一份
         wasapi = player_devices.list_output_devices("wasapi")
         self.panel.set_output_devices([item.to_dict() for item in wasapi])
-        self.panel.load_from(self.settings)
+        # 默认选一台**支持严格独占**的设备，否则严格项会被能力矩阵正确置灰，
+        # 那些想测"选严格之后怎样"的用例就测不到东西了。
+        self._strict_capable = next(
+            (
+                item
+                for item in wasapi
+                if player_devices.probe_capabilities(item).strict_usable
+            ),
+            None,
+        )
+        self.panel.load_from(self.settings)   # 设置优先进面板（会重置设备下拉）
+        # 再把「后端 WASAPI + 支持严格的设备」选上：否则严格项会被能力矩阵正确置灰，
+        # 想测"选严格之后怎样"的用例就无从测起。
+        self._select_wasapi()
 
     def tearDown(self) -> None:
         self.panel.deleteLater()
 
-    def _select_wasapi(self) -> None:
+    def _select_wasapi(self, device=None) -> None:
         index = self.panel.backend_combo.findData("wasapi")
         self.assertGreaterEqual(index, 0)
         self.panel.backend_combo.setCurrentIndex(index)
+        target = device if device is not None else self._strict_capable
+        if target is not None:
+            position = self.panel.device_combo.findData(target.name)
+            if position >= 0:
+                self.panel.device_combo.setCurrentIndex(position)
+        if self.panel.capability_box.isVisible():
+            self.panel._refresh_capability()
 
 
 class TestThreeValueMode(_Panel):
@@ -73,6 +93,10 @@ class TestThreeValueMode(_Panel):
         self.assertTrue(self.panel.int_pipeline_check.isEnabled())
 
     def test_non_wasapi_disables_exclusive(self) -> None:
+        # 先真的切到 WASAPI 并选独占，再切走 —— 否则默认后端本来就是 MME，
+        # setCurrentIndex 不变更索引、不会触发任何逻辑（测不到想测的东西）。
+        self._select_wasapi()
+        self.panel.mode_exclusive.setChecked(True)
         index = self.panel.backend_combo.findData("mme")
         self.assertGreaterEqual(index, 0)
         self.panel.backend_combo.setCurrentIndex(index)
@@ -175,6 +199,74 @@ class TestCapabilityTable(_Panel):
         if player_devices.backend_present("asio"):
             self.skipTest("本机 PortAudio 含 ASIO")
         self.assertFalse(model_item.isEnabled(), "当前构建不含 ASIO，必须置灰")
+
+
+class TestStrictCapabilityGating(_Panel):
+    """严格项必须按**当前设备**的能力动态置灰（设计 §9.2 / QA 5 设备矩阵）。"""
+
+    def test_strict_disabled_when_device_unsupported(self) -> None:
+        candidates = player_devices.list_output_devices("wasapi")
+        if not candidates:
+            self.skipTest("没有 WASAPI 设备")
+        unsupported = None
+        for device in candidates:
+            capability = player_devices.probe_capabilities(device)
+            if not capability.strict_usable:
+                unsupported = device
+                break
+        if unsupported is None:
+            self.skipTest("本机所有 WASAPI 设备都支持严格独占（无法验证置灰）")
+
+        self._select_wasapi(unsupported)
+        self.panel.mode_exclusive.setChecked(True)
+        self.panel._refresh_capability()
+        self.assertFalse(
+            self.panel.mode_strict.isEnabled(),
+            f"{unsupported.name} 不支持严格独占，选项必须置灰",
+        )
+
+    def test_strict_auto_downgrades_when_selected(self) -> None:
+        """配置里已是严格、但换到不支持的设备 → 自动退回「独占」并提示一次。
+
+        （"在不支持的设备上点严格"这条路已经被置灰挡住了：按钮不可选，
+        所以真正会发生的场景是"先选好严格，再换设备"。）
+        """
+        candidates = player_devices.list_output_devices("wasapi")
+        if not candidates:
+            self.skipTest("没有 WASAPI 设备")
+        unsupported = next(
+            (
+                device
+                for device in candidates
+                if not player_devices.probe_capabilities(device).strict_usable
+            ),
+            None,
+        )
+        if unsupported is None or self._strict_capable is None:
+            self.skipTest("本机缺少「支持/不支持严格」的设备对照")
+
+        self._select_wasapi(self._strict_capable)
+        self.panel.mode_strict.setChecked(True)
+        self.assertIs(self.panel._current_output_mode(), OutputMode.EXCLUSIVE_STRICT)
+
+        self._select_wasapi(unsupported)
+        self.assertIs(
+            self.panel._current_output_mode(),
+            OutputMode.EXCLUSIVE,
+            "设备不支持严格时必须自动退回「独占」，不能留下必然失败的选择",
+        )
+        self.assertIn("严格", self.panel.capability_hint.text())
+
+    def test_capability_table_has_six_rates(self) -> None:
+        wasapi = player_devices.list_output_devices("wasapi")
+        if not wasapi:
+            self.skipTest("没有 WASAPI 设备")
+        self._select_wasapi()
+        self.panel.mode_exclusive.setChecked(True)
+        self.panel._refresh_capability()
+        rates = tuple(getattr(player_devices, "CAPABILITY_RATES", ()))
+        self.assertEqual(self.panel.capability_table.rowCount(), len(rates))
+        self.assertIn(176400, rates, "176.4k 必须进矩阵（dev22 非单调的关键一档）")
 
 
 if __name__ == "__main__":

@@ -422,7 +422,7 @@ class SettingsPanel(QWidget):
             "留空表示使用系统默认设备。列表来自 PortAudio，"
             "同一物理设备在不同后端下会出现多次"
         )
-        self.device_combo.currentIndexChanged.connect(self._notify)
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
         self.backend_combo = QComboBox()
         # 后端键与 Settings 里存的值严格一致（不要写中文或枚举名）
@@ -467,6 +467,9 @@ class SettingsPanel(QWidget):
         for button in (self.mode_shared, self.mode_exclusive, self.mode_strict):
             mode_layout.addWidget(button)
         mode_layout.addStretch(1)
+        self.mode_status = QLabel("")
+        self.mode_status.setObjectName("hint")
+        mode_layout.addWidget(self.mode_status)
 
         # 兼容 v1.6 的旧用例/调用方：隐藏的布尔镜像，setChecked(True) == 选「独占」
         self.exclusive_check = QCheckBox("独占输出")
@@ -501,6 +504,10 @@ class SettingsPanel(QWidget):
         self.release_on_pause_check.toggled.connect(self._notify)
 
         # ---- 设备能力矩阵（零出声探测）----
+        self.capability_disclaimer = QLabel(i18n.tr("dev_cap_disclaimer"))
+        self.capability_disclaimer.setObjectName("hint")
+        self.capability_disclaimer.setWordWrap(True)
+
         self.capability_box = QWidget()
         capability_layout = QVBoxLayout(self.capability_box)
         capability_layout.setContentsMargins(0, 6, 0, 0)
@@ -539,6 +546,7 @@ class SettingsPanel(QWidget):
         self.capability_hint.setObjectName("hint")
         self.capability_hint.setWordWrap(True)
         capability_layout.addWidget(self.capability_hint)
+        capability_layout.addWidget(self.capability_disclaimer)
         self.capability_box.setVisible(False)
 
         self.follow_rate_check = QCheckBox("采样率跟随源文件")
@@ -668,6 +676,14 @@ class SettingsPanel(QWidget):
     def _current_backend_key(self) -> str:
         return str(self.backend_combo.currentData() or "mme")
 
+    def _on_device_changed(self, _index: int) -> None:
+        """换设备：能力矩阵要跟着重探（严格项可能从可用变不可用，反之亦然）。"""
+        # 用 isHidden() 而不是 isVisible()：面板未 show() 时（离屏测试、构造期）
+        # isVisible() 恒为 False，会让能力刷新整段失效。
+        if not self._loading and not self.capability_box.isHidden():
+            self._refresh_capability()
+        self._notify()
+
     def _on_backend_changed(self, _index: int) -> None:
         key = self._current_backend_key()
         self.backend_hint.setText(i18n.tr(f"dev_hint_{key}"))
@@ -678,7 +694,7 @@ class SettingsPanel(QWidget):
             if key != "wasapi" and mode.is_exclusive:
                 self._set_output_mode(OutputMode.SHARED)
                 self.capability_box.setVisible(False)
-            elif self.capability_box.isVisible():
+            elif not self.capability_box.isHidden():
                 self._refresh_capability()
         self._notify()
 
@@ -719,6 +735,7 @@ class SettingsPanel(QWidget):
         self.exclusive_check.setChecked(mode.is_exclusive)
         self.exclusive_check.blockSignals(False)
         self._apply_mode_constraints(mode)
+        self._update_mode_status()
         self.capability_box.setVisible(mode.is_exclusive)
         if mode.is_exclusive:
             self._refresh_capability()
@@ -767,7 +784,11 @@ class SettingsPanel(QWidget):
         except Exception as exc:  # noqa: BLE001
             self.capability_hint.setText(str(exc))
             return
-        rates = (44100, 48000, 96000, 192000)
+        # 6 档（含 88.2k/176.4k）：dev22 实测「独占 192k ✓ 但 176.4k ✗」，
+        # 所以**逐档如实渲染、绝不按"越高越容易"推断**。
+        rates = tuple(getattr(player_devices, "CAPABILITY_RATES", ())) or (
+            44100, 48000, 88200, 96000, 176400, 192000,
+        )
         self.capability_table.setRowCount(len(rates))
         unlocked: list[int] = []
         for row, rate in enumerate(rates):
@@ -795,6 +816,8 @@ class SettingsPanel(QWidget):
             )
         else:
             self.capability_hint.setText(i18n.tr("dev_cap_none_unlocked"))
+        # 放在"解锁"提示之后：设备不支持严格时的说明更重要，不能被覆盖掉
+        self._apply_capability_to_controls(capability)
 
     def _show_cached_capability(self) -> None:
         """有缓存就渲染，没有就提示去点「重新探测」——load 阶段不扫设备。"""
@@ -808,7 +831,10 @@ class SettingsPanel(QWidget):
             self.capability_table.setRowCount(0)
             return
         capability = cache.get(device)
-        rates = (44100, 48000, 96000, 192000)
+        self._apply_capability_to_controls(capability)
+        rates = tuple(getattr(player_devices, "CAPABILITY_RATES", ())) or (
+            44100, 48000, 88200, 96000, 176400, 192000,
+        )
         self.capability_table.setRowCount(len(rates))
         for row, rate in enumerate(rates):
             self.capability_table.setItem(row, 0, QTableWidgetItem(f"{rate / 1000:g} kHz"))
@@ -820,6 +846,34 @@ class SettingsPanel(QWidget):
                 item = QTableWidgetItem("✓" if capability.supports(rate, mode) else "✗")
                 item.setTextAlignment(Qt.AlignCenter)
                 self.capability_table.setItem(row, column, item)
+
+    def _apply_capability_to_controls(self, capability) -> None:
+        """按**当前设备**的真实能力调整严格项（设计 §9.2 / QA 5 设备矩阵）。
+
+        实测：本机 5 台 WASAPI 设备里只有 Realtek 扬声器支持严格独占，其余全 ✗。
+        所以"严格"是**单设备特性**——全 ✗ 时必须置灰并说明，否则用户选了它，
+        起播前就被 ``output.prepare()`` 拦下（或 -9997），体验是"功能根本不能用"。
+        """
+        strict_ok = bool(capability.strict_usable) if capability is not None else True
+        self.mode_strict.setEnabled(strict_ok)
+        self.mode_strict.setToolTip(
+            i18n.tr("dev_mode_strict_hint")
+            if strict_ok
+            else i18n.tr("dev_strict_unsupported")
+        )
+        if not strict_ok and self.mode_strict.isChecked():
+            self._set_output_mode(OutputMode.EXCLUSIVE)
+            self.capability_hint.setText(i18n.tr("dev_strict_auto_downgraded"))
+
+    def _update_mode_status(self) -> None:
+        """面板顶部常驻一行「当前模式」，让用户随时知道自己选的是什么。"""
+        mode = self._current_output_mode()
+        label = {
+            OutputMode.SHARED: i18n.tr("dev_mode_shared"),
+            OutputMode.EXCLUSIVE: i18n.tr("dev_mode_exclusive"),
+            OutputMode.EXCLUSIVE_STRICT: i18n.tr("dev_mode_exclusive_strict"),
+        }[mode]
+        self.mode_status.setText(i18n.tr_format("dev_mode_current", mode=label))
 
     def _test_device(self) -> None:
         """真开一条 1 s 静音流（唯一允许的真开流探测，用户显式点击才走）。"""
@@ -1031,7 +1085,11 @@ class SettingsPanel(QWidget):
             self.release_on_pause_check.setChecked(
                 bool(getattr(settings, "playback_release_on_pause", True))
             )
+            # 载入时**不**擅自改动用户存的模式（哪怕后端是 MME）：只把不可用的
+            # 选项置灰。真正"会失败的模式"（严格的设备不支持）在能力探测后处理；
+            # 用户主动切换后端时才会退回共享（见 _on_backend_changed）。
             self._apply_mode_constraints(mode)
+            self._update_mode_status()
             self.capability_box.setVisible(mode.is_exclusive)
             # 跨会话复用上次的能力矩阵（指纹不符会自动忽略）
             player_devices.probe_cache().load_dict(

@@ -325,8 +325,13 @@ def resolve_device(name: str, backend: str = "") -> DeviceInfo:
 
 # ---------------------------------------------------------------- 独占能力（v1.7）
 
-#: 严格独占只接受整数格式（设计 §2.2 补测 C：f32 + explicit_sample_format=True 必 -9997）
-STRICT_DTYPES = ("int16", "int32")
+#: 严格独占的样本格式白名单：**只有 int32**。
+#:
+#: 两条依据：① 补测 C：f32 + explicit_sample_format=True 必 -9997，所以不能是浮点；
+#: ② QA 的 30 格真开流矩阵里严格列一律用 int32 测，且 Q11 拍板「16bit 源统一进
+#: int32 容器」。因此**探测也必须用 int32**——用 int16 探会把只有 int16 能开的
+#: 设备误报成"支持严格"，然后引擎强制 int32 开流失败（又是一次假阳性）。
+STRICT_DTYPES = ("int32",)
 
 #: 能力矩阵要探的采样率（设计 §9.1 的表格就是这四行 + 88.2/176.4 备用）。
 #: 不能直接用 RATE_FALLBACK_FULL：那是"回退候选"，不含 192k —— 而
@@ -714,21 +719,25 @@ def plan_output(
     mode: OutputMode | str = OutputMode.SHARED,
     extended: bool = True,
     probe=None,
+    skip_levels: frozenset[int] | set[int] | tuple[int, ...] = (),
 ) -> OutputPlan:
-    """四级回退阶梯（设计 §4.3）——一次的、有留痕的输出决定。
+    """按四级阶梯产出**候选计划**，返回第一个未被跳过的一级。
 
-    ```
-    ① 严格独占（exclusive + explicit + 整数）+ 源率
-    ② 宽松独占 + 源率
-    ③ 独占 + 回退采样率（RATE_FALLBACK_FULL 里第一个可用）
-    ④ 共享（系统混音）
-    ```
+    两条硬规则（设计 §4.3）：
 
-    每一级都返回说明文字，引擎把它写进信号路径 —— **不允许静默降级**。
+    * **判据是"开流成功"，不是"探测通过"**。探测只用来给候选排序、少试几次。
+      dev18 44.1k 独占就是活证据：探测 ✓ 而开流 `-9996` —— 引擎必须拿到"下一级"
+      继续试，而不是在这里判死。
+    * **同一级只降一次**：调用方把失败过的 level 放进 ``skip_levels``，
+      本次起播就不再出同一级（避免原地重试同一参数）。
+
+    本函数只负责"该试哪些"，**不负责真开流**：探测到的候选一律要由引擎真正打开
+    一次才算数。
 
     Args:
-        probe: 注入用的探测函数 ``(device, rate, channels, mode) -> bool``；
-            测试里替换它就能覆盖所有分支而不碰声卡。
+        skip_levels: 本次起播里已经失败过的层级（1–4），会被跳过。
+        probe: 注入的探测函数 ``(device, rate, channels, mode) -> bool``；
+            测试用 Fake 覆盖所有分支而不碰声卡。
     """
     if device is None:
         try:
@@ -740,52 +749,95 @@ def plan_output(
     ch = int(channels) if int(channels) > 0 else 0
     want_rate = int(want) if int(want) > 0 else int(device.rate or SR_44K)
     candidates = candidate_rates(device, want_rate, extended=extended)
+    skipped = {int(level) for level in (skip_levels or ())}
 
-    def _supported(mode_value: OutputMode) -> tuple[int, ...]:
-        return tuple(rate for rate in candidates if check(device, rate, ch, mode_value))
+    plans: list[OutputPlan] = []
 
-    # ①/②：先按「源采样率」试严格 → 宽松
+    def _add(plan: OutputPlan) -> None:
+        if plan.level not in skipped:
+            plans.append(plan)
+
+    # ---- ①②：源采样率上先试严格、再试宽松 ----
+    strict_note = ""
     if requested_mode is OutputMode.EXCLUSIVE_STRICT:
         if check(device, want_rate, ch, OutputMode.EXCLUSIVE_STRICT):
-            return OutputPlan(want_rate, OutputMode.EXCLUSIVE_STRICT, 1, False,
-                              want_rate, requested_mode, "", (want_rate,))
-        note = "严格独占不可用，已降为宽松独占"
-    else:
-        note = ""
+            _add(OutputPlan(want_rate, OutputMode.EXCLUSIVE_STRICT, 1, False,
+                            want_rate, requested_mode, "", (want_rate,)))
+        strict_note = "严格独占不可用，已降为宽松独占"
     if requested_mode.is_exclusive:
         if check(device, want_rate, ch, OutputMode.EXCLUSIVE):
             level = 2 if requested_mode.explicit_format else 1
-            return OutputPlan(want_rate, OutputMode.EXCLUSIVE, level,
-                              requested_mode.explicit_format, want_rate, requested_mode,
-                              note, (want_rate,))
-        # ③ 独占 + 回退采样率
-        usable = _supported(OutputMode.EXCLUSIVE)
-        if usable:
-            return OutputPlan(
-                usable[0], OutputMode.EXCLUSIVE, 3, True, want_rate, requested_mode,
-                (note + "；" if note else "") + f"独占下不支持 {want_rate} Hz，回退 {usable[0]} Hz",
-                usable,
-            )
-        note = (note + "；" if note else "") + "该设备不支持独占，已退回共享"
+            _add(OutputPlan(want_rate, OutputMode.EXCLUSIVE, level,
+                            requested_mode.explicit_format, want_rate, requested_mode,
+                            strict_note, (want_rate,)))
 
-    # ④ 共享
-    shared = _supported(OutputMode.SHARED)
-    if shared:
-        if shared[0] != want_rate:
-            shared_note = f"设备不支持 {want_rate} Hz，已回退 {shared[0]} Hz（共享）"
-            note = (note + "；" if note else "") + shared_note
-        rate_fell_back = shared[0] != want_rate
-        return OutputPlan(
-            shared[0], OutputMode.SHARED,
-            4 if requested_mode.is_exclusive else (3 if rate_fell_back else 1),
-            # fallback 的含义是「没按用户请求原样达成」：共享模式下率一致就不算回退
-            bool(requested_mode.is_exclusive or rate_fell_back),
-            want_rate, requested_mode, note, shared,
-        )
+    # ---- ③：独占 + 回退采样率（候选里第一个探测可用的率）----
+    if requested_mode.is_exclusive:
+        for rate in candidates:
+            if rate == want_rate:
+                continue
+            if check(device, rate, ch, OutputMode.EXCLUSIVE):
+                note = (strict_note + "；" if strict_note else "") + (
+                    f"独占下不支持 {want_rate} Hz，回退 {rate} Hz"
+                )
+                _add(OutputPlan(rate, OutputMode.EXCLUSIVE, 3, True, want_rate,
+                                requested_mode, note, (rate,)))
+                break
+
+    # ---- ④：共享（系统混音）----
+    if skipped and requested_mode.is_exclusive and all(
+        level in skipped for level in (1, 2, 3)
+    ):
+        base_note = "独占各级开流均失败，已退回共享"
+    else:
+        base_note = "该设备不支持独占，已退回共享" if requested_mode.is_exclusive else ""
+    for rate in candidates:
+        if check(device, rate, ch, OutputMode.SHARED):
+            rate_fell_back = rate != want_rate
+            note = base_note
+            if rate_fell_back:
+                shared_note = f"设备不支持 {want_rate} Hz，已回退 {rate} Hz（共享）"
+                note = (note + "；" if note else "") + shared_note
+            _add(OutputPlan(
+                rate, OutputMode.SHARED,
+                4 if requested_mode.is_exclusive else (3 if rate_fell_back else 1),
+                bool(requested_mode.is_exclusive or rate_fell_back),
+                want_rate, requested_mode, note, (rate,),
+            ))
+            break
+
+    if plans:
+        return plans[0]
     raise RateUnsupportedError(
-        f"设备 {device.label} 在共享/独占模式下都不支持候选采样率 {candidates}",
+        f"设备 {device.label} 在共享/独占模式下都不支持候选采样率 {candidates}"
+        + (f"（本次已跳过层级 {sorted(skipped)}）" if skipped else ""),
         tried=candidates,
     )
+
+
+def demote_plan(
+    plan: OutputPlan,
+    want: int,
+    *,
+    device: DeviceInfo,
+    channels: int = 0,
+    skip_levels: frozenset[int] | set[int] | tuple[int, ...] = (),
+    probe=None,
+) -> OutputPlan | None:
+    """取「下一级」计划；已到顶返回 ``None``。
+
+    引擎开流失败后调用它，而不是自己猜"该降成什么"——阶梯定义只留在
+    ``plan_output`` 一处，避免两处不一致（设计 §12.2 的契约）。
+    """
+    skipped = {int(level) for level in (skip_levels or ())}
+    skipped.add(int(plan.level))
+    try:
+        return plan_output(
+            device, want, channels=channels, mode=plan.requested_mode,
+            probe=probe, skip_levels=skipped,
+        )
+    except RateUnsupportedError:
+        return None
 
 
 def pick_rate_for_mode(
@@ -990,6 +1042,7 @@ __all__ = [
     "device_fingerprint",
     "probe_capabilities",
     "plan_output",
+    "demote_plan",
     "pick_rate_for_mode",
     "backend_present",
     "backend_available",
