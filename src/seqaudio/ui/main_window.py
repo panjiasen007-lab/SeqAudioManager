@@ -214,16 +214,17 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, lambda: self.btn_toggle_panel.setChecked(True))
         splitter.addWidget(self.right_tabs)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        # 窗口变宽时按 3:2 分配增量（曲库区仍占主导），setSizes 只是初始比例
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
         splitter.setSizes([960, 460])
         body_layout.addWidget(splitter, 1)
 
         # v1.6.1 用户反馈：底部改「左中右三等分」—— 左运行日志 / 中歌词 /
-        # 右信号路径。整体高度固定 190px：为的是主表格「至少能显示 10 首」，
-        # 高度给底部多了表格就不够（用户点名），三栏内容各自滚动。
+        # 右信号路径。高度不再写死 190px，而是随窗口高度自适应（见
+        # `_apply_adaptive_layout`）：最大化时底部跟着长，小窗时保表格 10 行。
         bottom = self._build_bottom_area()
-        bottom.setFixedHeight(190)
+        self._bottom_area = bottom
         body_layout.addWidget(self.player_bar)
         body_layout.addWidget(bottom)
 
@@ -233,6 +234,7 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.progress)
 
         self._enforce_table_min_height()
+        self._apply_adaptive_layout()
 
         status = QStatusBar()
         status.setSizeGripEnabled(False)
@@ -1202,31 +1204,6 @@ class MainWindow(QMainWindow):
         chip_row.addStretch(1)
         layout.addLayout(chip_row)
 
-        # 选中操作条：有选中项时才出现，减少工具栏常驻按钮
-        self.selection_bar = QFrame()
-        self.selection_bar.setObjectName("selectionBar")
-        self.selection_bar.setVisible(False)
-        sel_layout = QHBoxLayout(self.selection_bar)
-        sel_layout.setContentsMargins(12, 6, 10, 6)
-        sel_layout.setSpacing(8)
-        self.selection_label = QLabel("已选 0 首")
-        self.selection_label.setObjectName("strong")
-        sel_layout.addWidget(self.selection_label)
-        sel_layout.addStretch(1)
-        for text, slot in (
-            ("鉴定", self.run_authenticity),
-            ("编辑标签", self.edit_selected),
-            ("清理", self.run_cleanup),
-            ("取消选择", lambda: self.table.clearSelection()),
-        ):
-            btn = QPushButton(text)
-            btn.setObjectName("ghost")
-            btn.setMinimumHeight(30)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(slot)
-            sel_layout.addWidget(btn)
-        layout.addWidget(self.selection_bar)
-
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setItemDelegate(TrackDelegate(self.table))
@@ -1428,6 +1405,24 @@ class MainWindow(QMainWindow):
         return not isinstance(
             widget, (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QAbstractButton)
         )
+
+    def _apply_adaptive_layout(self) -> None:
+        """底部三栏高度随窗口高度自适应：约 22%，夹在 170~360 px。
+
+        小窗（1040×720）取 170 px，配合 ``_enforce_table_min_height`` 保住
+        表格 10 行下限；最大化时最多 360 px，日志/歌词/信号路径能多显示内容，
+        又不会把曲库区挤没。构造期 ``_bottom_area`` 尚未创建，用 getattr 守卫。
+        """
+        bottom = getattr(self, "_bottom_area", None)
+        if bottom is None:
+            return
+        target = max(170, min(360, int(self.height() * 0.22)))
+        if bottom.height() != target:
+            bottom.setFixedHeight(target)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_adaptive_layout()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -2337,11 +2332,6 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, *_) -> None:
         tracks = self._selected_tracks()
-        self.selection_bar.setVisible(bool(tracks))
-        if tracks:
-            self.selection_label.setText(
-                i18n.tr_format("已选 {count} 首", count=len(tracks))
-            )
         self.inspector.set_track(tracks[0] if tracks else None)
 
     def _select_verdict_filter(self, key: str) -> None:

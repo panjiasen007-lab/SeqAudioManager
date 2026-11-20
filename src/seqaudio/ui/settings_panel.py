@@ -52,7 +52,9 @@ class SettingsPanel(QWidget):
         self._last_base_hint = ""
         self._auto_downgrading = False
         self.setMinimumWidth(380)
-        self.setMaximumWidth(560)
+        # 上限放宽到 900：窗口最大化/变宽时右侧参数面板能真正用上空间，
+        # 而不是被 560px 硬顶住、留一条空白（需求 5）。
+        self.setMaximumWidth(900)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

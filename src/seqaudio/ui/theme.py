@@ -352,11 +352,6 @@ QFrame#statCard {{
     border: 1px solid {p.line_soft}; border-radius: 9px;
 }}
 QFrame#statCard:hover {{ border-color: {_rgba(p.accent, 0.45)}; }}
-QFrame#selectionBar {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {_rgba(p.accent, 0.16)}, stop:1 {_rgba(p.cyan, 0.08)});
-    border: 1px solid {_rgba(p.accent, 0.34)}; border-radius: 9px;
-}}
 QFrame#brandBar {{
     background: {_rgba(p.base, 0.55)};
     border: none; border-bottom: 1px solid {_rgba(p.accent, 0.28)};
