@@ -4,8 +4,11 @@
 
 覆盖
 ----
-* 1040×720 最小窗：底部 ≥ 170 px，表格 ≥ 表头 + 10 行（minimumHeight 语义）；
-* 1920×1040：底部 > 190 且 ≤ 360，右侧分栏比小窗明显更宽；
+* 1040×720 最小窗：底部 ≥ 110（实际被底部三栏 minHint 抬到 ~158），
+  表格不溢出父容器、visibleRegion == 自身高度、可见行 ≥ 3；
+* 1420×880：不裁切 + 可见行 ≥ 6；
+* 1920×1040：不裁切 + 可见行 ≥ 10，底部 > 190 且 ≤ 360，右侧分栏更宽；
+* 启动高度按屏幕自适应（offscreen 固定 880，1080p 约 1000，768p 不超屏）；
 * 「已选 N 首」操作条彻底移除（控件与 QSS 均无残留），鉴定/清理入口仍在；
 * 从最大化还原回 1040×720 后布局回到小窗数值，不残留大尺寸。
 """
@@ -33,8 +36,8 @@ from seqaudio.ui.main_window import MainWindow  # noqa: E402
 
 MIN_SIZE = (1040, 720)
 LARGE_SIZE = (1920, 1040)
-#: 小窗时底部让高度给表格后的保留下限（QA-UI-02 修复后口径）
-BOTTOM_MIN = 120
+#: 小窗时底部下限（底部三栏自身 minHint 会把实际值抬到 ~158）
+BOTTOM_MIN = 110
 #: 底部上限，超过就挤占曲库区
 BOTTOM_MAX = 360
 
@@ -103,6 +106,23 @@ class AdaptiveLayoutTest(unittest.TestCase):
         pump()
         self.app.processEvents()
 
+    # ------------------------------------------------------------ 初始高度
+
+    def test_initial_height_adapts_to_screen(self) -> None:
+        """启动高度：1080p 争取 10 行，768p 不超出屏幕，offscreen 保持 880。"""
+        calc = MainWindow._initial_window_height
+        self.assertEqual(calc("offscreen", 1040), 880, "离屏必须保持 880 基线")
+        # 1080p：可用 1040 → min(1000, 1000) = 1000
+        self.assertEqual(calc("windows", 1040), 1000)
+        # 无任务栏的 1080p：可用 1080 → 仍夹到 1000
+        self.assertEqual(calc("windows", 1080), 1000)
+        # 768p 笔记本：可用 728 → 不超出屏幕
+        self.assertEqual(calc("windows", 728), 728)
+        # 900p：可用 860 → 沿用小屏分支
+        self.assertEqual(calc("windows", 860), 860)
+        # 极端小屏：兜底不低于最小高度 720
+        self.assertEqual(calc("windows", 600), 720)
+
     # ------------------------------------------------------------ 尺寸行为
 
     def _assert_not_clipped(self) -> tuple[int, int, int]:
@@ -132,11 +152,11 @@ class AdaptiveLayoutTest(unittest.TestCase):
         return rows, visible_h, table.height()
 
     def test_minimum_size_keeps_bottom_and_table(self) -> None:
-        """1040×720：底部 ≥ 120，表格不再溢出父容器，可读行数有实质提升。"""
+        """1040×720：底部 ≥ 110，表格不再溢出父容器，可读行数有实质提升。"""
         self._resize(MIN_SIZE)
         self.assertEqual(self.window.height(), MIN_SIZE[1])
         self.assertGreaterEqual(
-            self.window._bottom_area.height(), BOTTOM_MIN, "底部被压到 120 以下"
+            self.window._bottom_area.height(), BOTTOM_MIN, "底部被压到 110 以下"
         )
         rows, _visible_h, _table_h = self._assert_not_clipped()
         # 720 高时固定 chrome（工具栏/统计卡/播放条/状态栏/筛选行）已占用大半，

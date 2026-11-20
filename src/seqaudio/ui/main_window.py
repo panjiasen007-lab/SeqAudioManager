@@ -148,7 +148,7 @@ class MainWindow(QMainWindow):
         self._log_listener = lambda level, msg: self._log_bridge.message.emit(level, msg)
 
         self.setWindowTitle("音序管家 · 音乐元数据批量处理")
-        self.resize(1420, 880)
+        self.resize(1420, self._initial_window_height())
         self.setMinimumSize(1040, 720)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -162,6 +162,33 @@ class MainWindow(QMainWindow):
             self._append_log("WARNING", "当前为离线模式：仅做本地标签编辑、水印清理与重命名")
 
     # ------------------------------------------------------------ 布局
+
+    @staticmethod
+    def _initial_window_height(platform_name: str = "", available_h: int = 0) -> int:
+        """默认启动高度：1080p 首屏争取看到 10 行，小屏不超出屏幕。
+
+        * offscreen（自动化测试）固定 880，不改变既有几何基线；
+        * 主屏可用高度 ≥ 900：300 行空间足够，取 ``min(1000, avail-40)``
+          （1080p 实际约 1000 → 10~11 行）；
+        * < 900（如 768p 笔记本）：取 ``min(880, avail)``，整窗不超出屏幕；
+        * 最后 ``max(720, ...)`` 兜底，任何情况下不低于最小高度。
+        """
+        if not platform_name:
+            app = QApplication.instance()
+            platform_name = app.platformName() if app is not None else ""
+        if platform_name == "offscreen":
+            return 880
+        if available_h <= 0:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+            if screen is None:
+                return 880
+            available_h = int(screen.availableGeometry().height())
+        if available_h >= 900:
+            height = min(1000, available_h - 40)
+        else:
+            height = min(880, available_h)
+        return max(720, height)
 
     def _build_ui(self) -> None:
         surface = BackdropWidget()
@@ -1456,16 +1483,18 @@ class MainWindow(QMainWindow):
     def _apply_adaptive_layout(self) -> None:
         """底部三栏高度随窗口高度自适应，并保证表格永不超出父容器。
 
-        底部取窗口高度约 22%，夹在 120~360 px：小窗时优先把高度让给表格，
-        最大化时日志/歌词/信号路径能多显示内容。改完底部后**立即**按真实
-        可用高度重算表格下限（``_sync_table_min_height``），从根上消除
-        「表格 minimumHeight 比父容器还高 → 被裁掉半截」的溢出问题。
+        底部取窗口高度约 22%，夹在 110~360 px。下限写 110 而不是更高：底部
+        三栏自身 ``minimumSizeHint``（歌词面板 140）会把实际高度自然抬到
+        ~158，写 110 只是不主动压得更矮，避免与子面板最小高度打架。小窗时
+        优先把高度让给表格，最大化时日志/歌词/信号路径能多显示内容。改完
+        底部后**立即**按真实可用高度重算表格下限（``_sync_table_min_height``），
+        从根上消除「表格 minimumHeight 比父容器还高 → 被裁掉半截」的溢出问题。
         构造期 ``_bottom_area`` 尚未创建，用 getattr 守卫。
         """
         bottom = getattr(self, "_bottom_area", None)
         if bottom is None:
             return
-        target = max(120, min(360, int(self.height() * 0.22)))
+        target = max(110, min(360, int(self.height() * 0.22)))
         if bottom.height() != target:
             bottom.setFixedHeight(target)
         # 先把新的底部高度落进布局，再按真实几何约束表格下限
