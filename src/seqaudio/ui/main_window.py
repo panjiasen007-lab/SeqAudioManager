@@ -558,7 +558,7 @@ class MainWindow(QMainWindow):
         self.player_bar.set_state(self.player_bar.current_state())
         self.player_bar.set_mode(self.player_bar.current_mode())
         self.player_bar.set_volume(self.player_bar.volume_db())
-        self.player_lyrics.refresh_offset_label()
+        self.player_lyrics._refresh_offset_label()
         self.player_eq.refresh_texts()
         self.player_signals.refresh_texts()
         self.right_tabs.setTabText(1, i18n.tr_text("参数"))
