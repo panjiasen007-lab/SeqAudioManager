@@ -394,6 +394,17 @@ class SettingsPanel(QWidget):
     def _build_ui_card(self) -> Card:
         card = Card("界面与清理", "", theme.PURPLE)
 
+        # 关闭窗口行为：托盘（默认，音乐继续）/ 直接退出（完整清理）
+        self.close_action_combo = QComboBox()
+        for key, label in (
+            ("tray", "ui_close_tray"),
+            ("quit", "ui_close_quit"),
+        ):
+            self.close_action_combo.addItem(i18n.tr(label), key)
+        self.close_action_combo.setToolTip(i18n.tr("ui_close_action"))
+        self.close_action_combo.currentIndexChanged.connect(self._notify)
+        card.add_form([(i18n.tr("ui_close_action"), self.close_action_combo)])
+
         self.suspect_check = QCheckBox("清理时包含「疑似」项")
         self.suspect_check.setToolTip(
             "勾选：连「疑似假无损 / 疑似升频 / 疑似升位深」一起清理\n"
@@ -1081,6 +1092,11 @@ class SettingsPanel(QWidget):
             self.suspect_check.setChecked(settings.cleanup_include_suspect)
             self.cover_check.setChecked(settings.ensure_folder_cover)
 
+            close_action = str(getattr(settings, "ui_close_action", "tray") or "tray")
+            self.close_action_combo.setCurrentIndex(
+                max(0, self.close_action_combo.findData(close_action))
+            )
+
             self.ui_font_combo.setCurrentIndex(
                 max(0, self.ui_font_combo.findData(settings.ui_font))
             )
@@ -1214,6 +1230,8 @@ class SettingsPanel(QWidget):
 
         settings.cleanup_include_suspect = self.suspect_check.isChecked()
         settings.ensure_folder_cover = self.cover_check.isChecked()
+
+        settings.ui_close_action = str(self.close_action_combo.currentData() or "tray")
 
         settings.ui_font, settings.mono_font, settings.font_scale = self._appearance_values()
 

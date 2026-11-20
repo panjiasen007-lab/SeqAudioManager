@@ -134,6 +134,8 @@ class PlayerBar(QFrame):
     modeChanged = Signal(str)
     collapseToggled = Signal(bool)
     signalPanelToggled = Signal(bool)
+    #: 视图切换（主界面 ↔ 迷你条）。两个形态的按钮都在「上一曲」左边。
+    viewModeToggled = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -198,7 +200,10 @@ class PlayerBar(QFrame):
         self.text_widget.setMaximumWidth(280)
         outer.addWidget(self.text_widget, 0)
 
-        # 传输控制
+        # 传输控制。视图切换按钮固定在「上一曲」左边（主界面/迷你条同位置）
+        self.btn_view_mode = self._small_button("▣", i18n.tr("ui_view_mini"))
+        self.btn_view_mode.setObjectName("chip")
+        self.btn_view_mode.clicked.connect(self.viewModeToggled.emit)
         self.btn_prev = self._small_button("|◀", i18n.tr_text("上一首"))
         self.btn_play = self._small_button("▶", i18n.tr_text("播放"))
         self.btn_stop = self._small_button("■", i18n.tr_text("停止播放"))
@@ -210,6 +215,7 @@ class PlayerBar(QFrame):
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(4)
+        controls.addWidget(self.btn_view_mode)
         controls.addWidget(self.btn_prev)
         controls.addWidget(self.btn_play)
         controls.addWidget(self.btn_stop)
@@ -443,6 +449,10 @@ class PlayerBar(QFrame):
         """上一首/下一首可用性：列表没有歌曲时置灰（用户反馈 2）。"""
         self._nav_enabled = bool(enabled)
         self._refresh_enabled()
+
+    def set_view_mode_hint(self, text: str) -> None:
+        """切换按钮的 tooltip：主界面写「切到迷你」，迷你条写「回主界面」。"""
+        self.btn_view_mode.setToolTip(text)
 
     def set_signal_panel_visible(self, visible: bool) -> None:
         """同步「信号路径」开关按钮的按下态（不触发信号）。"""

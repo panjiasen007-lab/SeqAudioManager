@@ -298,6 +298,18 @@ _PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
     ("play_lossless", "无损", "無損", "Lossless", "ロスレス", "무손실", "Lossless", "Lossless", "Lossless"),
     ("play_bit_perfect", "位完美", "位完美", "Bit-perfect mode", "ビットパーフェクト", "비트 퍼펙트", "Бит-в-бит", "Bit-perfect", "Bit-genau"),
     ("play_hires", "高解析", "高解析", "Hi-res", "ハイレゾ", "고해상도", "Hi-Res", "Haute résolution", "Hi-Res"),
+    # ---- 关闭行为 / 托盘 / 迷你播放条（v1.7.1）----
+    ("ui_close_action", "关闭窗口时", "關閉視窗時", "When closing the window", "ウィンドウを閉じるとき", "창을 닫을 때", "При закрытии окна", "À la fermeture de la fenêtre", "Beim Schließen des Fensters"),
+    ("ui_close_tray", "收缩到托盘（音乐继续播放）", "收縮到托盤（音樂繼續播放）", "Minimize to tray (keep playing)", "トレイに格納（再生は続行）", "트레이로 최소화(재생 계속)", "Свернуть в трей (воспроизведение продолжится)", "Réduire dans la barre d’état (lecture poursuivie)", "In den Tray minimieren (Wiedergabe läuft weiter)"),
+    ("ui_close_quit", "直接退出（停止播放）", "直接結束（停止播放）", "Quit (stop playback)", "終了する（再生停止）", "종료(재생 중지)", "Выйти (остановить воспроизведение)", "Quitter (arrêter la lecture)", "Beenden (Wiedergabe stoppen)"),
+    ("ui_tray_show", "显示主窗口", "顯示主視窗", "Show main window", "メインウィンドウを表示", "주 창 표시", "Показать главное окно", "Afficher la fenêtre principale", "Hauptfenster anzeigen"),
+    ("ui_tray_playpause", "播放 / 暂停", "播放 / 暫停", "Play / Pause", "再生 / 一時停止", "재생 / 일시정지", "Воспроизвести / Пауза", "Lecture / Pause", "Wiedergabe / Pause"),
+    ("ui_tray_quit", "退出音序管家", "結束音序管家", "Quit SeqAudio Manager", "音序管家を終了", "音序管家 종료", "Выйти из SeqAudio Manager", "Quitter SeqAudio Manager", "SeqAudio Manager beenden"),
+    ("ui_view_mini", "切换到迷你播放条", "切換到迷你播放條", "Switch to mini player", "ミニプレイヤーに切り替え", "미니 플레이어로 전환", "Переключиться на мини-плеер", "Passer au mini-lecteur", "Zum Mini-Player wechseln"),
+    ("ui_view_main", "返回主界面", "返回主介面", "Back to main window", "メイン画面に戻る", "주 화면으로 돌아가기", "Вернуться в главное окно", "Revenir à la fenêtre principale", "Zurück zum Hauptfenster"),
+    ("ui_mini_title", "迷你播放条", "迷你播放條", "Mini player", "ミニプレイヤー", "미니 플레이어", "Мини-плеер", "Mini-lecteur", "Mini-Player"),
+    ("lyr_mini_empty", "暂无歌词", "暫無歌詞", "No lyrics", "歌詞がありません", "가사 없음", "Текста нет", "Aucune parole", "Kein Liedtext"),
+    ("ui_restored_from_tray", "已回到主窗口，播放未中断", "已回到主視窗，播放未中斷", "Back to main window; playback was never interrupted", "メイン画面に復帰しました。再生は継続中です", "주 창으로 돌아왔습니다. 재생은 중단되지 않았습니다", "Возврат в главное окно; воспроизведение не прерывалось", "Retour à la fenêtre principale ; lecture jamais interrompue", "Zurück im Hauptfenster; Wiedergabe lief ununterbrochen"),
 )
 
 for _row in _PLAYBACK_ROWS:

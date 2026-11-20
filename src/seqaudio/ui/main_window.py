@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QTabWidget,
     QTableView,
     QVBoxLayout,
@@ -65,6 +66,7 @@ from .dialogs import (
 )
 from .health import HealthDialog
 from .inspector import InspectorPanel
+from .mini_player import MiniPlayerWindow
 from .player_bar import PlayerBar, format_mmss
 from .player_bridge import PlayerBridge
 from .player_eq import PlayerEqPanel
@@ -336,8 +338,16 @@ class MainWindow(QMainWindow):
 
     # ---- 引擎事件槽 ----
 
+    def _mini_bar(self) -> Optional[PlayerBar]:
+        """迷你条的播放条（两种形态互斥，但共享同一引擎事件）。"""
+        mini = getattr(self, "mini_player", None)
+        return mini.bar if mini is not None else None
+
     def _on_player_state(self, state: str) -> None:
         self.player_bar.set_state(state)
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_state(state)
         self.brand_bar.set_status(
             i18n.tr(f"play_state_{str(state).lower()}"),
             theme.CYAN if str(state) == "PLAYING" else theme.FG_DIM,
@@ -349,7 +359,12 @@ class MainWindow(QMainWindow):
             data = dict(data)
             data["cover"] = self._cover_for(data.get("path"))
         self.player_bar.set_track(data)
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_track(data)
         self.player_lyrics.set_track(data)
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.update_lyrics()
         self._sync_playing_row(data)
         self.player_bridge.poll_now()
 
@@ -357,13 +372,21 @@ class MainWindow(QMainWindow):
         snapshot = self.player_bridge.last_snapshot()
         total = int(snapshot.get("duration_ms") or 0)
         self.player_bar.set_position(int(position), total)
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_position(int(position), total)
         self.player_lyrics.set_position(int(position))
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.update_lyrics()
 
     def _on_player_duration(self, duration: int) -> None:
-        self.player_bar.set_position(
-            int(self.player_bar.progress.value() if self.player_bar.progress.maximum() else 0),
-            int(duration),
+        position = int(
+            self.player_bar.progress.value() if self.player_bar.progress.maximum() else 0
         )
+        self.player_bar.set_position(position, int(duration))
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_position(position, int(duration))
 
     def _on_player_error(self, message: str) -> None:
         text = str(message or "").strip()
@@ -379,14 +402,156 @@ class MainWindow(QMainWindow):
 
     def _on_player_busy(self, busy: bool) -> None:
         self.player_bar.set_playback_enabled(not bool(busy))
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_playback_enabled(not bool(busy))
 
     def _on_player_gap(self, gap_ms: float) -> None:
         """切歌/续播间隙（T05 会在这里做缝隙回填提示，本期只记 DEBUG）。"""
         log.debug("播放间隙 %.1f ms", float(gap_ms or 0.0))
 
+    # ------------------------------------------------------------ 托盘 / 迷你条
+
     def _attach_player_extras(self) -> None:
-        """弹性扩展钩子（T05 挂迷你条/托盘），T04 保持空实现。"""
-        return None
+        """扩展钩子：建迷你条与托盘，**共享同一个 PlayerBridge**（不新建引擎）。
+
+        三种隐藏路径（最小化 / 收缩托盘 / 切迷你条）都只调 ``hide()``，
+        hideEvent 已明确不再停轮询 —— 播放与自动续播全程不受界面形态影响。
+        """
+        self._main_geometry = None
+        self._quitting = False
+
+        # ---- 迷你播放条 ----
+        # 必须是顶层窗口：Qt 子控件随父窗口一起隐藏，若 parent=self，主窗口一
+        # hide() 迷你条就永远显示不出来（主界面 ↔ 迷你条互斥可见会失效）。
+        self.mini_player = MiniPlayerWindow(self.settings, self.player_lyrics, None)
+        mini_bar = self.mini_player.bar
+        mini_bar.playRequested.connect(self.player_toggle)
+        mini_bar.pauseRequested.connect(self.player_toggle)
+        mini_bar.stopRequested.connect(self._on_player_stop)
+        mini_bar.nextRequested.connect(self.player_next)
+        mini_bar.prevRequested.connect(self.player_prev)
+        mini_bar.seekRequested.connect(self.player_bridge.seek)
+        mini_bar.volumeChanged.connect(self._on_volume_dragged)
+        mini_bar.modeChanged.connect(self._on_mode_changed)
+        mini_bar.viewModeToggled.connect(self.switch_to_main_window)
+        self.player_bar.viewModeToggled.connect(self.switch_to_mini_window)
+
+        # 迷你条初值：与当前主条完全一致（引擎事件之后会自动同步）
+        mini_bar.set_state(self.player_bar.current_state())
+        mini_bar.set_volume(self.player_bar.volume_db())
+        mini_bar.set_volume_mode(
+            str(getattr(self.settings, "playback_volume_mode", "bypass") or "bypass")
+        )
+        mini_bar.set_mode(self.player_bar.current_mode())
+        mini_bar.set_playback_enabled(
+            not bool(getattr(self.player_bridge.engine, "busy", False))
+        )
+        snapshot = self.player_bridge.last_snapshot() or self.player_bridge.snapshot()
+        mini_bar.set_track(snapshot.get("track"))
+        mini_bar.set_position(
+            int(snapshot.get("position_ms") or 0), int(snapshot.get("duration_ms") or 0)
+        )
+        self.mini_player.hide()
+
+        # ---- 托盘 ----
+        self.tray_icon = QSystemTrayIcon(self._tray_icon(), self)
+        self.tray_icon.setToolTip(i18n.tr("ui_mini_title"))
+        tray_menu = QMenu()
+        self.tray_show_action = tray_menu.addAction(
+            i18n.tr("ui_tray_show"), self.restore_from_tray
+        )
+        self.tray_play_action = tray_menu.addAction(
+            i18n.tr("ui_tray_playpause"), self.player_toggle
+        )
+        tray_menu.addSeparator()
+        self.tray_quit_action = tray_menu.addAction(
+            i18n.tr("ui_tray_quit"), self.quit_from_tray
+        )
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+
+    @staticmethod
+    def _tray_icon() -> QIcon:
+        """托盘图标：优先 PNG（透明底），退回 ICO；都没有给空图标不崩。"""
+        try:
+            from ..core.paths import asset_path
+
+            path = asset_path("app.png") or asset_path("app.ico")
+            if path is not None:
+                return QIcon(str(path))
+        except OSError:
+            pass
+        return QIcon()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """单击 / 双击托盘图标恢复主窗口（右键交给菜单）。"""
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.restore_from_tray()
+
+    def switch_to_mini_window(self) -> None:
+        """主界面 → 迷你条：记住位置、隐藏主窗口、轮询继续跑。"""
+        if getattr(self, "mini_player", None) is None:
+            return
+        self._main_geometry = self.saveGeometry()
+        self.hide()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+        self.mini_player.show()
+        self.mini_player.raise_()
+        self.mini_player.update_lyrics()
+        self.settings.playback_mini_bar = True
+        log.debug("已切到迷你播放条（轮询保持运行）")
+
+    def switch_to_main_window(self) -> None:
+        """迷你条 → 主界面：两边互斥可见，状态/歌词由同一个桥同步。"""
+        if getattr(self, "mini_player", None) is None:
+            return
+        self.mini_player.hide()
+        self.settings.playback_mini_bar = False
+        if self._main_geometry is not None:
+            self.restoreGeometry(self._main_geometry)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
+    def restore_from_tray(self) -> None:
+        """托盘「显示主窗口」：先隐藏迷你条，再恢复主窗口。"""
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.hide()
+        self.settings.playback_mini_bar = False
+        if self._main_geometry is not None:
+            self.restoreGeometry(self._main_geometry)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+        self.status_hint.setText(i18n.tr("ui_restored_from_tray"))
+
+    def quit_from_tray(self) -> None:
+        """托盘「退出」：复用主窗口的完整清理路径。"""
+        if self._quitting:
+            return
+        self._finish_quit()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _hide_to_tray(self) -> None:
+        """关闭按钮 → 托盘：只隐藏窗口，不保存会话/不关引擎/不停轮询。"""
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.hide()
+        self.settings.playback_mini_bar = False
+        self.hide()
+        if (
+            self.tray_icon is not None
+            and QSystemTrayIcon.isSystemTrayAvailable()
+        ):
+            self.tray_icon.show()
+        log.info("主窗口已收缩到托盘，播放继续")
 
     def _apply_playback_i18n(self) -> None:
         """语言切换后刷新播放区的**动态**文案（静态文案由 localize_tree 负责）。"""
@@ -397,6 +562,13 @@ class MainWindow(QMainWindow):
         self.player_eq.refresh_texts()
         self.player_signals.refresh_texts()
         self.right_tabs.setTabText(1, i18n.tr_text("参数"))
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.refresh_texts()
+        if getattr(self, "tray_icon", None) is not None:
+            self.tray_show_action.setText(i18n.tr("ui_tray_show"))
+            self.tray_play_action.setText(i18n.tr("ui_tray_playpause"))
+            self.tray_quit_action.setText(i18n.tr("ui_tray_quit"))
+            self.tray_icon.setToolTip(i18n.tr("ui_mini_title"))
 
     # ---- 播放命令 ----
 
@@ -569,7 +741,13 @@ class MainWindow(QMainWindow):
         if float(db) != 0.0 and getattr(self.settings, "playback_volume_mode", "bypass") != "software":
             self.settings.playback_volume_mode = "software"
             self.player_bar.set_volume_mode("software")
+            mini_bar = self._mini_bar()
+            if mini_bar is not None:
+                mini_bar.set_volume_mode("software")
         self.player_bridge.set_volume(float(db))
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_volume(float(db))
 
     def _on_volume_reset(self) -> None:
         """双击归零：回到 0 dB 旁路（位完美取向）。"""
@@ -584,6 +762,9 @@ class MainWindow(QMainWindow):
         self.settings.playback_mode = str(mode)
         applied = self.player_bridge.set_mode(mode)
         self.player_bar.set_mode(applied)
+        mini_bar = self._mini_bar()
+        if mini_bar is not None:
+            mini_bar.set_mode(applied)
         self.status_hint.setText(
             i18n.tr(f"pl_mode_{str(applied)}")
         )
@@ -1250,7 +1431,7 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        # 轮询只在窗口可见时跑：最小化后还在按 100 ms 查引擎是白烧 CPU
+        # 幂等启动轮询（最小化/托盘/迷你条期间也保持 active，见 hideEvent）
         if getattr(self, "player_bridge", None) is not None:
             self.player_bridge.start()
         if not getattr(self, "_exclusive_notice_done", False):
@@ -1306,8 +1487,10 @@ class MainWindow(QMainWindow):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
-        if getattr(self, "player_bridge", None) is not None:
-            self.player_bridge.stop()
+        # 最小化 / 隐藏到托盘 / 切到迷你条时**绝不**停轮询：
+        # engine.poll() 是 EOF 自动续播、队列推进、state/track/position 事件
+        # 回传界面的唯一通道。停掉它 = 用户感知的「最小化后播放失效」。
+        # 轮询本身只是每 100 ms 读一次快照，开销可以忽略。
 
     # ------------------------------------------------------------ 导入
 
@@ -2746,6 +2929,9 @@ class MainWindow(QMainWindow):
         # 播放条/信号面板的颜色来自 theme 常量，切主题必须重刷（TC-GUI-27）
         if getattr(self, "player_bar", None) is not None:
             self.player_bar.apply_theme()
+        # 迷你条与播放条同源配色，主题切换也要跟着刷（需求 3）
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.refresh_theme()
         self.player_eq.refresh_texts()
         self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
         try:
@@ -3140,10 +3326,29 @@ class MainWindow(QMainWindow):
                 return
             if clicked is save_btn:
                 self.settings_panel.save()
+        # 分流：默认收缩托盘（音乐不停），选「直接退出」才走完整清理
+        if (
+            str(getattr(self.settings, "ui_close_action", "tray") or "tray") == "tray"
+            and getattr(self, "tray_icon", None) is not None
+        ):
+            self._hide_to_tray()
+            event.ignore()
+            return
+        self._finish_quit()
+        event.accept()
+
+    def _finish_quit(self) -> None:
+        """唯一一处完整退出清理（关闭按钮的 quit 分支与托盘菜单共用）。"""
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
         self._save_view_state()
         self._save_playback_session()
+        if getattr(self, "tray_icon", None) is not None:
+            self.tray_icon.hide()
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.hide()
         remove_listener(self._log_listener)
-        event.accept()
 
     def _save_playback_session(self) -> None:
         """退出：写会话 → 关引擎（先关流再退，避免 PortAudio 卸载噪音）。"""

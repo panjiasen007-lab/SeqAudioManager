@@ -94,6 +94,9 @@ class Settings:
     sort_order: int = 0                     # 0 升序 / 1 降序
     view_state_saved: bool = False          # 是否已有保存过的列布局
     cleanup_include_suspect: bool = True   # 清理时是否包含「疑似」项
+    # 关闭主窗口的行为：tray=收缩到托盘（音乐继续播，默认）/ quit=完整退出。
+    # 老 config.json 没有这个键时走 dataclass 默认值，不需要迁移脚本。
+    ui_close_action: str = "tray"
 
     # ---- 文件夹封面 ----
     ensure_folder_cover: bool = True       # 处理完成后每个文件夹至少一张 cover（专辑封面→歌手照片）
