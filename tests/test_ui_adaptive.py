@@ -27,11 +27,33 @@ from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QFrame  # noqa: E402
 
 from seqaudio.core.config import Settings  # noqa: E402
+from seqaudio.core.model import Track  # noqa: E402
 from seqaudio.ui import theme  # noqa: E402
 from seqaudio.ui.main_window import MainWindow  # noqa: E402
 
 MIN_SIZE = (1040, 720)
 LARGE_SIZE = (1920, 1040)
+#: 小窗时底部让高度给表格后的保留下限（QA-UI-02 修复后口径）
+BOTTOM_MIN = 120
+#: 底部上限，超过就挤占曲库区
+BOTTOM_MAX = 360
+
+
+def visible_rows(table) -> tuple[int, int, int]:
+    """只数用户真正看得见的完整行：``(行数, 可见视口高, 行高)``。
+
+    必须用 ``visibleRegion()``（被祖先裁切之后的真实可见矩形），
+    ``table.height() >= minimumHeight()`` 是几何恒等式，会假绿。
+    """
+    region = table.visibleRegion().boundingRect()
+    if region.height() <= 0:
+        return 0, 0, table.verticalHeader().defaultSectionSize()
+    header_h = table.horizontalHeader().height()
+    visible_h = max(0, region.height() - header_h)
+    row_h = max(1, table.verticalHeader().defaultSectionSize())
+    hits = {row for row in (table.rowAt(y) for y in range(0, visible_h)) if row >= 0}
+    return len(hits), visible_h, row_h
+
 
 
 def pump(ms: int = 40) -> None:
@@ -57,6 +79,10 @@ class AdaptiveLayoutTest(unittest.TestCase):
         )
         cls.window.show()
         cls.app.processEvents()
+        # 行列测量需要真实行：空模型 rowAt() 永远 -1
+        cls.window.model.add_tracks(
+            [Track(path=Path(f"C:/qa/adapt_{i:03d}.flac")) for i in range(40)]
+        )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -79,21 +105,58 @@ class AdaptiveLayoutTest(unittest.TestCase):
 
     # ------------------------------------------------------------ 尺寸行为
 
+    def _assert_not_clipped(self) -> tuple[int, int, int]:
+        """断言表格没有溢出父容器、可见视口 == 自身视口，返回行统计。"""
+        table = self.window.table
+        self.assertLessEqual(
+            table.height(),
+            table.parent().height(),
+            f"表格自报高 {table.height()}px 超过父容器 {table.parent().height()}px："
+            "仍会被裁切",
+        )
+        region_h = table.visibleRegion().boundingRect().height()
+        self.assertEqual(
+            region_h,
+            table.height(),
+            f"表格被裁：可见 {region_h}px，自身高 {table.height()}px",
+        )
+        rows, visible_h, _row_h = visible_rows(table)
+        self.assertGreater(visible_h, 0, "表格可见视口为 0")
+        self.assertGreater(rows, 0, "一行都看不到")
+        # 纵向滚动条必须完整落在表格内，否则用户滚不到底部
+        self.assertLessEqual(
+            table.verticalScrollBar().height(),
+            table.height(),
+            "纵向滚动条超出表格高度（滚动条被裁）",
+        )
+        return rows, visible_h, table.height()
+
     def test_minimum_size_keeps_bottom_and_table(self) -> None:
-        """1040×720：底部不低于 170，表格仍有表头 + 10 行。"""
+        """1040×720：底部 ≥ 120，表格不再溢出父容器，可读行数有实质提升。"""
         self._resize(MIN_SIZE)
         self.assertEqual(self.window.height(), MIN_SIZE[1])
         self.assertGreaterEqual(
-            self.window._bottom_area.height(), 170, "底部被压到 170 以下"
+            self.window._bottom_area.height(), BOTTOM_MIN, "底部被压到 120 以下"
         )
-        self.assertGreaterEqual(
-            self.window.table.height(),
-            self.window.table.minimumHeight(),
-            "最小窗下表格不足 10 行",
-        )
+        rows, _visible_h, _table_h = self._assert_not_clipped()
+        # 720 高时固定 chrome（工具栏/统计卡/播放条/状态栏/筛选行）已占用大半，
+        # 物理预算只够 3~4 行；修复前裁切后同样只有 3 行，现在填满可用高度。
+        # 10 行承诺挪到高度 ≥1000 的窗口上守（见 large 用例）。
+        self.assertGreaterEqual(rows, 3, f"最小窗下只看得见 {rows} 行")
 
-    def test_larger_window_gives_bottom_more_height(self) -> None:
-        """1920×1040：底部跟着长（>190 且 ≤360），右侧分栏明显变宽。"""
+    def test_mid_window_rows_recover(self) -> None:
+        """1420×880：不裁切，可见行数明显多于最小窗。"""
+        self._resize(MIN_SIZE)
+        min_rows, _vh, _th = visible_rows(self.window.table)
+
+        self._resize((1420, 880))
+        self.assertEqual(self.window.height(), 880)
+        rows, _visible_h, _table_h = self._assert_not_clipped()
+        self.assertGreater(rows, min_rows, "加高窗口后可见行数没有增加")
+        self.assertGreaterEqual(rows, 6, f"880 高只看得见 {rows} 行")
+
+    def test_large_window_gives_bottom_more_height(self) -> None:
+        """1920×1040：底部跟着长（>190 且 ≤360），右侧分栏明显变宽，行数 ≥10。"""
         self._resize(MIN_SIZE)
         small_bottom = self.window._bottom_area.height()
         small_right = self.window.right_tabs.width()
@@ -104,12 +167,11 @@ class AdaptiveLayoutTest(unittest.TestCase):
         big_right = self.window.right_tabs.width()
 
         self.assertGreater(big_bottom, 190, "最大化后底部没有跟着长")
-        self.assertLessEqual(big_bottom, 360, "底部超过 360 会挤占曲库区")
+        self.assertLessEqual(big_bottom, BOTTOM_MAX, "底部超过 360 会挤占曲库区")
         self.assertGreater(big_bottom, small_bottom)
         self.assertGreater(big_right, small_right, "右侧分栏未随窗口变宽")
-        self.assertGreaterEqual(
-            self.window.table.height(), self.window.table.minimumHeight()
-        )
+        rows, _visible_h, _table_h = self._assert_not_clipped()
+        self.assertGreaterEqual(rows, 10, f"1920×1040 只看得见 {rows} 行")
 
     def test_right_panel_max_width_relaxed(self) -> None:
         """参数面板不再被 560px 硬顶住。"""
@@ -118,16 +180,14 @@ class AdaptiveLayoutTest(unittest.TestCase):
         self.assertEqual(panel.maximumWidth(), 900)
 
     def test_restore_minimum_after_large(self) -> None:
-        """最大化后还原：底部回到 170，表格下限仍成立。"""
+        """最大化后还原：底部回到公式值，表格仍不裁切。"""
         self._resize(LARGE_SIZE)
         self.assertGreater(self.window._bottom_area.height(), 190)
         self._resize(MIN_SIZE)
-        self.assertEqual(self.window._bottom_area.height(), 170)
-        self.assertGreaterEqual(
-            self.window.table.height(),
-            self.window.table.minimumHeight(),
-            "还原后表格不足 10 行",
-        )
+        expected = max(BOTTOM_MIN, min(BOTTOM_MAX, int(MIN_SIZE[1] * 0.22)))
+        self.assertEqual(self.window._bottom_area.height(), expected)
+        self.assertEqual(expected, 158)
+        self._assert_not_clipped()
 
     # ------------------------------------------------------------ 操作条移除
 

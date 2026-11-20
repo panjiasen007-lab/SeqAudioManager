@@ -1276,7 +1276,12 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _enforce_table_min_height(self) -> None:
-        """表格最小高度 = 表头 + 10 行；splitter 再挤也不能少于这个数。"""
+        """计算表格「期望」最小高度 = 表头 + 10 行。
+
+        这里只算期望值，不直接写进 ``setMinimumHeight`` —— 小窗下布局给不出
+        这么高时硬写会让表格溢出父容器、被裁掉半截（QA-UI-02）。真正生效的
+        下限由 ``_sync_table_min_height`` 夹到父容器可用高度。
+        """
         try:
             metrics = self.table.fontMetrics()
             row_h = max(
@@ -1286,9 +1291,51 @@ class MainWindow(QMainWindow):
             header_h = max(
                 self.table.horizontalHeader().height(), metrics.height() + 8
             )
-            self.table.setMinimumHeight(header_h + row_h * 10)
+            self._table_desired_height = header_h + row_h * 10
         except Exception:  # noqa: BLE001 - 估算失败退回固定值
-            self.table.setMinimumHeight(320)
+            self._table_desired_height = 320
+        self._sync_table_min_height()
+
+    def _sync_table_min_height(self) -> None:
+        """把表格 ``minimumHeight`` 夹到父容器**真实可用高度**，杜绝溢出裁切。
+
+        ``table.height() >= table.minimumHeight()`` 是几何恒等式（永远为真），
+        小窗下表格会比父容器还高、被 Qt 按父矩形裁掉。这里反向计算：父容器
+        高度减去过滤行/判定胶囊等非表格项（用布局 item 的实际 geometry，
+        不硬编码每项），得到表格真正能占的高度，再取
+        ``min(期望10行高度, 可用高度)`` 作为下限。
+        """
+        desired = int(getattr(self, "_table_desired_height", 320))
+        area = self.table.parentWidget()
+        layout = area.layout() if area is not None else None
+        if area is None or layout is None:
+            self.table.setMinimumHeight(desired)
+            return
+        # 先松开旧下限：否则上次记住的高下限会把父容器几何撑住，算出来的
+        # 「可用高度」还是旧值（1420×880 会残留 300 → 仍然裁切 35px）。
+        self.table.setMinimumHeight(0)
+        central = self.centralWidget()
+        if central is not None and central.layout() is not None:
+            central.layout().activate()
+        layout.activate()
+        used = 0
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget()
+            if widget is self.table:
+                continue
+            if widget is not None and not widget.isVisible():
+                continue
+            used += max(0, item.geometry().height())
+        margins = layout.contentsMargins()
+        used += (
+            margins.top()
+            + margins.bottom()
+            + layout.spacing() * max(0, layout.count() - 1)
+        )
+        available = max(0, area.height() - used)
+        self.table.setMinimumHeight(max(0, min(desired, available)))
+        layout.activate()
 
     def _build_bottom_area(self) -> QWidget:
         """底部三栏：左运行日志 / 中歌词 / 右信号路径（各 1/3，可拖）。"""
@@ -1407,22 +1454,40 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_adaptive_layout(self) -> None:
-        """底部三栏高度随窗口高度自适应：约 22%，夹在 170~360 px。
+        """底部三栏高度随窗口高度自适应，并保证表格永不超出父容器。
 
-        小窗（1040×720）取 170 px，配合 ``_enforce_table_min_height`` 保住
-        表格 10 行下限；最大化时最多 360 px，日志/歌词/信号路径能多显示内容，
-        又不会把曲库区挤没。构造期 ``_bottom_area`` 尚未创建，用 getattr 守卫。
+        底部取窗口高度约 22%，夹在 120~360 px：小窗时优先把高度让给表格，
+        最大化时日志/歌词/信号路径能多显示内容。改完底部后**立即**按真实
+        可用高度重算表格下限（``_sync_table_min_height``），从根上消除
+        「表格 minimumHeight 比父容器还高 → 被裁掉半截」的溢出问题。
+        构造期 ``_bottom_area`` 尚未创建，用 getattr 守卫。
         """
         bottom = getattr(self, "_bottom_area", None)
         if bottom is None:
             return
-        target = max(170, min(360, int(self.height() * 0.22)))
+        target = max(120, min(360, int(self.height() * 0.22)))
         if bottom.height() != target:
             bottom.setFixedHeight(target)
+        # 先把新的底部高度落进布局，再按真实几何约束表格下限
+        central = self.centralWidget()
+        if central is not None and central.layout() is not None:
+            central.layout().activate()
+        self._sync_table_min_height()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # 立即先算一次（响应快），再排一次 0 延时重算：resizeEvent 触发时
+        # 子布局可能还没按新尺寸重排，立刻量到的父容器高度是旧值（会残留
+        # 高下限 → 仍裁切）。事件循环下一拍几何稳定后再量才是真值。
         self._apply_adaptive_layout()
+        timer = getattr(self, "_adaptive_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(0)
+            timer.timeout.connect(self._apply_adaptive_layout)
+            self._adaptive_timer = timer
+        timer.start()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
