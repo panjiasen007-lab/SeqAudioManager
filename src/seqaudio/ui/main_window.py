@@ -107,6 +107,21 @@ AUDIO_FILE_FILTER = (
 )
 
 
+def initial_window_height(available_height: int, platform_name: str) -> int:
+    """默认启动高度：1080p 屏尽量给到 10 行，小屏不超出可用区域。
+
+    * ``offscreen``（自动化测试）固定 880，避免影响既有几何基线；
+    * 可用高度 ≥ 900（1080p 等）：``min(1000, avail-40)``，留出任务栏余量；
+    * 可用高度 < 900（768p 笔记本等）：``min(880, avail)``，整窗不超出屏幕；
+    * 最后 ``max(720, ...)`` 兜底，任何情况下不低于最小窗口高度。
+    """
+    if platform_name == "offscreen":
+        return 880
+    if available_height >= 900:
+        return max(720, min(1000, available_height - 40))
+    return max(720, min(880, available_height))
+
+
 class LogBridge(QObject):
     """把 logging 回调安全地转成 Qt 信号（回调可能来自工作线程）。"""
 
@@ -148,7 +163,9 @@ class MainWindow(QMainWindow):
         self._log_listener = lambda level, msg: self._log_bridge.message.emit(level, msg)
 
         self.setWindowTitle("音序管家 · 音乐元数据批量处理")
-        self.resize(1420, self._initial_window_height())
+        screen = QApplication.primaryScreen()
+        avail_h = screen.availableGeometry().height() if screen is not None else 880
+        self.resize(1420, initial_window_height(avail_h, QApplication.platformName()))
         self.setMinimumSize(1040, 720)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -164,31 +181,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 布局
 
     @staticmethod
-    def _initial_window_height(platform_name: str = "", available_h: int = 0) -> int:
-        """默认启动高度：1080p 首屏争取看到 10 行，小屏不超出屏幕。
-
-        * offscreen（自动化测试）固定 880，不改变既有几何基线；
-        * 主屏可用高度 ≥ 900：300 行空间足够，取 ``min(1000, avail-40)``
-          （1080p 实际约 1000 → 10~11 行）；
-        * < 900（如 768p 笔记本）：取 ``min(880, avail)``，整窗不超出屏幕；
-        * 最后 ``max(720, ...)`` 兜底，任何情况下不低于最小高度。
-        """
-        if not platform_name:
-            app = QApplication.instance()
-            platform_name = app.platformName() if app is not None else ""
-        if platform_name == "offscreen":
-            return 880
-        if available_h <= 0:
-            app = QApplication.instance()
-            screen = app.primaryScreen() if app is not None else None
-            if screen is None:
-                return 880
-            available_h = int(screen.availableGeometry().height())
-        if available_h >= 900:
-            height = min(1000, available_h - 40)
-        else:
-            height = min(880, available_h)
-        return max(720, height)
+    def _initial_window_height(platform_name: str, available_h: int) -> int:
+        """兼容入口（参数顺序为 平台/可用高）；策略本体在模块级函数。"""
+        return initial_window_height(available_h, platform_name)
 
     def _build_ui(self) -> None:
         surface = BackdropWidget()

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QApplication, QFrame  # noqa: E402
 from seqaudio.core.config import Settings  # noqa: E402
 from seqaudio.core.model import Track  # noqa: E402
 from seqaudio.ui import theme  # noqa: E402
-from seqaudio.ui.main_window import MainWindow  # noqa: E402
+from seqaudio.ui.main_window import MainWindow, initial_window_height  # noqa: E402
 
 MIN_SIZE = (1040, 720)
 LARGE_SIZE = (1920, 1040)
@@ -109,19 +109,13 @@ class AdaptiveLayoutTest(unittest.TestCase):
     # ------------------------------------------------------------ 初始高度
 
     def test_initial_height_adapts_to_screen(self) -> None:
-        """启动高度：1080p 争取 10 行，768p 不超出屏幕，offscreen 保持 880。"""
-        calc = MainWindow._initial_window_height
-        self.assertEqual(calc("offscreen", 1040), 880, "离屏必须保持 880 基线")
-        # 1080p：可用 1040 → min(1000, 1000) = 1000
-        self.assertEqual(calc("windows", 1040), 1000)
-        # 无任务栏的 1080p：可用 1080 → 仍夹到 1000
-        self.assertEqual(calc("windows", 1080), 1000)
-        # 768p 笔记本：可用 728 → 不超出屏幕
-        self.assertEqual(calc("windows", 728), 728)
-        # 900p：可用 860 → 沿用小屏分支
-        self.assertEqual(calc("windows", 860), 860)
-        # 极端小屏：兜底不低于最小高度 720
-        self.assertEqual(calc("windows", 600), 720)
+        """纯函数口径：1080p 给 1000，768p 不超屏，offscreen 保持 880。"""
+        self.assertEqual(initial_window_height(1040, "windows"), 1000)
+        self.assertEqual(initial_window_height(728, "windows"), 728)
+        self.assertEqual(initial_window_height(1080, "offscreen"), 880)
+        # 边界：低于最小窗口高度时兜底到 720；超过 1000 不无限长
+        self.assertEqual(initial_window_height(600, "windows"), 720)
+        self.assertEqual(initial_window_height(2160, "windows"), 1000)
 
     # ------------------------------------------------------------ 尺寸行为
 
