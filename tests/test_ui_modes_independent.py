@@ -45,6 +45,11 @@ from seqaudio.ui.player_bar import PlayerBar  # noqa: E402
 FFMPEG = find_ffmpeg()
 _REAL_APPLY_THEME = MainWindow.apply_theme
 
+# 跨曲 EOF 的上限：素材 3.2 s，正常 3.4 s 左右切歌。只作"失败上限"，
+# 不作为"必须等到这么久"——固定墙钟等待曾在全量 discover 里偶发假红
+# （真开流用例占着同一个设备，开流延迟一抖就超过余量）。
+EOF_TIMEOUT_SEC = 12.0
+
 
 def synth(target: Path, seconds: float, rate: int = 44100) -> Path:
     assert FFMPEG is not None
@@ -162,16 +167,39 @@ class TestPollingSurvivesHide(BaseWindowTest):
         self.assertEqual(state, PlayerState.PLAYING.value, f"隐藏后状态变了：{state}")
 
     def test_hide_until_eof_auto_advances(self) -> None:
-        """原 bug 最致命表现：最小化后播到曲末不切歌。"""
+        """原 bug 最致命表现：最小化后播到曲末不切歌。
+
+        等待策略：**轮询到 ``queue_index`` 前进**，只设 12 s 失败上限，
+        期间要求 ``state`` 不退化。此前用固定 ``pump(4.2)``，跨曲时刻实测
+        3.38 s、余量仅约 1.2 s；全量 discover 里前面有真开流的用例占着同一个
+        输出设备，开流延迟一抖就会在 ``index`` 还是 0 时断言 → 假红。
+        """
         self._enqueue_two()
         self.window.hide()
         self.app.processEvents()
-        pump(self.app, 4.2)  # 第一首 3.2 s，跨过 EOF
+
         snapshot = self.bridge.poll_now()
-        self.assertEqual(int(snapshot["queue_index"]), 1,
-                         f"隐藏后曲末没有自动切下一首：index={snapshot['queue_index']}")
-        self.assertEqual(snapshot["state"], PlayerState.PLAYING.value,
-                         f"自动续播后应继续 PLAYING，实际 {snapshot['state']}")
+        started = time.monotonic()
+        deadline = started + EOF_TIMEOUT_SEC
+        while int(snapshot["queue_index"]) == 0 and time.monotonic() < deadline:
+            self.assertEqual(
+                snapshot["state"], PlayerState.PLAYING.value,
+                f"隐藏期间状态提前退化：{snapshot['state']}（已过 {time.monotonic() - started:.2f}s）",
+            )
+            self.app.processEvents()
+            time.sleep(0.05)
+            snapshot = self.bridge.poll_now()
+
+        elapsed = time.monotonic() - started
+        self.assertEqual(
+            int(snapshot["queue_index"]), 1,
+            f"隐藏后 {EOF_TIMEOUT_SEC:.0f}s 内曲末没有自动切下一首："
+            f"index={snapshot['queue_index']}，state={snapshot['state']}，已过 {elapsed:.2f}s",
+        )
+        self.assertEqual(
+            snapshot["state"], PlayerState.PLAYING.value,
+            f"自动续播后应继续 PLAYING，实际 {snapshot['state']}（切歌耗时 {elapsed:.2f}s）",
+        )
 
     def test_tray_hide_keeps_polling(self) -> None:
         self._enqueue_two()
