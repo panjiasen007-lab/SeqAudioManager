@@ -716,11 +716,11 @@ class TestFoundation(unittest.TestCase):
     def test_package_versions_agree(self) -> None:
         import seqaudio
 
-        self.assertEqual(seqaudio.__version__, "1.7.0")
+        self.assertEqual(seqaudio.__version__, "1.7.1")
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.7.0"', pyproject)
+        self.assertIn('version = "1.7.1"', pyproject)
         meta = (ROOT / "installer" / "_meta.py").read_text(encoding="utf-8")
-        self.assertIn('VERSION = "1.7.0"', meta)
+        self.assertIn('VERSION = "1.7.1"', meta)
 
     def test_t03_exports_resolve(self) -> None:
         """T03 落地后，包出口的惰性名字必须都能取到（且仍然不碰 Qt）。"""

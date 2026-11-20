@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.1-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,19 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.7.1 更新摘要
+
+**五项体验改进 + 一个崩溃修复。**
+
+- **最小化后继续播放**：修复窗口最小化即停掉引擎轮询、导致播完一首不再续播的问题；托盘隐藏与迷你条切换同样保持播放。
+- **关闭行为可选**：设置里可选「收缩到托盘」或「直接退出」；托盘图标右键含「显示主窗口 / 播放暂停 / 退出」。
+- **迷你播放条**：新增 360×150 无边框迷你形态，切换按钮位于「上一曲」左侧；上方为播放控制，下方三行歌词（当前行高亮），主题与语言跟随主软件。
+- **移除选中操作条**：表格上方的「已选 N 首 + 鉴定 / 编辑标签 / 清理 / 取消选择」整条移除；这些功能仍保留在工具栏、右键菜单与快捷键中。
+- **最大化自适应**：底部三栏随窗口高度增长、右侧面板随宽度增长，表格不再被父容器裁切；1080p 屏默认启动即显示 10~11 行（原 6~7 行）。
+- **修复**：切换界面语言时主窗口抛 `AttributeError`（方法名拼写错误），8 种语言全部命中。
+
+实测：612 项测试 OK（9 项环境性 skip）；三档窗口零裁切，可见行 4 / 7 / 11；出货包三模式冒烟 `underruns=0`。
 
 ### V1.7.0 更新摘要
 
@@ -871,6 +884,25 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.7.1 highlights
+
+**Five UX improvements plus one crash fix.**
+
+- **Playback continues when minimized**: the engine poll is no longer stopped by window hide, so end-of-track
+  auto-advance keeps working; tray hiding and mini-player switching also keep playing.
+- **Configurable close behaviour**: choose "minimize to tray" or "quit directly"; the tray menu offers
+  show / play-pause / quit.
+- **Mini player**: a 360×150 frameless window whose toggle sits left of "previous track"; playback controls on
+  top, three lyric lines below (current line highlighted), theme and language follow the main app.
+- **Selection bar removed**: the "N selected + verify / edit tags / cleanup / clear" row is gone; the actions
+  remain in the toolbar, context menu and shortcuts.
+- **Adaptive layout**: the bottom three-pane area grows with window height and the right panel with width; the
+  table is no longer clipped by its parent. On 1080p the default window now shows 10–11 rows (was 6–7).
+- **Fixed**: switching UI language raised `AttributeError` in the main window (misspelled method), in all 8 locales.
+
+Measured: 612 tests OK (9 environment skips); zero clipping at three window sizes with 4 / 7 / 11 visible rows;
+packaged three-mode smoke with `underruns=0`.
 
 ### V1.7.0 highlights
 
