@@ -21,9 +21,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # 同目录的 device_retry
 
 import numpy as np  # noqa: E402
 
+from device_retry import with_device_retry  # noqa: E402
 from seqaudio.core.authenticity import find_ffmpeg  # noqa: E402
 from seqaudio.core.config import Settings  # noqa: E402
 from seqaudio.player import devices as dev_mod  # noqa: E402
@@ -170,18 +172,32 @@ class TestOutputLayer(unittest.TestCase):
             output.stop()
 
     def test_exclusive_actual_reported_on_wasapi(self) -> None:
-        """WASAPI 独占成功时 snapshot 报 exclusive=True + 系统混音率。"""
+        """WASAPI 独占成功时 snapshot 报 exclusive=True + 系统混音率。
+
+        开流对 ``-9996`` 做有界重试：全量串行时前一条真开流用例刚 ``stop()``，
+        设备还没真正放手，单跑则不会复现（详见 ``tests/device_retry.py``）。
+        """
         device = _find("Realtek(R) Audio")
         if device is None:
             self.skipTest("没有 Realtek 扬声器（WASAPI）")
         if not dev_mod.supports_rate(device, 44100, mode=OutputMode.EXCLUSIVE):
             self.skipTest("该设备不支持 44.1k 独占")
-        ring = PcmRingBuffer.from_seconds(0.5, 44100, 2, "int32")
-        output = AudioOutput(
-            ring, device=device.index, backend="wasapi", mode=OutputMode.EXCLUSIVE
+
+        def open_exclusive():
+            ring = PcmRingBuffer.from_seconds(0.5, 44100, 2, "int32")
+            output = AudioOutput(
+                ring, device=device.index, backend="wasapi", mode=OutputMode.EXCLUSIVE
+            )
+            try:
+                return output, output.prepare(44100, 2)
+            except Exception:
+                output.stop()
+                raise
+
+        output, rate = with_device_retry(
+            open_exclusive, what="WASAPI 独占 44.1k 开流"
         )
         try:
-            rate = output.prepare(44100, 2)
             self.assertEqual(rate, 44100)
             snapshot = output.snapshot()
             self.assertTrue(snapshot["exclusive"], "实际拿到独占就必须报 True")

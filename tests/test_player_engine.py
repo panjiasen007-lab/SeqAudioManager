@@ -17,9 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # 同目录的 device_retry
 
 import numpy as np  # noqa: E402
 
+from device_retry import DeviceBusyHint, with_device_retry  # noqa: E402
 from seqaudio.core import probe as probe_mod  # noqa: E402
 from seqaudio.core.authenticity import find_ffmpeg  # noqa: E402
 from seqaudio.core.config import Settings  # noqa: E402
@@ -819,9 +821,25 @@ class TestEnginePlayback(unittest.TestCase):
         settings.playback_output_backend = "wasapi"
         settings.playback_device = str(device.index)
         engine = PlayerEngine(settings)
+
+        def start_playback():
+            """起播一次；把 ``-9996`` 从布尔返回值里还原成可重试的异常。
+
+            ``PlayerEngine.play()`` 只回 ``False``，原文在 ``snapshot()["error"]``；
+            全量串行时前一条真开流用例刚 ``stop()``，设备尚未释放就会命中它。
+            """
+            if engine.play():
+                return True
+            error = str(engine.snapshot().get("error", ""))
+            if "-9996" in error or "Invalid device" in error:
+                raise DeviceBusyHint(error)
+            return False
+
         try:
             engine.set_queue(PlayQueue.from_tracks([self.tracks[0]]))
-            self.assertTrue(engine.play())
+            self.assertTrue(
+                with_device_retry(start_playback, what="引擎 WASAPI 回退起播")
+            )
             snapshot = engine.snapshot()
             resample = next(
                 stage for stage in snapshot["signal_path"] if stage["key"] == "resample"

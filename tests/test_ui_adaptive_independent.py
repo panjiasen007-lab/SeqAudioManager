@@ -98,29 +98,16 @@ def fake_tracks(count: int = 40) -> list[Track]:
     return [Track(path=Path(f"/qa/fake_{i:03d}.flac")) for i in range(count)]
 
 
-def startup_height_policy():
-    """取「启动高度策略」可调用体，统一成 ``fn(available_h, platform_name) -> int``。
+def module_height_policy():
+    """启动高度**策略本体**：模块级纯函数 ``initial_window_height(available_h, platform)``。
 
-    该策略目前有两种形态（工程师正在重构中，`ad3a2c4` 提交的是静态方法，
-    其后工作区把它提成了模块级函数并调换了参数顺序）：
-
-    * 模块级 ``initial_window_height(available_height, platform_name)``
-    * ``MainWindow._initial_window_height(platform_name, available_h)``
-
-    用例只关心"给定屏幕可用高与平台，启动高应该是多少"这个行为，不锁死实现
-    位置；两种形态都认，取不到则返回 ``None`` 由用例显式失败。
+    只测这一个入口——它才是契约。``MainWindow._initial_window_height`` 只是
+    兼容委托（见 ``test_legacy_static_entry_delegates``），不重复断言策略内容，
+    避免两套 API 都被当成契约、以后改一处漏一处。
     """
     from seqaudio.ui import main_window as mw
 
-    module_fn = getattr(mw, "initial_window_height", None)
-    if callable(module_fn):
-        return lambda available_h, platform_name: int(module_fn(available_h, platform_name))
-
-    class_fn = getattr(mw.MainWindow, "_initial_window_height", None)
-    if callable(class_fn):
-        return lambda available_h, platform_name: int(class_fn(platform_name, available_h))
-
-    return None
+    return getattr(mw, "initial_window_height", None)
 
 
 class AdaptiveLayoutIndependentTest(unittest.TestCase):
@@ -250,11 +237,11 @@ class AdaptiveLayoutIndependentTest(unittest.TestCase):
 
     def test_initial_window_height_policy_matrix(self) -> None:
         """启动高度策略矩阵：1080p 争取 1000、768p 不超屏、低于最小高兜底 720。"""
-        policy = startup_height_policy()
+        policy = module_height_policy()
         self.assertIsNotNone(
             policy,
-            "找不到启动高度策略函数（模块级 initial_window_height 或 "
-            "MainWindow._initial_window_height 都不存在），API 可能被重命名",
+            "找不到模块级策略函数 initial_window_height(available_h, platform)，"
+            "API 可能被重命名",
         )
         cases = [
             # (屏幕可用高, 平台) -> 期望启动高
@@ -262,12 +249,19 @@ class AdaptiveLayoutIndependentTest(unittest.TestCase):
             (1040, "windows"),     # 1080p 可用高约 1040 → min(1000, 1000)
             (900, "windows"),      # 恰好 900 → min(1000, 860)
             (728, "windows"),      # 768p 笔记本：整窗不超屏
-            (700, "windows"),      # 低于最小高 → 兜底 720
+            (600, "windows"),      # 低于最小窗高 → 兜底 720
+            (1400, "windows"),     # 大屏封顶 1000
         ]
+        expected_of = {
+            ("offscreen", 1040): 880,
+            ("windows", 1040): 1000,
+            ("windows", 900): 860,
+            ("windows", 728): 728,
+            ("windows", 600): 720,
+            ("windows", 1400): 1000,
+        }
         for available_h, platform_name in cases:
-            expected = 880 if platform_name == "offscreen" else {
-                1040: 1000, 900: 860, 728: 728, 700: 720,
-            }[available_h]
+            expected = expected_of[(platform_name, available_h)]
             with self.subTest(platform=platform_name, available_h=available_h):
                 actual = policy(available_h, platform_name)
                 self.assertEqual(
@@ -275,12 +269,27 @@ class AdaptiveLayoutIndependentTest(unittest.TestCase):
                     f"{platform_name} / 可用高 {available_h} 应为 {expected}，实测 {actual}",
                 )
 
+    def test_legacy_static_entry_delegates(self) -> None:
+        """兼容入口 ``MainWindow._initial_window_height(platform, avail)`` 必须与本体一致。"""
+        policy = module_height_policy()
+        legacy = getattr(MainWindow, "_initial_window_height", None)
+        self.assertIsNotNone(policy, "缺少策略本体，无法比对兼容入口")
+        if legacy is None:
+            self.skipTest("没有兼容入口 _initial_window_height（已清理则无需比对）")
+        for available_h in (728, 900, 1040, 1400):
+            with self.subTest(available_h=available_h):
+                self.assertEqual(
+                    int(legacy("windows", available_h)),
+                    int(policy(available_h, "windows")),
+                    f"兼容入口与本体在可用高 {available_h} 上不一致",
+                )
+
     def test_initial_height_never_exceeds_available_screen(self) -> None:
         """小屏上启动高度不得超过屏幕可用高度（否则标题栏/任务栏被切掉）。"""
-        policy = startup_height_policy()
+        policy = module_height_policy()
         self.assertIsNotNone(
             policy,
-            "找不到启动高度策略函数，API 可能被重命名",
+            "找不到模块级策略函数 initial_window_height(available_h, platform)",
         )
         for available_h in (728, 768, 800, 864, 900, 1040, 1440):
             with self.subTest(available_h=available_h):
