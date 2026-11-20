@@ -98,6 +98,31 @@ def fake_tracks(count: int = 40) -> list[Track]:
     return [Track(path=Path(f"/qa/fake_{i:03d}.flac")) for i in range(count)]
 
 
+def startup_height_policy():
+    """取「启动高度策略」可调用体，统一成 ``fn(available_h, platform_name) -> int``。
+
+    该策略目前有两种形态（工程师正在重构中，`ad3a2c4` 提交的是静态方法，
+    其后工作区把它提成了模块级函数并调换了参数顺序）：
+
+    * 模块级 ``initial_window_height(available_height, platform_name)``
+    * ``MainWindow._initial_window_height(platform_name, available_h)``
+
+    用例只关心"给定屏幕可用高与平台，启动高应该是多少"这个行为，不锁死实现
+    位置；两种形态都认，取不到则返回 ``None`` 由用例显式失败。
+    """
+    from seqaudio.ui import main_window as mw
+
+    module_fn = getattr(mw, "initial_window_height", None)
+    if callable(module_fn):
+        return lambda available_h, platform_name: int(module_fn(available_h, platform_name))
+
+    class_fn = getattr(mw.MainWindow, "_initial_window_height", None)
+    if callable(class_fn):
+        return lambda available_h, platform_name: int(class_fn(platform_name, available_h))
+
+    return None
+
+
 class AdaptiveLayoutIndependentTest(unittest.TestCase):
     """一个进程只构造一次主窗口：反复构造会触发本机 apply_theme 卡顿。"""
 
@@ -115,6 +140,8 @@ class AdaptiveLayoutIndependentTest(unittest.TestCase):
                 playback_restore_session=False,
             )
         )
+        # show() 之前的几何就是构造期的默认启动尺寸，先记下来
+        cls.startup_size = (cls.window.width(), cls.window.height())
         # 三栏之右侧「信号路径」默认跟随设置隐藏；测量三栏高度前先打开。
         cls.window.player_signals.setVisible(True)
         cls.window.show()
@@ -210,6 +237,59 @@ class AdaptiveLayoutIndependentTest(unittest.TestCase):
         self._resize(TALL_SIZE)
         bottom = self.window._bottom_area.height()
         self.assertEqual(bottom, BOTTOM_MAX, f"2000 高应夹到 {BOTTOM_MAX}，实测 {bottom}")
+
+    # -------------------------------------------------- 启动尺寸自适应
+
+    def test_startup_size_on_offscreen_is_880(self) -> None:
+        """offscreen 下启动尺寸保持 1420×880，不改变既有几何基线。"""
+        width, height = self.startup_size
+        self.assertEqual(
+            (width, height), (1420, 880),
+            f"offscreen 启动尺寸应为 1420×880，实测 {width}×{height}",
+        )
+
+    def test_initial_window_height_policy_matrix(self) -> None:
+        """启动高度策略矩阵：1080p 争取 1000、768p 不超屏、低于最小高兜底 720。"""
+        policy = startup_height_policy()
+        self.assertIsNotNone(
+            policy,
+            "找不到启动高度策略函数（模块级 initial_window_height 或 "
+            "MainWindow._initial_window_height 都不存在），API 可能被重命名",
+        )
+        cases = [
+            # (屏幕可用高, 平台) -> 期望启动高
+            (1040, "offscreen"),   # 自动化环境固定 880，不受屏幕影响
+            (1040, "windows"),     # 1080p 可用高约 1040 → min(1000, 1000)
+            (900, "windows"),      # 恰好 900 → min(1000, 860)
+            (728, "windows"),      # 768p 笔记本：整窗不超屏
+            (700, "windows"),      # 低于最小高 → 兜底 720
+        ]
+        for available_h, platform_name in cases:
+            expected = 880 if platform_name == "offscreen" else {
+                1040: 1000, 900: 860, 728: 728, 700: 720,
+            }[available_h]
+            with self.subTest(platform=platform_name, available_h=available_h):
+                actual = policy(available_h, platform_name)
+                self.assertEqual(
+                    actual, expected,
+                    f"{platform_name} / 可用高 {available_h} 应为 {expected}，实测 {actual}",
+                )
+
+    def test_initial_height_never_exceeds_available_screen(self) -> None:
+        """小屏上启动高度不得超过屏幕可用高度（否则标题栏/任务栏被切掉）。"""
+        policy = startup_height_policy()
+        self.assertIsNotNone(
+            policy,
+            "找不到启动高度策略函数，API 可能被重命名",
+        )
+        for available_h in (728, 768, 800, 864, 900, 1040, 1440):
+            with self.subTest(available_h=available_h):
+                actual = policy(available_h, "windows")
+                self.assertLessEqual(
+                    actual, max(available_h, 720),
+                    f"可用高 {available_h} 时启动高 {actual} 超出屏幕",
+                )
+                self.assertGreaterEqual(actual, 720, "启动高不得低于窗口最小高度")
 
     def test_right_panel_monotonic_growth(self) -> None:
         """三个宽度档的右侧分栏像素序列必须严格递增。"""
