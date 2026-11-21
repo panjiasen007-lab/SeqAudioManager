@@ -181,15 +181,26 @@ class UiModesTest(unittest.TestCase):
 
     def test_view_mode_button_precedes_prev_on_both_bars(self) -> None:
         """主界面与迷你条的切换按钮都在「上一曲」左边。"""
-        for bar in (self.window.player_bar, self.window.mini_player.bar):
-            controls = _controls(bar)
-            self.assertIn(bar.btn_view_mode, controls)
-            self.assertIn(bar.btn_prev, controls)
+        bar = self.window.player_bar
+        controls = _controls(bar)
+        self.assertIn(bar.btn_view_mode, controls)
+        self.assertIn(bar.btn_prev, controls)
+        self.assertLess(
+            controls.index(bar.btn_view_mode),
+            controls.index(bar.btn_prev),
+            "主界面切换按钮必须在「上一曲」左边",
+        )
+        # 迷你条是自绘卡片（不再复用 PlayerBar），按几何位置验同一契约
+        mini = self.window.mini_player
+        mini.show()
+        self.app.processEvents()
+        try:
             self.assertLess(
-                controls.index(bar.btn_view_mode),
-                controls.index(bar.btn_prev),
-                "切换按钮必须在「上一曲」左边",
+                mini.btn_view.x(), mini.btn_prev.x(),
+                "迷你条切换按钮必须在「上一曲」左边",
             )
+        finally:
+            mini.hide()
 
     def test_switch_between_main_and_mini_keeps_timer(self) -> None:
         """两个形态互斥可见，切换过程中轮询始终 active。"""
@@ -202,7 +213,7 @@ class UiModesTest(unittest.TestCase):
         self.assertTrue(self.window.player_bridge.timer.isActive())
         self.assertTrue(self.window.settings.playback_mini_bar)
 
-        self.window.mini_player.bar.viewModeToggled.emit()
+        self.window.mini_player.viewModeToggled.emit()
         self.app.processEvents()
         self.assertTrue(self.window.isVisible())
         self.assertFalse(self.window.mini_player.isVisible())

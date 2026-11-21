@@ -309,6 +309,22 @@ _PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
     ("ui_view_main", "返回主界面", "返回主介面", "Back to main window", "メイン画面に戻る", "주 화면으로 돌아가기", "Вернуться в главное окно", "Revenir à la fenêtre principale", "Zurück zum Hauptfenster"),
     ("ui_mini_title", "迷你播放条", "迷你播放條", "Mini player", "ミニプレイヤー", "미니 플레이어", "Мини-плеер", "Mini-lecteur", "Mini-Player"),
     ("lyr_mini_empty", "暂无歌词", "暫無歌詞", "No lyrics", "歌詞がありません", "가사 없음", "Текста нет", "Aucune parole", "Kein Liedtext"),
+    # ---- 迷你播放条（v1.7.2 重构：窗口三键 / 透明度 / 模式）----
+    ("ui_mini_minimize", "最小化", "最小化", "Minimize", "最小化", "최소화", "Свернуть", "Réduire", "Minimieren"),
+    ("ui_mini_maximize", "展开主界面", "展開主介面", "Expand to main window", "メイン画面に展開", "주 화면으로 펼치기", "Развернуть в главное окно", "Développer vers la fenêtre principale", "Zum Hauptfenster erweitern"),
+    ("ui_mini_close", "关闭", "關閉", "Close", "閉じる", "닫기", "Закрыть", "Fermer", "Schließen"),
+    ("ui_mini_opacity", "透明度", "透明度", "Opacity", "不透明度", "투명도", "Прозрачность", "Opacité", "Deckkraft"),
+    ("ui_mini_volume", "音量", "音量", "Volume", "音量", "볼륨", "Громкость", "Volume", "Lautstärke"),
+    ("ui_mini_prev", "上一曲", "上一曲", "Previous track", "前の曲", "이전 곡", "Предыдущий трек", "Piste précédente", "Vorheriger Titel"),
+    ("ui_mini_next", "下一曲", "下一曲", "Next track", "次の曲", "다음 곡", "Следующий трек", "Piste suivante", "Nächster Titel"),
+    ("ui_mini_play", "播放", "播放", "Play", "再生", "재생", "Воспроизвести", "Lecture", "Wiedergabe"),
+    ("ui_mini_pause", "暂停", "暫停", "Pause", "一時停止", "일시정지", "Пауза", "Pause", "Pause"),
+    ("ui_mini_stop", "停止", "停止", "Stop", "停止", "정지", "Стоп", "Arrêter", "Stopp"),
+    ("ui_mini_mode", "播放模式", "播放模式", "Play mode", "再生モード", "재생 모드", "Режим воспроизведения", "Mode de lecture", "Wiedergabemodus"),
+    ("ui_mini_mode_sequential", "顺序播放", "順序播放", "Sequential", "順次再生", "순차 재생", "По порядку", "Lecture séquentielle", "Der Reihe nach"),
+    ("ui_mini_mode_repeat_one", "单曲循环", "單曲循環", "Repeat one", "1曲リピート", "한 곡 반복", "Повтор одной", "Répéter le titre", "Titel wiederholen"),
+    ("ui_mini_mode_repeat_all", "列表循环", "列表循環", "Repeat all", "全曲リピート", "전체 반복", "Повтор списка", "Répéter la liste", "Liste wiederholen"),
+    ("ui_mini_mode_shuffle", "随机播放", "隨機播放", "Shuffle", "シャッフル", "셔플", "Перемешать", "Aléatoire", "Zufällig"),
     ("ui_restored_from_tray", "已回到主窗口，播放未中断", "已回到主視窗，播放未中斷", "Back to main window; playback was never interrupted", "メイン画面に復帰しました。再生は継続中です", "주 창으로 돌아왔습니다. 재생은 중단되지 않았습니다", "Возврат в главное окно; воспроизведение не прерывалось", "Retour à la fenêtre principale ; lecture jamais interrompue", "Zurück im Hauptfenster; Wiedergabe lief ununterbrochen"),
 )
 

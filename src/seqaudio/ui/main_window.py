@@ -362,16 +362,10 @@ class MainWindow(QMainWindow):
 
     # ---- 引擎事件槽 ----
 
-    def _mini_bar(self) -> Optional[PlayerBar]:
-        """迷你条的播放条（两种形态互斥，但共享同一引擎事件）。"""
-        mini = getattr(self, "mini_player", None)
-        return mini.bar if mini is not None else None
-
     def _on_player_state(self, state: str) -> None:
         self.player_bar.set_state(state)
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_state(state)
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_state(state)
         self.brand_bar.set_status(
             i18n.tr(f"play_state_{str(state).lower()}"),
             theme.CYAN if str(state) == "PLAYING" else theme.FG_DIM,
@@ -383,9 +377,8 @@ class MainWindow(QMainWindow):
             data = dict(data)
             data["cover"] = self._cover_for(data.get("path"))
         self.player_bar.set_track(data)
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_track(data)
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_track(data)
         self.player_lyrics.set_track(data)
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.update_lyrics()
@@ -396,9 +389,8 @@ class MainWindow(QMainWindow):
         snapshot = self.player_bridge.last_snapshot()
         total = int(snapshot.get("duration_ms") or 0)
         self.player_bar.set_position(int(position), total)
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_position(int(position), total)
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_position(int(position), total)
         self.player_lyrics.set_position(int(position))
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.update_lyrics()
@@ -408,9 +400,8 @@ class MainWindow(QMainWindow):
             self.player_bar.progress.value() if self.player_bar.progress.maximum() else 0
         )
         self.player_bar.set_position(position, int(duration))
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_position(position, int(duration))
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_position(position, int(duration))
 
     def _on_player_error(self, message: str) -> None:
         text = str(message or "").strip()
@@ -426,9 +417,8 @@ class MainWindow(QMainWindow):
 
     def _on_player_busy(self, busy: bool) -> None:
         self.player_bar.set_playback_enabled(not bool(busy))
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_playback_enabled(not bool(busy))
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_playback_enabled(not bool(busy))
 
     def _on_player_gap(self, gap_ms: float) -> None:
         """切歌/续播间隙（T05 会在这里做缝隙回填提示，本期只记 DEBUG）。"""
@@ -449,31 +439,33 @@ class MainWindow(QMainWindow):
         # 必须是顶层窗口：Qt 子控件随父窗口一起隐藏，若 parent=self，主窗口一
         # hide() 迷你条就永远显示不出来（主界面 ↔ 迷你条互斥可见会失效）。
         self.mini_player = MiniPlayerWindow(self.settings, self.player_lyrics, None)
-        mini_bar = self.mini_player.bar
-        mini_bar.playRequested.connect(self.player_toggle)
-        mini_bar.pauseRequested.connect(self.player_toggle)
-        mini_bar.stopRequested.connect(self._on_player_stop)
-        mini_bar.nextRequested.connect(self.player_next)
-        mini_bar.prevRequested.connect(self.player_prev)
-        mini_bar.seekRequested.connect(self.player_bridge.seek)
-        mini_bar.volumeChanged.connect(self._on_volume_dragged)
-        mini_bar.modeChanged.connect(self._on_mode_changed)
-        mini_bar.viewModeToggled.connect(self.switch_to_main_window)
+        mini = self.mini_player
+        mini.playRequested.connect(self.player_toggle)
+        mini.pauseRequested.connect(self.player_toggle)
+        mini.stopRequested.connect(self._on_player_stop)
+        mini.nextRequested.connect(self.player_next)
+        mini.prevRequested.connect(self.player_prev)
+        mini.seekRequested.connect(self.player_bridge.seek)
+        mini.volumeChanged.connect(self._on_volume_dragged)
+        mini.modeChanged.connect(self._on_mode_changed)
+        mini.viewModeToggled.connect(self.switch_to_main_window)
+        # 关闭键复用主窗口的 closeEvent：tray/quit 分流、未保存参数确认只有一份实现
+        mini.closeRequested.connect(self.close)
         self.player_bar.viewModeToggled.connect(self.switch_to_mini_window)
 
         # 迷你条初值：与当前主条完全一致（引擎事件之后会自动同步）
-        mini_bar.set_state(self.player_bar.current_state())
-        mini_bar.set_volume(self.player_bar.volume_db())
-        mini_bar.set_volume_mode(
+        mini.set_state(self.player_bar.current_state())
+        mini.set_volume(self.player_bar.volume_db())
+        mini.set_volume_mode(
             str(getattr(self.settings, "playback_volume_mode", "bypass") or "bypass")
         )
-        mini_bar.set_mode(self.player_bar.current_mode())
-        mini_bar.set_playback_enabled(
+        mini.set_mode(self.player_bar.current_mode())
+        mini.set_playback_enabled(
             not bool(getattr(self.player_bridge.engine, "busy", False))
         )
         snapshot = self.player_bridge.last_snapshot() or self.player_bridge.snapshot()
-        mini_bar.set_track(snapshot.get("track"))
-        mini_bar.set_position(
+        mini.set_track(snapshot.get("track"))
+        mini.set_position(
             int(snapshot.get("position_ms") or 0), int(snapshot.get("duration_ms") or 0)
         )
         self.mini_player.hide()
@@ -585,6 +577,8 @@ class MainWindow(QMainWindow):
         self.player_lyrics._refresh_offset_label()
         self.player_eq.refresh_texts()
         self.player_signals.refresh_texts()
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.refresh_texts()
         self.right_tabs.setTabText(1, i18n.tr_text("参数"))
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.refresh_texts()
@@ -765,13 +759,11 @@ class MainWindow(QMainWindow):
         if float(db) != 0.0 and getattr(self.settings, "playback_volume_mode", "bypass") != "software":
             self.settings.playback_volume_mode = "software"
             self.player_bar.set_volume_mode("software")
-            mini_bar = self._mini_bar()
-            if mini_bar is not None:
-                mini_bar.set_volume_mode("software")
+            if getattr(self, "mini_player", None) is not None:
+                self.mini_player.set_volume_mode("software")
         self.player_bridge.set_volume(float(db))
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_volume(float(db))
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_volume(float(db))
 
     def _on_volume_reset(self) -> None:
         """双击归零：回到 0 dB 旁路（位完美取向）。"""
@@ -786,9 +778,8 @@ class MainWindow(QMainWindow):
         self.settings.playback_mode = str(mode)
         applied = self.player_bridge.set_mode(mode)
         self.player_bar.set_mode(applied)
-        mini_bar = self._mini_bar()
-        if mini_bar is not None:
-            mini_bar.set_mode(applied)
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_mode(applied)
         self.status_hint.setText(
             i18n.tr(f"pl_mode_{str(applied)}")
         )
@@ -863,7 +854,10 @@ class MainWindow(QMainWindow):
     def _refresh_queue_panel(self) -> None:
         """队列并入主表格后：同步播放行标记 + 按列表内容灰置上/下一首。"""
         self._sync_playing_row(None)
-        self.player_bar.set_nav_enabled(bool(self.model.tracks()))
+        has_tracks = bool(self.model.tracks())
+        self.player_bar.set_nav_enabled(has_tracks)
+        if getattr(self, "mini_player", None) is not None:
+            self.mini_player.set_nav_enabled(has_tracks)
 
     def _sync_playing_row(self, data) -> None:
         """把正在播放的曲目映射到主表格行并加粗标记。"""

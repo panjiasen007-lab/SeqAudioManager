@@ -29,7 +29,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from PySide6.QtCore import Qt, QEvent  # noqa: E402
 from PySide6.QtGui import QCloseEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QHBoxLayout  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QAbstractSlider,
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QPushButton,
+    QWidget,
+)
 
 from seqaudio.app import create_app  # noqa: E402
 from seqaudio.core.authenticity import find_ffmpeg  # noqa: E402
@@ -72,6 +79,76 @@ def pump(app: QApplication, seconds: float, step: float = 0.05) -> None:
     while time.monotonic() < deadline:
         app.processEvents()
         time.sleep(step)
+
+
+# ---------------------------------------------------------------- 迷你条新契约
+# 用户要求把迷你条从 360×150 的「精简播放条」重做成 440×260 的自绘圆角卡片：
+# 控件全套（上/播/停/下/模式/视图/进度/音量/透明度/窗口三键）、播放键 38×38 圆形、
+# 透明度默认 80、圆角 14、主题色发光呼吸。下面这些常量就是验收口径。
+
+MINI_EXPECTED_SIZE = (440, 260)
+MINI_CARD_MARGIN = 16
+MINI_CARD_RADIUS = 14
+MINI_OPACITY_DEFAULT = 80
+MINI_OPACITY_RANGE = (10, 100)
+PLAY_BUTTON_MAX = 44          # 播放键不得大于 44×44，防止"整块 accent 蓝"回归
+
+
+class MiniHandles:
+    """迷你条控件解析器：按"属性名候选 + objectName 线索"两路找控件。
+
+    为什么要这一层：新契约把迷你条重构成自绘卡片，控件可能直接挂在
+    ``MiniPlayerWindow`` 上，也可能仍收在 ``mini.bar``（`PlayerBar`）里。
+    用例只关心"这个角色有没有控件、行为对不对"，不应该锁死控件挂在哪个对象上。
+    取不到就返回 ``None``，由调用方给出带角色名的失败信息。
+    """
+
+    def __init__(self, mini) -> None:
+        self.mini = mini
+        self.bar = getattr(mini, "bar", None)
+
+    @property
+    def owners(self):
+        return [self.mini] + ([self.bar] if self.bar is not None else [])
+
+    def attr(self, *names):
+        for owner in self.owners:
+            for name in names:
+                if hasattr(owner, name):
+                    return getattr(owner, name)
+        return None
+
+    def signal(self, *names):
+        for owner in self.owners:
+            for name in names:
+                sig = getattr(owner, name, None)
+                if hasattr(sig, "emit"):
+                    return sig
+        return None
+
+    def button(self, *names, hints=()):
+        found = self.attr(*names)
+        if found is not None:
+            return found
+        lowered = tuple(hint.lower() for hint in hints)
+        for owner in self.owners:
+            for btn in owner.findChildren(QPushButton):
+                label = btn.objectName().lower()
+                if any(hint in label for hint in lowered):
+                    return btn
+        return None
+
+    def slider(self, *names, hints=()):
+        found = self.attr(*names)
+        if found is not None:
+            return found
+        lowered = tuple(hint.lower() for hint in hints)
+        for owner in self.owners:
+            for bar in owner.findChildren(QAbstractSlider):
+                label = bar.objectName().lower()
+                if any(hint in label for hint in lowered):
+                    return bar
+        return None
 
 
 class BaseWindowTest(unittest.TestCase):
@@ -365,13 +442,21 @@ class TestMiniPlayer(BaseWindowTest):
 
     def test_geometry_and_structure(self) -> None:
         mini = self.window.mini_player
-        self.assertEqual((mini.width(), mini.height()), (MINI_WIDTH, MINI_HEIGHT),
-                         f"迷你条尺寸应为 {MINI_WIDTH}x{MINI_HEIGHT}")
+        self.assertEqual((mini.width(), mini.height()), MINI_EXPECTED_SIZE,
+                         f"迷你条尺寸应为 {MINI_EXPECTED_SIZE}")
         self.assertTrue(mini.windowFlags() & Qt.FramelessWindowHint, "迷你条应无边框")
-        self.assertIsInstance(mini.bar, PlayerBar)
-        self.assertIsNot(mini.bar, self.window.player_bar, "应是同一套控件的新实例")
+        self.assertTrue(mini.testAttribute(Qt.WA_TranslucentBackground),
+                        "圆角卡片需要透明顶层（QSS 不裁剪顶层窗口）")
+        self.assertFalse(hasattr(mini, "bar"),
+                         "重构后不得再复用 PlayerBar（折叠态会裁掉按钮）")
+        self.assertEqual(mini.card.objectName(), "miniCard")
+        self.assertIsNotNone(mini.card.graphicsEffect(), "应有发光/阴影特效")
         self.assertEqual(len(mini.lyric_labels), 3, "应有三行歌词")
-        self.assertTrue(mini.bar._collapsed, "迷你条播放条应处于折叠态")
+        self.assertEqual((mini.btn_play.width(), mini.btn_play.height()),
+                         (mini.btn_play.width(), mini.btn_play.width()))
+        self.assertLessEqual(mini.btn_play.width(), PLAY_BUTTON_MAX,
+                             "播放键必须是圆形小按钮，不能是整块矩形")
+        self.assertEqual(mini.btn_play.icon_key, "play")
 
     def test_no_new_engine_on_switch(self) -> None:
         """切形态绝不新建引擎（对象身份 + 构造器计数双证据）。"""
@@ -434,10 +519,10 @@ class TestMiniPlayer(BaseWindowTest):
         self.bridge.enqueue(tracks, replace=True)
         self.assertTrue(self.bridge.play_index(0))
         pump(self.app, 0.4)
-        mini_bar = self.window.mini_player.bar
+        mini = self.window.mini_player
 
         mark("mini next")
-        mini_bar.nextRequested.emit()
+        mini.nextRequested.emit()
         self.app.processEvents()
         self.assertEqual(self.bridge.queue_index(), 1, "迷你条下一首无效")
 
@@ -452,15 +537,15 @@ class TestMiniPlayer(BaseWindowTest):
         self.assertEqual(snapshot["queue_index"], 2,
                          f"迷你条下曲末应自动进第 3 首，实际 {snapshot['queue_index']}")
 
-        mini_bar.seekRequested.emit(1000)
+        mini.seekRequested.emit(1000)
         self.app.processEvents()
         self.assertGreaterEqual(self.bridge.poll_now()["position_ms"], 900)
 
-        mini_bar.volumeChanged.emit(-6.0)
+        mini.volumeChanged.emit(-6.0)
         self.app.processEvents()
         self.assertAlmostEqual(self.bridge.engine.volume_db, -6.0, delta=0.01)
 
-        mini_bar.modeChanged.emit("repeat_all")
+        mini.modeChanged.emit("repeat_all")
         self.app.processEvents()
         self.assertEqual(self.bridge.poll_now()["mode"], "repeat_all")
 
@@ -470,8 +555,10 @@ class TestMiniPlayer(BaseWindowTest):
         try:
             _REAL_APPLY_THEME(self.window, "深空", persist=False, quiet=True)
             self.app.processEvents()
-            self.assertIn(theme.SURFACE_CARD, mini.styleSheet(),
-                          "主题切换后迷你条配色未刷新")
+            self.assertIn(theme.ACCENT, mini.styleSheet(),
+                          "主题切换后迷你条控件配色未刷新")
+            self.assertEqual(mini._shadow.color().name(), theme.ACCENT.lower(),
+                             "发光颜色应跟随主题")
         finally:
             if original_theme:
                 _REAL_APPLY_THEME(self.window, original_theme, persist=False,
@@ -491,8 +578,9 @@ class TestMiniPlayer(BaseWindowTest):
                 mini.refresh_texts()
                 with self.subTest(locale=locale):
                     self.assertEqual(mini.windowTitle(), i18n.tr("ui_mini_title"))
-                    self.assertEqual(mini.bar.btn_view_mode.toolTip(),
-                                     i18n.tr("ui_view_main"))
+                    self.assertEqual(mini.btn_view.toolTip(), i18n.tr("ui_view_main"))
+                    self.assertEqual(mini.btn_close.toolTip(), i18n.tr("ui_mini_close"))
+                    self.assertEqual(mini.opacity_label.text(), i18n.tr("ui_mini_opacity"))
         finally:
             i18n.set_locale(original_locale)
         self.assertEqual(

@@ -156,6 +156,7 @@ class Settings:
     playback_writeback_tags: bool = False          # 播放相关写回标签（默认关）
     playback_exclusive_notice_shown: bool = False  # 独占首次说明是否已弹
     playback_mini_bar: bool = False                # 迷你条开关（弹性项）
+    playback_mini_opacity: int = 80               # 迷你条不透明度（10–100，100=不透明）
 
     # ---- 曲库（v1.6）----
     library_roots: list[str] = field(default_factory=list)   # 曲库根目录（取代零散 last_folder）
