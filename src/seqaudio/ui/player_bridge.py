@@ -666,6 +666,7 @@ class PlayerBridge(QObject):
                 mode=str(getattr(queue.mode, "value", mode)),
                 device=session.output_device,
                 backend=session.output_backend,
+                paths=[str(item.path) for item in items],
                 volume_db=float(session.volume_db),
             )
             log.info(

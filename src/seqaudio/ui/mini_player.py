@@ -104,6 +104,13 @@ def _draw_glyph(painter: QPainter, key: str, rect: QRectF, color: QColor) -> Non
         painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(QPointF(x + 0.82 * w, y + 0.18 * h), QPointF(x + 0.18 * w, y + 0.82 * h))
         tri([(0.42, 0.90), (0.08, 0.90), (0.08, 0.56)])
+    elif key == "list":
+        # 播放列表：三条「项目 + 文本」的简图
+        painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.RoundCap))
+        for offset in (0.18, 0.5, 0.82):
+            cy = y + offset * h
+            painter.drawPoint(QPointF(x + 0.12 * w, cy))
+            painter.drawLine(QPointF(x + 0.30 * w, cy), QPointF(x + 0.90 * w, cy))
     elif key == "mode_seq":
         painter.drawLine(QPointF(x + 0.08 * w, y + 0.5 * h), QPointF(x + 0.86 * w, y + 0.5 * h))
         tri([(0.62, 0.22), (0.94, 0.5), (0.62, 0.78)])
@@ -259,6 +266,7 @@ class MiniPlayerWindow(QWidget):
     seekRequested = Signal(int)
     volumeChanged = Signal(float)
     modeChanged = Signal(str)
+    playlistRequested = Signal()
     viewModeToggled = Signal()
     closeRequested = Signal()
 
@@ -383,14 +391,16 @@ class MiniPlayerWindow(QWidget):
         self.btn_stop = _IconButton("stop", 30, tip=i18n.tr("ui_mini_stop"))
         self.btn_next = _IconButton("next", 30, tip=i18n.tr("ui_mini_next"))
         self.btn_mode = _IconButton("mode_seq", 30, tip=i18n.tr("ui_mini_mode"))
+        self.btn_playlist = _IconButton("list", 30, tip=i18n.tr("ui_playlist"))
         self.btn_view.clicked.connect(self.viewModeToggled.emit)
         self.btn_prev.clicked.connect(self.prevRequested.emit)
         self.btn_play.clicked.connect(self._on_play_clicked)
         self.btn_stop.clicked.connect(self.stopRequested.emit)
         self.btn_next.clicked.connect(self.nextRequested.emit)
         self.btn_mode.clicked.connect(self.cycle_mode)
+        self.btn_playlist.clicked.connect(self.playlistRequested.emit)
         for button in (self.btn_view, self.btn_prev, self.btn_play,
-                       self.btn_stop, self.btn_next, self.btn_mode):
+                       self.btn_stop, self.btn_next, self.btn_mode, self.btn_playlist):
             row.addWidget(button)
         row.addStretch(1)
 

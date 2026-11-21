@@ -309,6 +309,7 @@ _PLAYBACK_ROWS: tuple[tuple[str, ...], ...] = (
     ("ui_view_main", "返回主界面", "返回主介面", "Back to main window", "メイン画面に戻る", "주 화면으로 돌아가기", "Вернуться в главное окно", "Revenir à la fenêtre principale", "Zurück zum Hauptfenster"),
     ("ui_mini_title", "迷你播放条", "迷你播放條", "Mini player", "ミニプレイヤー", "미니 플레이어", "Мини-плеер", "Mini-lecteur", "Mini-Player"),
     ("lyr_mini_empty", "暂无歌词", "暫無歌詞", "No lyrics", "歌詞がありません", "가사 없음", "Текста нет", "Aucune parole", "Kein Liedtext"),
+    ("ui_playlist", "播放列表", "播放清單", "Playlists", "プレイリスト", "재생목록", "Плейлисты", "Listes de lecture", "Wiedergabelisten"),
     # ---- 迷你播放条（v1.7.2 重构：窗口三键 / 透明度 / 模式）----
     ("ui_mini_minimize", "最小化", "最小化", "Minimize", "最小化", "최소화", "Свернуть", "Réduire", "Minimieren"),
     ("ui_mini_maximize", "展开主界面", "展開主介面", "Expand to main window", "メイン画面に展開", "주 화면으로 펼치기", "Развернуть в главное окно", "Développer vers la fenêtre principale", "Zum Hauptfenster erweitern"),

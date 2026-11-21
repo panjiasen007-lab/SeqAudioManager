@@ -53,6 +53,7 @@ from ..core import report as report_mod
 from ..core.config import PresetStore, Settings
 from ..core.logging_setup import add_listener, remove_listener
 from ..core.model import Tags, Track, TrackStatus
+from ..core.playlists import PlaylistStore
 from ..pipeline.processor import BatchOptions
 from . import fonts, i18n, theme
 from .backdrop import BackdropWidget
@@ -68,6 +69,7 @@ from .health import HealthDialog
 from .inspector import InspectorPanel
 from .mini_player import MiniPlayerWindow
 from .player_bar import PlayerBar, format_mmss
+from .playlist_dialog import PlaylistDialog
 from .player_bridge import PlayerBridge
 from .player_eq import PlayerEqPanel
 from .player_lyrics import PlayerLyricsPanel
@@ -139,6 +141,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setFont(fonts.ui_font(13))
         self.presets = PresetStore()
+        self.playlists = PlaylistStore()
         self.worker: Optional[ProcessorWorker] = None
         self.scan_worker: Optional[ScanWorker] = None
         self.revert_scan_worker: Optional[ScanWorker] = None
@@ -359,6 +362,14 @@ class MainWindow(QMainWindow):
                     "已恢复到 {value}，按播放从该位置继续", value=format_mmss(position)
                 ),
             )
+        # 队列面板已并入主表格：只恢复引擎队列而不回填表格，用户看到的仍是空列表
+        # （v1.7.1 反馈「每次关闭打开都是空的」）。表格为空时把上次队列扫回表格。
+        restored_paths = [str(p) for p in (report.get("paths") or []) if str(p)]
+        if restored_paths and not self.model.tracks():
+            pending = [Path(p) for p in restored_paths if Path(p).exists()]
+            if pending:
+                self._append_log("INFO", f"正在恢复上次播放列表：{len(pending)} 首")
+                QTimer.singleShot(0, lambda: self._start_scan(pending))
 
     # ---- 引擎事件槽 ----
 
@@ -451,6 +462,7 @@ class MainWindow(QMainWindow):
         mini.viewModeToggled.connect(self.switch_to_main_window)
         # 关闭键复用主窗口的 closeEvent：tray/quit 分流、未保存参数确认只有一份实现
         mini.closeRequested.connect(self.close)
+        mini.playlistRequested.connect(self.open_playlists)
         self.player_bar.viewModeToggled.connect(self.switch_to_mini_window)
 
         # 迷你条初值：与当前主条完全一致（引擎事件之后会自动同步）
@@ -963,6 +975,10 @@ class MainWindow(QMainWindow):
         # 「清空列表」放回工具栏（一键全自动左侧）
         self.btn_clear = self._button(i18n.tr("clear"), self.clear_all, ghost=True, i18n_key="clear")
         self.btn_clear.setToolTip("清空当前列表（不删除磁盘文件）")
+        self.btn_playlist = self._button(
+            i18n.tr("ui_playlist"), self.open_playlists, ghost=True, i18n_key="ui_playlist"
+        )
+        self.btn_playlist.setToolTip("保存 / 载入自定义播放列表；上次播放的列表会在启动时自动恢复")
         self.btn_auto = self._button(i18n.tr("auto"), self.run_auto, i18n_key="auto")
         self.btn_auto.setObjectName("primary")
         self.btn_auto.setToolTip("匹配 → 补全 → 清理水印 → 写标签 → 歌词（按当前参数）")
@@ -974,6 +990,7 @@ class MainWindow(QMainWindow):
         self.btn_stop = self._button(i18n.tr("stop"), self.stop, ghost=True, i18n_key="stop")
         self.btn_stop.setEnabled(False)
         top.addWidget(self.btn_clear)
+        top.addWidget(self.btn_playlist)
         top.addWidget(self.btn_auto)
         top.addWidget(self.btn_save_all)
         top.addStretch(1)
@@ -2132,6 +2149,38 @@ class MainWindow(QMainWindow):
     def _row_of_tracks(self, tracks: list[Track]) -> list[int]:
         keys = {id(t) for t in tracks}
         return [i for i, t in enumerate(self.model.tracks()) if id(t) in keys]
+
+    def open_playlists(self) -> None:
+        """打开播放列表管理器（保存当前列表 / 载入 / 重命名 / 删除 / 排序）。"""
+        paths = [str(track.path) for track in self.model.tracks()]
+        dialog = PlaylistDialog(self.playlists, paths, self)
+        dialog.loadRequested.connect(self._load_playlist)
+        dialog.exec()
+
+    def _load_playlist(self, paths: list[str], append: bool) -> None:
+        existing = [Path(p) for p in paths if Path(p).exists()]
+        missing = len(paths) - len(existing)
+        if missing:
+            self._append_log("WARNING", f"播放列表里有 {missing} 个文件已不存在，已跳过")
+        if not existing:
+            QMessageBox.information(self, "播放列表", "这个列表里的文件都不在了。")
+            return
+        if not append and self.model.tracks():
+            reply = QMessageBox.question(
+                self, "载入播放列表",
+                f"载入会替换当前列表（{len(self.model.tracks())} 首）并停止播放，继续吗？",
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self._force_stop_player()
+            self.model.clear()
+            self._refresh_stats()
+        self._start_scan(existing)
+        self._append_log(
+            "INFO",
+            f"{'追加' if append else '载入'}播放列表：{len(existing)} 首"
+            + (f"，跳过缺失 {missing} 个" if missing else ""),
+        )
 
     def clear_all(self) -> None:
         if not self.model.tracks():
