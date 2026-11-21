@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.2-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.8.0-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -23,17 +23,40 @@
 
 # 中文
 
-Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 → 清标签水印 → 安全写标签 → 批量重命名 → 导出报表，一键跑完。
+Windows 本地音乐管理与播放工具：批量处理元数据，也把「听」这件事一起做完了。
 
-面向本地音乐收藏玩家，**无损优先**：FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF / SACD ISO 全部支持，只改标签区块、绝不重新编码音频。
+**无损优先、全格式覆盖** —— FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF / SACD ISO 以及 MP3 / AAC / OGG / OPUS 全部支持；标签区块之外，音频数据一个字节都不重编码。
 
-进阶能力：
+**元数据一条龙** —— 批量导入 → 联网匹配（MusicBrainz / iTunes / 网易云 / QQ 音乐）→ 封面（Cover Art Archive / 远程兜底）与歌词（LRCLib / 网易云 / QQ 音乐）→ 清标签水印 → 安全写标签 → 批量重命名 → 导出报表，另带每文件夹封面与曲库体检。
 
-- **真假无损鉴定** —— 频谱分析判断「无损」是真无损还是 MP3 转码伪装的（含 DSD 专门判据）；
-- **一键清理假无损** —— 判定可疑的文件移入回收站或软件隔离区，随时可还原，附频谱图可自行复核；
-- **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
+**真假无损鉴定** —— 频谱分析判断是真无损还是 MP3 转码伪装（含 DSD 专门判据）；可疑文件一键清理，可送回收站或软件隔离区，随时可还原并附频谱图复核。
+
+**完整播放能力** —— 队列、播放 / 暂停 / 上下曲 / 进度 / 音量 / 播放模式；正在播放的曲目会在列表里自动定位、高亮并带 ▶ 标记；**31 段图形均衡器**（曲线预览 + 内置预设 + 自定义预设保存）、信号路径面板、迷你播放条、自定义播放列表；主界面透明度 10–100% 可调。
+
+**输出后端** —— MME / DirectSound / WASAPI / WDM-KS 可选（ASIO 当前构建不支持），共享 / 独占 / 严格独占三档，按后端过滤设备；后端 × 模式逐项做真实开流验证。首次启动默认**共享**模式，之后按用户上次的选择恢复；切到独占会提示「系统音量失效、请用播放条音量」。
+
+**外观与分发** —— 11 套主题、8 种界面语言；提供 Windows 安装包与免安装绿色版。
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.8.0 更新摘要
+
+**界面现代化 + 31 段均衡器。**
+
+- **播放键重做**：改为圆形玻璃质感按钮，播放 / 暂停状态不再被染成整块蓝。
+- **全界面圆角现代化**：主界面与播放条改用圆角卡片与微光效果，观感更统一。
+- **主界面透明度**：新增 10–100 可调，默认 95，设置存 `ui_opacity`，重启后保留。
+- **播放条折叠按钮改为 EQ 入口**：原折叠按钮换成 EQ 按钮，一键打开均衡器。
+- **31 段 EQ**：频段由 10 段扩展到 31 段，带实时曲线预览、8 款内置预设与自定义预设保存（`playback_eq_custom_presets`）。
+- **输出后端过滤设备**：设备列表按所选后端（MME / DirectSound / WASAPI / WDM-KS）过滤，避免串后端误选。
+- **后端 × 模式真实开流验证**：能力矩阵不再只看探测结果，逐项以真实开流成败为准，规避探测假阳性。
+- **播放列表自动定位与「正在播放」标记**：切歌时列表自动滚到当前曲目，该行带强调色竖条 + ▶ 标记、歌名歌手用强调色、整行淡强调底色；右键或 `Ctrl+Shift+P` 可随时「定位到正在播放」。
+- **移除 / 删除后自动补位**：删掉一首或多首后不再留空行，其余曲目立即连续上排（修复 `beginRemoveRows` 未配对 `endRemoveRows`）。
+- **信号路径跟随刷新**：切歌、改设备 / 后端 / 模式、拖音量、开 EQ、保存设置后都会立即刷新，不再显示上一首的链路。
+- **设置保存即时生效**：切输出模式 / 设备 / 后端、改音量或 EQ 后立刻应用到当前播放，不必等下一首。
+- **首次启动默认共享模式**：不再默认独占；之后按用户上次选择恢复。
+- **独占模式提醒**：每次切到独占都会说明它会绕开 Windows 混音器（系统音量滑块失效，请用播放条音量）且期间其它程序可能无声，弹窗内可一键改回共享。
+- **播放参数逻辑修复**（真实曲库验证）：软件音量不再被「全局直通」清零（此前保存一次设置就变回满音量）；整数通路与软件音量同时开启时不再出现整场静音（int16 缓冲里做浮点乘会让音频回调抛异常）；「缓冲深度」设置真正接到输出层（此前只存不用）；配置文件里的越界参数会被收敛到安全区间。
 
 ### V1.7.2 更新摘要
 
@@ -884,17 +907,41 @@ GPLv3 提供源代码。
 <a name="english"></a>
 # English
 
-A Windows local batch audio metadata processor. Batch import → online completion → tag watermark cleanup → safe tag writing → batch rename → report export, all in one pass.
+A Windows local music manager and player: batch metadata processing, and listening too.
 
-Built for local music collectors, **lossless-first**: FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF / SACD ISO are all supported. Only the tag blocks are modified — audio is never re-encoded.
+**Lossless-first, every format** — FLAC / APE / WAV / WV / TTA / ALAC / DSF / DFF / SACD ISO plus MP3 / AAC / OGG / OPUS. Only tag blocks are touched — audio is never re-encoded.
 
-Advanced capabilities:
+**Metadata, end to end** — batch import → online matching (MusicBrainz / iTunes / NetEase Cloud Music / QQ Music) → cover art (Cover Art Archive with remote fallback) and lyrics (LRCLib / NetEase / QQ Music) → tag-watermark cleanup → safe tag writing → batch rename → CSV reports, plus one cover per folder and a library health check.
 
-- **Fake-lossless detection** — spectrum analysis tells whether a "lossless" file is genuine or a disguised MP3 transcode (with dedicated DSD criteria);
-- **One-click cleanup** — suspicious files go to the Recycle Bin or the app's quarantine (recoverable), with a spectrum chart you can verify yourself;
-- **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
+**Fake-lossless detection** — spectrum analysis tells genuine lossless from a disguised MP3 transcode (with dedicated DSD criteria); suspicious files are cleaned in one click, sent to the Recycle Bin or the app's quarantine, recoverable with a spectrum chart for verification.
+
+**Full playback** — queue, play/pause, previous/next, progress, volume and play modes; the playing track is auto-located, highlighted and marked with ▶ in the list; a **31-band graphic equalizer** (curve preview, built-in presets and custom preset saving), signal-path panel, mini player, custom playlists; main-window opacity adjustable 10–100%.
+
+**Output backends** — MME / DirectSound / WASAPI / WDM-KS (ASIO is not available in this build), shared / exclusive / strict-exclusive modes, device list filtered by backend; every backend × mode combination verified by real stream opening. The first run defaults to **shared**; afterwards your last choice is restored, and switching to exclusive warns that system volume no longer applies — use the player-bar volume.
+
+**Look and distribution** — 11 themes, 8 interface languages; shipped as a Windows installer and a portable build.
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.8.0 highlights
+
+**Modernized UI and a 31-band equalizer.**
+
+- **Rebuilt play button**: now a round, glass-styled control; play/pause no longer turns it into a solid blue block.
+- **Modern rounded UI**: the main window and player bar use rounded cards with a subtle glow for a consistent look.
+- **Main-window opacity**: adjustable 10–100, default 95, persisted in `ui_opacity` across restarts.
+- **Player-bar collapse button becomes EQ entry**: the former collapse control is now an EQ button that opens the equalizer in one click.
+- **31-band EQ**: expanded from 10 to 31 bands, with a live curve preview, 8 built-in presets and custom preset saving
+  (`playback_eq_custom_presets`).
+- **Backend device filtering**: the device list is filtered by the selected output backend (MME / DirectSound / WASAPI / WDM-KS) to avoid cross-backend misselection.
+- **Backend × mode real-stream verification**: the capability matrix no longer trusts probe results alone — each combination is graded by whether a real stream actually opens, avoiding probe false positives.
+- **Auto-locate and a "now playing" marker in the list**: switching tracks scrolls the list to the current row, which gets an accent bar, a ▶ marker, accent-coloured title/artist and a light accent tint. Right-click or `Ctrl+Shift+P` re-locates the playing track at any time.
+- **Removal no longer leaves gaps**: deleting one or several tracks re-packs the remaining rows immediately (fixed `beginRemoveRows` without a matching `endRemoveRows`).
+- **Signal path keeps itself current**: it refreshes on track change, device/backend/mode change, volume drag, EQ toggle and settings save, instead of showing the previous track's chain.
+- **Saved settings apply immediately**: output mode, device, backend, volume and EQ take effect on the current playback without waiting for the next track.
+- **First run defaults to shared mode**: exclusive output is no longer the default; afterwards the user's last choice is restored.
+- **Exclusive-mode notice**: every switch to exclusive explains that it bypasses the Windows mixer (system volume slider stops working — use the player-bar volume) and that other apps may go silent, with a one-click "back to shared" button.
+- **Playback parameter fixes** (verified against a real library): software volume is no longer reset by the global DSP bypass (previously saving settings once jumped back to full volume); enabling the integer pipeline together with software volume no longer silences playback (float multiplication on an int16 buffer made the audio callback throw); the "buffer depth" setting is now actually wired to the output layer (it used to be stored but unused); out-of-range values in the config file are clamped to a safe range.
 
 ### V1.7.2 highlights
 

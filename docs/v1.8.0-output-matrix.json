@@ -1,0 +1,168 @@
+{
+  "generated_at": "2026-11-21T22:10:59+08:00",
+  "python": "3.13.14",
+  "platform": "Windows 11",
+  "sample": "D:\\真无损已经修改\\1999 年国语流行畅销金曲\\Dear John.flac",
+  "sample_note": "只读播放；每组至少 3 秒，主动 stop 避免尾部欠载",
+  "play_seconds": 3.2,
+  "rows": [
+    {
+      "backend": "mme",
+      "mode": "shared",
+      "requested_device": "系统默认设备",
+      "play_accepted": true,
+      "device": "MME · Realtek Digital Output (Realtek",
+      "output_mode": "shared",
+      "output_mode_requested": "shared",
+      "exclusive": false,
+      "rate": 44100,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "",
+      "state": "PLAYING",
+      "position_ms": 3157,
+      "elapsed_sec": 3.5
+    },
+    {
+      "backend": "directsound",
+      "mode": "shared",
+      "requested_device": "系统默认设备",
+      "play_accepted": true,
+      "device": "Windows DirectSound · 主声音驱动程序",
+      "output_mode": "shared",
+      "output_mode_requested": "shared",
+      "exclusive": false,
+      "rate": 44100,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "",
+      "state": "PLAYING",
+      "position_ms": 3181,
+      "elapsed_sec": 3.3
+    },
+    {
+      "backend": "wdmks",
+      "mode": "shared",
+      "requested_device": "系统默认设备",
+      "play_accepted": true,
+      "device": "Windows WDM-KS · SPDIF Out (Realtek HDA SPDIF Out)",
+      "output_mode": "shared",
+      "output_mode_requested": "shared",
+      "exclusive": false,
+      "rate": 44100,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "",
+      "state": "PLAYING",
+      "position_ms": 3274,
+      "elapsed_sec": 3.27
+    },
+    {
+      "backend": "wasapi",
+      "mode": "shared",
+      "requested_device": "系统默认设备",
+      "play_accepted": true,
+      "device": "Windows WASAPI · Realtek Digital Output (Realtek(R) Audio)",
+      "output_mode": "shared",
+      "output_mode_requested": "shared",
+      "exclusive": false,
+      "rate": 48000,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "设备不支持 44100 Hz，已回退 48000 Hz（共享）",
+      "state": "PLAYING",
+      "position_ms": 3242,
+      "elapsed_sec": 3.3
+    },
+    {
+      "backend": "wasapi",
+      "mode": "exclusive",
+      "requested_device": "系统默认设备",
+      "play_accepted": true,
+      "device": "Windows WASAPI · Realtek Digital Output (Realtek(R) Audio)",
+      "output_mode": "exclusive",
+      "output_mode_requested": "exclusive",
+      "exclusive": true,
+      "rate": 44100,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "",
+      "state": "PLAYING",
+      "position_ms": 3274,
+      "elapsed_sec": 3.31
+    },
+    {
+      "backend": "wasapi",
+      "mode": "exclusive_strict",
+      "requested_device": "系统默认设备",
+      "play_accepted": true,
+      "device": "Windows WASAPI · Realtek Digital Output (Realtek(R) Audio)",
+      "output_mode": "exclusive",
+      "output_mode_requested": "exclusive_strict",
+      "exclusive": true,
+      "rate": 44100,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "严格独占不可用，已降为宽松独占",
+      "state": "PLAYING",
+      "position_ms": 3274,
+      "elapsed_sec": 3.3
+    },
+    {
+      "backend": "asio",
+      "mode": "-",
+      "requested_device": "（不枚举：后端不存在）",
+      "play_accepted": false,
+      "device": "",
+      "output_mode": "",
+      "output_mode_requested": "-",
+      "exclusive": false,
+      "rate": 0,
+      "underruns": 0,
+      "error": "",
+      "mode_note": "backend_present('asio') == False；本次未开流（官方 PortAudio 构建不含 ASIO）",
+      "state": "N/A",
+      "position_ms": 0,
+      "elapsed_sec": 0.0
+    }
+  ],
+  "controls": {
+    "wdmks_direct_sounddevice_open": [
+      {
+        "index": 28,
+        "name": "Speakers (Realtek HD Audio output)",
+        "open": "FAIL",
+        "error": "Error opening OutputStream: Unanticipated host error [PaErrorCode -9999]: 'Blocking API not supported yet' [Windows WDM-KS error -9999]"
+      },
+      {
+        "index": 29,
+        "name": "SPDIF Out (Realtek HDA SPDIF Out)",
+        "open": "FAIL",
+        "error": "Error opening OutputStream: Unanticipated host error [PaErrorCode -9999]: 'Blocking API not supported yet' [Windows WDM-KS error -9999]"
+      },
+      {
+        "index": 30,
+        "name": "Speakers (Nahimic mirroring Wave Speaker)",
+        "open": "FAIL",
+        "error": "Error opening OutputStream: Unanticipated host error [PaErrorCode -9999]: 'Blocking API not supported yet' [Windows WDM-KS error -9999]"
+      },
+      {
+        "index": 31,
+        "name": "Output (AMD HD Audio DP out #2)",
+        "open": "FAIL",
+        "error": "Error opening OutputStream: Unanticipated host error [PaErrorCode -9999]: 'Blocking API not supported yet' [Windows WDM-KS error -9999]"
+      },
+      {
+        "index": 32,
+        "name": "扬声器 (Strix 7.1)",
+        "open": "FAIL",
+        "error": "Error opening OutputStream: Unanticipated host error [PaErrorCode -9999]: 'Blocking API not supported yet' [Windows WDM-KS error -9999]"
+      }
+    ],
+    "wasapi_strict_capability": {
+      "device": "Realtek Digital Output (Realtek(R) Audio)",
+      "strict_usable": false,
+      "exclusive_usable": true
+    }
+  }
+}
