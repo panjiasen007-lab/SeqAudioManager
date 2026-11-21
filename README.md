@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.7.1-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.7.2-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
@@ -34,6 +34,17 @@ Windows 本地音乐元数据批量处理工具。批量导入 → 联网补全 
 - **每个文件夹一张封面** —— 处理完成后为每个文件夹写入 `cover` 图，专辑封面优先、匹配不到自动用歌手照片兜底（Deezer / 网易云，一个失效自动切换）；
 
 > 授权：**GNU General Public License v3.0**。随包 20 款界面/数据字体均为 SIL OFL 1.1，可自由分发。
+
+### V1.7.2 更新摘要
+
+**迷你播放条整体重做 + 自定义播放列表。**
+
+- **迷你播放条重做**：440×260 圆角卡片、主题色呼吸发光；控制行补齐视图切换、上一曲、播放/暂停、停止、下一曲、模式、播放列表、音量；38 px 圆形播放键不再被染成整块蓝；标题栏有最小化 / 展开主界面 / 关闭三键。
+- **透明度可调**：10–100%，默认 80%，整窗生效并记住设置。
+- **歌词高亮**：三行显示，当前行主题色加粗、上下行变暗；主题与语言切换实时跟随。
+- **自定义播放列表**：工具栏与迷你条均可打开；支持用当前列表保存、覆盖、载入、追加、重命名、删除，以及列表内上移 / 下移 / 移除。数据存 `playlists.json`，原子写入，坏文件自动备份不崩。
+- **重启保留上次列表**：此前会话只恢复引擎队列、不回填表格（队列面板已并入表格），所以界面看着是空的；现在启动时会把上次队列扫回表格。
+- **修复**：迷你条上/下一曲长期灰置（主窗口只同步了主播放条）。
 
 ### V1.7.1 更新摘要
 
@@ -884,6 +895,23 @@ Advanced capabilities:
 - **One cover per folder** — after processing, every folder gets a `cover` image: album art first, artist photo as fallback (Deezer / NetEase Cloud Music / QQ Music, automatic failover);
 
 > License: **GNU General Public License v3.0**. All 20 bundled UI/data fonts are SIL OFL 1.1 and freely redistributable.
+
+### V1.7.2 highlights
+
+**The mini player was rebuilt, and playlists are now first-class.**
+
+- **Rebuilt mini player**: 440×260 rounded card with a theme-coloured breathing glow; controls now include
+  view toggle, previous, play/pause, stop, next, play mode, playlists and volume; the 38 px round play button
+  is no longer painted as a solid blue block; the title bar has minimize / expand / close.
+- **Adjustable opacity**: 10–100%, default 80%, applied to the whole window and remembered.
+- **Lyric highlighting**: three lines, current line bold in the accent colour, neighbours dimmed; theme and
+  language changes follow live.
+- **Custom playlists**: open from the toolbar or the mini player; save the current list, overwrite, load,
+  append, rename, delete, and reorder/remove items. Stored in `playlists.json` with atomic writes; a corrupt
+  file is quarantined instead of crashing the app.
+- **Restore the last playlist**: previously the session restored only the engine queue, not the table (the
+  queue panel had been merged into the table), so the UI looked empty; the table is now repopulated on start.
+- **Fixed**: the mini player's previous/next buttons were permanently disabled (only the main bar was synced).
 
 ### V1.7.1 highlights
 
