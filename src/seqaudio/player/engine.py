@@ -199,12 +199,12 @@ class PlayerEngine:
             ramp_ms=int(getattr(self.settings, "playback_ramp_ms", 5) or 5),
             enabled=True,
         )
-        if bool(getattr(self.settings, "playback_dsp_bypass", True)):
-            # 全局直通：音量与 EQ 都不参与，只保留切歌斜坡（防爆音，不是调音）
-            self._dsp.set_gain_db(0.0)
-            self._dsp.set_eq_enabled(False)
         if str(getattr(self.settings, "playback_volume_mode", "bypass")) != "software":
             self._dsp.set_gain_db(0.0)
+        if bool(getattr(self.settings, "playback_dsp_bypass", True)):
+            # 全局直通：只旁路 EQ/调音，**不动软件音量**（音量由 volume_mode
+            # 单独裁决，见 set_bypass 的说明）。切歌斜坡保留，防爆音。
+            self._dsp.set_eq_enabled(False)
 
         self._signal = SignalPath.blank()
         self._volume_db = float(getattr(self.settings, "playback_volume_db", 0.0) or 0.0)
@@ -523,13 +523,21 @@ class PlayerEngine:
     def set_bypass(self, on: bool) -> None:
         """全局 DSP 直通开关（``on=True`` 表示直通）。
 
-        注意：直通只关「音量 + EQ」，**不关切歌斜坡**。斜坡是防爆音的播放
-        卫生措施（5 ms 线性淡出），不是调音；把它一起关掉会让每次切歌都
-        在波形硬切处「啪」一声 —— 那不叫"更直通"，那叫更差。
+        两点容易搞混，这里定死：
+
+        * 直通只关「EQ / 调音模块」，**不关软件音量**。音量是不是参与，只由
+          ``playback_volume_mode`` 决定 —— 用户在播放条上把滑块拖离 0 dB，
+          界面就把模式切成 ``software``，那是一个明确意图，不该被一次
+          「保存设置」（会重放本方法）悄悄清零，否则表现就是「调好的音量
+          一保存就变回满音量」。
+        * 直通也不关切歌斜坡。斜坡防爆音，是播放卫生措施，不是调音。
         """
         if on:
-            self._dsp.set_gain_db(0.0)
             self._dsp.set_eq_enabled(False)
+            if str(getattr(self.settings, "playback_volume_mode", "bypass")) == "software":
+                self._dsp.set_gain_db(self._volume_db)
+            else:
+                self._dsp.set_gain_db(0.0)
         else:
             self._apply_settings_to_dsp()
         self._refresh_signal()
@@ -542,7 +550,7 @@ class PlayerEngine:
         self._refresh_signal()
 
     def set_eq_gains(self, gains: Sequence[float]) -> None:
-        """更新 10 段增益（GUI 线程；系数与频响在这里算好）。"""
+        """更新各段增益（GUI 线程；系数与频响在这里算好）。"""
         self._dsp.set_eq_gains(gains)
         self._refresh_signal()
 
@@ -764,14 +772,14 @@ class PlayerEngine:
 
     def _apply_settings_to_dsp(self) -> None:
         settings = self.settings
-        if bool(getattr(settings, "playback_dsp_bypass", True)):
-            self._dsp.set_gain_db(0.0)
-            self._dsp.set_eq_enabled(False)
-            return
+        # 音量先按 volume_mode 定位（与 bypass 无关，理由见 set_bypass）
         if str(getattr(settings, "playback_volume_mode", "bypass")) == "software":
             self._dsp.set_gain_db(self._volume_db)
         else:
             self._dsp.set_gain_db(0.0)
+        if bool(getattr(settings, "playback_dsp_bypass", True)):
+            self._dsp.set_eq_enabled(False)
+            return
         self._dsp.set_eq_enabled(bool(getattr(settings, "playback_eq_enabled", False)))
         gains = getattr(settings, "playback_eq_gains", None)
         if gains:
@@ -1028,6 +1036,10 @@ class PlayerEngine:
             mode=mode,
             blocksize=self._block_frames,
             hook=hook,
+            # 「缓冲深度」真正接到 PortAudio：这是 latency 建议值（秒），
+            # PortAudio 会取本设备最接近的可用深度。以前这个设置只存不用，
+            # 用户调了毫无效果。40 ms 是产品定稿的下限（再浅必然欠载）。
+            latency=max(40, int(getattr(settings, "playback_buffer_ms", 80) or 80)) / 1000.0,
         )
 
     def _hook(self, outdata: Any, filled: int) -> None:

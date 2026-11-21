@@ -610,10 +610,11 @@ class TestFoundation(unittest.TestCase):
         "playback_buffer_ms": 80,
         "playback_dsp_bypass": True,
         "playback_eq_enabled": False,
-        "playback_eq_gains": [0.0] * 10,
+        "playback_eq_gains": [0.0] * 31,
         "playback_eq_preset": "flat",
-        "playback_eq_snapshot_a": [0.0] * 10,
-        "playback_eq_snapshot_b": [0.0] * 10,
+        "playback_eq_snapshot_a": [0.0] * 31,
+        "playback_eq_snapshot_b": [0.0] * 31,
+        "playback_eq_custom_presets": {},
         "playback_gapless": True,
         "playback_crossfade_sec": 0.0,
         "playback_ramp_ms": 5,
@@ -643,7 +644,8 @@ class TestFoundation(unittest.TestCase):
         playback = [f.name for f in dataclasses.fields(Settings) if f.name.startswith("playback_")]
         library = [f.name for f in dataclasses.fields(Settings) if f.name.startswith("library_")]
         # 32（v1.6）+ 5（v1.7 独占）+ 1（v1.7.2 迷你条透明度）
-        self.assertEqual(len(playback), 38, f"playback_* 应为 38 个，实际 {len(playback)}")
+        # + 1（v1.8 EQ 自定义预设 playback_eq_custom_presets）
+        self.assertEqual(len(playback), 39, f"playback_* 应为 39 个，实际 {len(playback)}")
         self.assertEqual(len(library), 3, f"library_* 应为 3 个，实际 {len(library)}")
         # 可变默认值必须是独立对象（否则两个实例会共享同一个 list）
         self.assertIsNot(Settings().playback_eq_gains, Settings().playback_eq_gains)
@@ -667,6 +669,48 @@ class TestFoundation(unittest.TestCase):
             self.assertEqual(settings.library_roots, [])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_legacy_ten_band_eq_is_padded_on_load(self) -> None:
+        """回归：老 10 段 EQ 配置读回后必须补零到 31 段。"""
+        from seqaudio.core.config import Settings
+
+        legacy = Settings.from_dict(
+            {
+                "playback_eq_gains": [1.0] * 10,
+                "playback_eq_snapshot_a": [2.0] * 10,
+                "playback_eq_snapshot_b": [3.0] * 10,
+            }
+        )
+        self.assertEqual(len(legacy.playback_eq_gains), 31)
+        self.assertEqual(legacy.playback_eq_gains[:10], [1.0] * 10)
+        self.assertEqual(legacy.playback_eq_gains[10:], [0.0] * 21)
+        self.assertEqual(legacy.playback_eq_snapshot_a[10:], [0.0] * 21)
+        self.assertEqual(legacy.playback_eq_snapshot_b[:10], [3.0] * 10)
+
+    def test_eq_band_count_matches_dsp_table(self) -> None:
+        """配置层的段数常量必须与 DSP 频点表等长（core 不 import player，靠测试守）。"""
+        from seqaudio.core.config import Settings
+        from seqaudio.player.constants import EQ_BANDS_HZ
+
+        self.assertEqual(Settings.EQ_BAND_COUNT, len(EQ_BANDS_HZ))
+        self.assertEqual(len(Settings().playback_eq_gains), len(EQ_BANDS_HZ))
+
+    def test_eq_gains_truncated_when_too_long(self) -> None:
+        from seqaudio.core.config import Settings
+
+        settings = Settings.from_dict({"playback_eq_gains": [0.5] * 40})
+        self.assertEqual(len(settings.playback_eq_gains), Settings.EQ_BAND_COUNT)
+        self.assertTrue(all(value == 0.5 for value in settings.playback_eq_gains))
+
+    def test_eq_gains_reject_garbage_values(self) -> None:
+        """坏值（字符串/None）不能抛，按 0 dB 处理。"""
+        from seqaudio.core.config import Settings
+
+        settings = Settings.from_dict(
+            {"playback_eq_gains": ["x", None, 3.0] + [0.0] * 17}
+        )
+        self.assertEqual(len(settings.playback_eq_gains), 31)
+        self.assertEqual(settings.playback_eq_gains[:3], [0.0, 0.0, 3.0])
 
     def test_session_path(self) -> None:
         from seqaudio.core import paths
@@ -715,11 +759,11 @@ class TestFoundation(unittest.TestCase):
     def test_package_versions_agree(self) -> None:
         import seqaudio
 
-        self.assertEqual(seqaudio.__version__, "1.7.2")
+        self.assertEqual(seqaudio.__version__, "1.8.0")
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.7.2"', pyproject)
+        self.assertIn('version = "1.8.0"', pyproject)
         meta = (ROOT / "installer" / "_meta.py").read_text(encoding="utf-8")
-        self.assertIn('VERSION = "1.7.2"', meta)
+        self.assertIn('VERSION = "1.8.0"', meta)
 
     def test_t03_exports_resolve(self) -> None:
         """T03 落地后，包出口的惰性名字必须都能取到（且仍然不碰 Qt）。"""

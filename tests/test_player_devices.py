@@ -801,8 +801,12 @@ class TestNoOptionMessage(unittest.TestCase):
     """TC-EX-13：失败归因必须列出全部维度（采样率 + 声道 + 模式）。"""
 
     def test_message_includes_channels_and_downmix_hint(self) -> None:
+        # 设备只有 2 声道、源是 6 声道 → 「源比设备多」，「下混 2.0」才是有效下一步。
+        # 别把这台的 channels 写成 8：那会变成「设备要的比源还多」，方向相反，
+        # 正确归因是换后端/换设备（见 test_output_backend_filter 的
+        # TestMultichannelDeviceDiagnosis），下混到 2 声道反而更开不了。
         device = dev_mod.DeviceInfo(
-            index=0, name="fake 5.1", channels=8, default_samplerate=48000.0,
+            index=0, name="fake stereo", channels=2, default_samplerate=48000.0,
             hostapi_index=2, hostapi_name="Windows WASAPI",
         )
         with self.assertRaises(dev_mod.RateUnsupportedError) as ctx:
@@ -836,9 +840,11 @@ class TestSettingsMigration(unittest.TestCase):
 
     def test_old_config_without_keys(self) -> None:
         settings = Settings.from_dict({"language": "en"})
-        # Q9 拍板：默认改成「宽松独占」（44.1k 不再被系统混音到 48k），
-        # 配套首次启动说明 + 一键改回共享（notice_shown 初始必须为 False）
-        self.assertEqual(settings.playback_output_mode, "exclusive")
+        # v1.8 需求 4 推翻了 v1.7 的 Q9 决定：**首次打开默认共享**。
+        # 理由：独占会绕开 Windows 混音器，系统音量失效、其它程序没声音，
+        # 不该让用户在还不了解代价时就被推上去。显式选过独占的老配置
+        # 仍会被保留（见 test_old_config_with_exclusive_true）。
+        self.assertEqual(settings.playback_output_mode, "shared")
         self.assertFalse(settings.playback_exclusive_notice_shown)
         self.assertEqual(settings.playback_exclusive_fallback, "auto")
         self.assertIs(settings.playback_release_on_pause, True, "Q3 定稿：默认暂停即释放")

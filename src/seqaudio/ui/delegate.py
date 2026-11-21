@@ -9,8 +9,8 @@ QSS 只能改文字/背景色，做不出「药丸形底 + 圆角 + 内边距」
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -33,6 +33,10 @@ COL_KIND = 8
 COL_CONFIDENCE = 9
 COL_AUTHENTICITY = 10
 MONO_COLUMNS = {COL_YEAR, COL_FORMAT, COL_SPEC, COL_DURATION, COL_KIND, COL_CONFIDENCE}
+
+#: 与 track_model.TrackTableModel.PlayingRole 保持一致（此处重复声明是为了
+#: 让 delegate 不反向依赖 model 模块，避免循环导入）
+PLAYING_ROLE = Qt.UserRole + 1
 
 
 def _mono_font(pixel_size: int = 12) -> QFont:
@@ -59,14 +63,43 @@ class TrackDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         selected = bool(option.state & QStyle.State_Selected)
+        playing = bool(index.data(PLAYING_ROLE))
+
+        # 正在播放：整行铺一层极淡的强调色，配合左侧竖条与 ▶ 一眼可辨
+        if playing:
+            tint = QColor(theme.ACCENT)
+            tint.setAlpha(22)
+            painter.fillRect(option.rect, tint)
+            # 播放行底色叠加后，QSS 已画好的选中/交替行文字色仍可用，不必重绘背景
 
         if index.column() == COL_STATUS:
-            self._paint_status_pill(painter, option.rect, text)
+            self._paint_status_pill(painter, option.rect, text, playing)
         else:
-            self._paint_text(painter, option, text, index.column(), selected)
+            self._paint_text(painter, option, text, index.column(), selected, playing)
 
-        # 选中行左侧高亮条：比整行反白更克制，也更像"当前聚焦项"
-        if selected and index.column() == 0:
+        if playing and index.column() == 0:
+            # 播放行标记：3px 强调竖条 + 实心 ▶
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(theme.ACCENT))
+            painter.drawRoundedRect(
+                QRectF(option.rect.left() + 2, option.rect.top() + 4, 3.0,
+                       option.rect.height() - 8),
+                1.5,
+                1.5,
+            )
+            cx = option.rect.left() + 15
+            cy = option.rect.center().y() + 1
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(cx - 4, cy - 5),
+                        QPointF(cx - 4, cy + 5),
+                        QPointF(cx + 4, cy),
+                    ]
+                )
+            )
+        elif selected and index.column() == 0:
+            # 选中行左侧高亮条：比整行反白更克制，也更像"当前聚焦项"
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(theme.ACCENT))
             painter.drawRoundedRect(
@@ -79,7 +112,9 @@ class TrackDelegate(QStyledItemDelegate):
 
     # ------------------------------------------------------------ 内部
 
-    def _paint_status_pill(self, painter: QPainter, rect, text: str) -> None:
+    def _paint_status_pill(
+        self, painter: QPainter, rect, text: str, playing: bool = False
+    ) -> None:
         if not text:
             return
         fg_hex, bg_css = theme.STATUS_COLORS.get(text, (theme.FG_DIM, "rgba(139,149,168,0.12)"))
@@ -91,11 +126,13 @@ class TrackDelegate(QStyledItemDelegate):
         metrics = painter.fontMetrics()
 
         text_w = metrics.horizontalAdvance(text)
-        pill_w = min(text_w + 16, rect.width() - 8)
+        # 播放行左侧要留给 ▶，状态胶囊整体右移
+        left = rect.left() + (24 if playing else 6)
+        pill_w = min(text_w + 16, rect.width() - (left - rect.left()) - 4)
         pill_h = min(20, rect.height() - 8)
-        x = rect.left() + 6
+        x = left
         y = rect.top() + (rect.height() - pill_h) / 2
-        pill_rect = QRectF(x, y, pill_w, pill_h)
+        pill_rect = QRectF(x, y, max(pill_w, 24), pill_h)
 
         bg = QColor(fg_hex)
         bg.setAlpha(30)
@@ -116,6 +153,7 @@ class TrackDelegate(QStyledItemDelegate):
         text: str,
         column: int,
         selected: bool,
+        playing: bool = False,
     ) -> None:
         if not text:
             return
@@ -157,6 +195,10 @@ class TrackDelegate(QStyledItemDelegate):
             color = QColor(theme.FG)
         if column == COL_ARTIST and not selected:
             color = QColor(theme.FG_DIM)
+
+        # 播放行：歌名与歌手统一用强调色，扫一眼就知道在放哪首
+        if playing and column in (COL_TITLE, COL_ARTIST):
+            color = QColor(theme.ACCENT)
 
         painter.setPen(color)
         align = Qt.AlignVCenter | (

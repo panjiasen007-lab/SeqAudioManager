@@ -25,7 +25,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractSlider,
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import i18n, theme
+from .glyphs import draw_glyph as _draw_glyph
 from .player_bar import VOLUME_SCALE, format_mmss
 
 MINI_WIDTH = 440
@@ -58,107 +59,6 @@ _MODE_ICON = {
     "repeat_one": "mode_one",
     "repeat_all": "mode_all",
 }
-
-
-# ---------------------------------------------------------------- 矢量图标
-
-def _draw_glyph(painter: QPainter, key: str, rect: QRectF, color: QColor) -> None:
-    """在 ``rect`` 里画一个矢量图标（不依赖任何字体）。"""
-    painter.save()
-    painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    painter.setBrush(Qt.NoBrush)
-    x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
-
-    def tri(points: list[tuple[float, float]]) -> None:
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        painter.drawPolygon(QPolygonF([QPointF(x + px * w, y + py * h) for px, py in points]))
-        painter.setBrush(Qt.NoBrush)
-
-    if key == "play":
-        tri([(0.18, 0.04), (0.18, 0.96), (0.94, 0.5)])
-    elif key == "pause":
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        painter.drawRoundedRect(QRectF(x + 0.16 * w, y + 0.06 * h, 0.24 * w, 0.88 * h), 1.4, 1.4)
-        painter.drawRoundedRect(QRectF(x + 0.60 * w, y + 0.06 * h, 0.24 * w, 0.88 * h), 1.4, 1.4)
-        painter.setBrush(Qt.NoBrush)
-    elif key == "stop":
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        painter.drawRoundedRect(QRectF(x + 0.16 * w, y + 0.16 * h, 0.68 * w, 0.68 * h), 2.2, 2.2)
-        painter.setBrush(Qt.NoBrush)
-    elif key == "prev":
-        tri([(0.62, 0.06), (0.62, 0.94), (0.12, 0.5)])
-        painter.setPen(QPen(color, 2.0, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(x + 0.80 * w, y + 0.08 * h), QPointF(x + 0.80 * w, y + 0.92 * h))
-    elif key == "next":
-        tri([(0.38, 0.06), (0.38, 0.94), (0.88, 0.5)])
-        painter.setPen(QPen(color, 2.0, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(x + 0.20 * w, y + 0.08 * h), QPointF(x + 0.20 * w, y + 0.92 * h))
-    elif key == "view":
-        # 展开到主界面：两条对角箭头
-        painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(x + 0.18 * w, y + 0.82 * h), QPointF(x + 0.82 * w, y + 0.18 * h))
-        tri([(0.58, 0.10), (0.92, 0.10), (0.92, 0.44)])
-        painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(x + 0.82 * w, y + 0.18 * h), QPointF(x + 0.18 * w, y + 0.82 * h))
-        tri([(0.42, 0.90), (0.08, 0.90), (0.08, 0.56)])
-    elif key == "list":
-        # 播放列表：三条「项目 + 文本」的简图
-        painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.RoundCap))
-        for offset in (0.18, 0.5, 0.82):
-            cy = y + offset * h
-            painter.drawPoint(QPointF(x + 0.12 * w, cy))
-            painter.drawLine(QPointF(x + 0.30 * w, cy), QPointF(x + 0.90 * w, cy))
-    elif key == "mode_seq":
-        painter.drawLine(QPointF(x + 0.08 * w, y + 0.5 * h), QPointF(x + 0.86 * w, y + 0.5 * h))
-        tri([(0.62, 0.22), (0.94, 0.5), (0.62, 0.78)])
-    elif key == "mode_shuffle":
-        painter.drawLine(QPointF(x + 0.08 * w, y + 0.18 * h), QPointF(x + 0.86 * w, y + 0.82 * h))
-        painter.drawLine(QPointF(x + 0.08 * w, y + 0.82 * h), QPointF(x + 0.86 * w, y + 0.18 * h))
-        tri([(0.62, 0.10), (0.94, 0.10), (0.94, 0.42)])
-        tri([(0.94, 0.58), (0.94, 0.90), (0.62, 0.90)])
-    elif key in ("mode_one", "mode_all"):
-        painter.drawArc(QRectF(x + 0.12 * w, y + 0.12 * h, 0.76 * w, 0.76 * h), 40 * 16, 285 * 16)
-        tri([(0.62, 0.02), (0.98, 0.12), (0.72, 0.42)])
-        if key == "mode_one":
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawEllipse(QPointF(x + 0.5 * w, y + 0.5 * h), w * 0.09, h * 0.09)
-            painter.setBrush(Qt.NoBrush)
-    elif key in ("volume", "mute"):
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        painter.drawPolygon(
-            QPolygonF(
-                [
-                    QPointF(x + 0.06 * w, y + 0.34 * h),
-                    QPointF(x + 0.28 * w, y + 0.34 * h),
-                    QPointF(x + 0.52 * w, y + 0.12 * h),
-                    QPointF(x + 0.52 * w, y + 0.88 * h),
-                    QPointF(x + 0.28 * w, y + 0.66 * h),
-                    QPointF(x + 0.06 * w, y + 0.66 * h),
-                ]
-            )
-        )
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(color, 1.4, Qt.SolidLine, Qt.RoundCap))
-        if key == "volume":
-            painter.drawArc(QRectF(x + 0.40 * w, y + 0.24 * h, 0.34 * w, 0.52 * h), -60 * 16, 120 * 16)
-            painter.drawArc(QRectF(x + 0.34 * w, y + 0.12 * h, 0.56 * w, 0.76 * h), -60 * 16, 120 * 16)
-        else:
-            painter.drawLine(QPointF(x + 0.62 * w, y + 0.34 * h), QPointF(x + 0.90 * w, y + 0.66 * h))
-            painter.drawLine(QPointF(x + 0.90 * w, y + 0.34 * h), QPointF(x + 0.62 * w, y + 0.66 * h))
-    elif key == "min":
-        painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(x + 0.12 * w, y + 0.5 * h), QPointF(x + 0.88 * w, y + 0.5 * h))
-    elif key == "max":
-        painter.drawRoundedRect(QRectF(x + 0.14 * w, y + 0.14 * h, 0.72 * w, 0.72 * h), 1.0, 1.0)
-    elif key == "close":
-        painter.drawLine(QPointF(x + 0.16 * w, y + 0.16 * h), QPointF(x + 0.84 * w, y + 0.84 * h))
-        painter.drawLine(QPointF(x + 0.84 * w, y + 0.16 * h), QPointF(x + 0.16 * w, y + 0.84 * h))
-    painter.restore()
 
 
 class _IconButton(QAbstractButton):

@@ -571,12 +571,24 @@ class PlayerBridge(QObject):
 
     # ---- 设备与快照 ----
 
-    def list_output_devices(self) -> list[dict[str, Any]]:
-        """可用输出设备（``ui/settings_panel`` 不 import player，只能经由这里）。"""
+    def list_output_devices(
+        self, backend: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """可用输出设备（``ui/settings_panel`` 不 import player，只能经由这里）。
+
+        Args:
+            backend: 后端键（``wasapi`` / ``mme`` / …）。非空时只枚举该
+                hostapi 下的设备；``None`` 保持旧行为（全平台设备），
+                兼容既有调用方与测试。
+        """
         def _run() -> list[dict[str, Any]]:
             from ..player.devices import list_output_devices
 
-            return [device.to_dict() for device in list_output_devices()]
+            # backend 是本方法的局部参数，闭包按引用捕获后不会再被改写。
+            return [
+                device.to_dict()
+                for device in list_output_devices(backend)
+            ]
 
         return list(self._safe("枚举输出设备", _run, []) or [])
 

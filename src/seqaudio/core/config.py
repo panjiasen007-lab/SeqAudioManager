@@ -10,12 +10,32 @@ import json
 import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from . import paths
 from .model import ConflictMode, LyricsMode
 from .rename import DEFAULT_TEMPLATE
 from .watermark import DEFAULT_SEGMENT_PATTERNS, DEFAULT_STRONG_PATTERNS
+
+
+def _clamp_int(value: Any, low: int, high: int, fallback: int) -> int:
+    """整数钳制：非法类型/数值回落到默认值，越界折到边界。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(low, min(high, number))
+
+
+def _clamp_float(value: Any, low: float, high: float, fallback: float) -> float:
+    """浮点钳制：``nan``/``inf`` 也当作非法（它们会让 DSP 增益算出 nan）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if number != number or number in (float("inf"), float("-inf")):  # nan / inf
+        return fallback
+    return max(low, min(high, number))
 
 
 @dataclass
@@ -97,6 +117,9 @@ class Settings:
     # 关闭主窗口的行为：tray=收缩到托盘（音乐继续播，默认）/ quit=完整退出。
     # 老 config.json 没有这个键时走 dataclass 默认值，不需要迁移脚本。
     ui_close_action: str = "tray"
+    #: 主界面整窗不透明度（10–100，100 = 完全不透明，默认 95）。
+    #: 由品牌条右侧滑杆驱动，松手即落盘；旧配置没有该键时走默认值。
+    ui_opacity: int = 95
 
     # ---- 文件夹封面 ----
     ensure_folder_cover: bool = True       # 处理完成后每个文件夹至少一张 cover（专辑封面→歌手照片）
@@ -125,7 +148,7 @@ class Settings:
     # `OutputMode` 的一致性由测试守护。
     # Q9 拍板：默认走**宽松独占**（44.1k 不再被系统混音到 48k）。
     # 三条缓解配套：首次启动弹一次说明、弹窗内可一键改回共享、面板显式标注当前模式。
-    playback_output_mode: str = "exclusive"        # shared / exclusive / exclusive_strict
+    playback_output_mode: str = "shared"           # shared / exclusive / exclusive_strict（首次默认共享）
     playback_exclusive_fallback: str = "auto"      # auto / ask / never（回退策略，auto 也必留痕）
     playback_release_on_pause: bool = True         # 暂停即释放设备（Q3 定稿：默认释放）
     playback_strict_require_int: bool = True       # 严格独占强制整数通路（Q6/DSP 全旁路）
@@ -140,10 +163,13 @@ class Settings:
     playback_buffer_ms: int = 80                   # 目标缓冲深度（40 为下限）
     playback_dsp_bypass: bool = True               # 全局直通
     playback_eq_enabled: bool = False              # EQ 模块启用（与 bypass 互斥）
-    playback_eq_gains: list[float] = field(default_factory=lambda: [0.0] * 10)      # 10 段增益 dB
+    playback_eq_gains: list[float] = field(default_factory=lambda: [0.0] * 31)      # 31 段增益 dB（1/3 倍频程）
     playback_eq_preset: str = "flat"               # flat/custom/A/B
-    playback_eq_snapshot_a: list[float] = field(default_factory=lambda: [0.0] * 10)  # A/B 快照 A
-    playback_eq_snapshot_b: list[float] = field(default_factory=lambda: [0.0] * 10)  # A/B 快照 B
+    playback_eq_snapshot_a: list[float] = field(default_factory=lambda: [0.0] * 31)  # A/B 快照 A
+    playback_eq_snapshot_b: list[float] = field(default_factory=lambda: [0.0] * 31)  # A/B 快照 B
+    #: 用户自定义 EQ 预设：``名称 -> 31 个 dB 值``。
+    #: 旧配置没有该字段也不会崩：``Settings.load`` 只接受 dataclass 已知字段。
+    playback_eq_custom_presets: dict[str, list[float]] = field(default_factory=dict)
     playback_gapless: bool = True                  # 同规格无缝续写
     playback_crossfade_sec: float = 0.0            # 交叉淡变秒数（0=关，1–10 s，与无缝互斥）
     playback_ramp_ms: int = 5                      # 切歌/暂停/seek 斜坡（1–5 ms）
@@ -192,6 +218,16 @@ class Settings:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    #: EQ 曲线字段（长度必须等于段数；31 段 1/3 倍频程）
+    EQ_GAIN_FIELDS: ClassVar[tuple[str, ...]] = (
+        "playback_eq_gains",
+        "playback_eq_snapshot_a",
+        "playback_eq_snapshot_b",
+    )
+    #: EQ 段数。这里不 import player.constants（core 不认识 player），
+    #: 与 `EQ_BANDS_HZ` 的长度一致性由测试守护。
+    EQ_BAND_COUNT: ClassVar[int] = 31
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
         known = {f.name for f in fields(cls)}
@@ -203,7 +239,64 @@ class Settings:
         # 布尔为真而模式仍是默认值时，视为「宽松独占」，否则升级后用户的独占设置会凭空丢失。
         if instance.playback_exclusive and instance.playback_output_mode == "shared":
             instance.playback_output_mode = "exclusive"
+        # EQ 迁移：老配置里的 10/20 段值一律补零到当前的 31 段（1/3 倍频程）。
+        # 频点整体替换后旧曲线的形状会变（这是用户主动升级的预期），但至少长度
+        # 与「31 段」契约自洽，且面板/DSP 不会因长度不符而崩。
+        for name in cls.EQ_GAIN_FIELDS:
+            setattr(instance, name, cls._normalize_eq_gains(getattr(instance, name, None)))
+        # 播放参数范围钳制：界面滑块本身不会越界，但配置文件会被手改、也会被
+        # 旧版本/别的机器带过来。这些值直接决定音频链路（缓冲深度过低必然欠载、
+        # DSD 目标率非法会让解码器起不来），必须在进入引擎前收敛。
+        instance._normalize_playback()
+        # 输出模式迁移：老版本默认独占用完会写 "exclusive"；这里保留用户的显式
+        # 选择，但对**没有** playback_output_mode 键的全新/老配置维持默认 shared。
+        # （dataclass 默认值已是 shared，无需额外动作；显式 exclusive 不覆盖。）
         return instance
+
+    @classmethod
+    def _normalize_eq_gains(cls, values: Any) -> list[float]:
+        """把任意输入折成恰好 ``EQ_BAND_COUNT`` 个浮点（超出截断、不足补零）。"""
+        result: list[float] = []
+        for raw in list(values or [])[: cls.EQ_BAND_COUNT]:
+            try:
+                result.append(float(raw))
+            except (TypeError, ValueError):
+                result.append(0.0)
+        while len(result) < cls.EQ_BAND_COUNT:
+            result.append(0.0)
+        return result
+
+    #: DSD→PCM 允许的目标采样率（与面板下拉一致）
+    DSD_PCM_RATES: ClassVar[tuple[int, ...]] = (88200, 176400, 352800)
+
+    def _normalize_playback(self) -> None:
+        """把播放参数折进安全区间（原地修改）。
+
+        这些字段直接喂给 PortAudio / FFmpeg，越界值不是"显示不对"而是
+        "没声音"或"爆音"，所以只能在这里拦，不能指望调用方各自校验。
+        """
+        self.playback_buffer_ms = _clamp_int(self.playback_buffer_ms, 40, 500, 80)
+        self.playback_block_frames = _clamp_int(self.playback_block_frames, 128, 8192, 1024)
+        self.playback_ramp_ms = _clamp_int(self.playback_ramp_ms, 1, 5, 5)
+        self.playback_volume_db = _clamp_float(self.playback_volume_db, -60.0, 12.0, 0.0)
+        self.playback_crossfade_sec = _clamp_float(
+            self.playback_crossfade_sec, 0.0, 10.0, 0.0
+        )
+        self.playback_dsd_pcm_rate = _clamp_int(
+            self.playback_dsd_pcm_rate, 0, 10**9, 176400
+        )
+        if self.playback_dsd_pcm_rate not in self.DSD_PCM_RATES:
+            self.playback_dsd_pcm_rate = 176400
+        if str(self.playback_volume_mode) not in ("bypass", "software"):
+            self.playback_volume_mode = "bypass"
+        if str(self.playback_output_mode) not in ("shared", "exclusive", "exclusive_strict"):
+            self.playback_output_mode = "shared"
+        if str(self.playback_mode) not in (
+            "sequential", "shuffle", "repeat_one", "repeat_all"
+        ):
+            self.playback_mode = "sequential"
+        # 采样率跟随与位完美都关掉时，重采样目标就是输出设备的率（由设备决定），
+        # 这里没有可钳制的字段；列出了是为了说明"为什么别的字段没写在这里"。
 
     def save(self, path: Optional[Path] = None) -> None:
         target = path or paths.config_path()

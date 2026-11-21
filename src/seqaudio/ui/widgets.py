@@ -27,11 +27,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
 
 from . import i18n, theme
+
+#: 界面不透明度（整窗）范围与默认值，与 ``Settings.ui_opacity`` 一致
+UI_OPACITY_MIN = 10
+UI_OPACITY_MAX = 100
+UI_OPACITY_DEFAULT = 95
 
 
 def app_icon_path() -> Path | None:
@@ -173,7 +179,15 @@ class LogoMark(QWidget):
 
 
 class BrandBar(QFrame):
-    """顶部品牌条：标识 + 名称 + 版本 + 右侧状态胶囊 + 底部渐变细线。"""
+    """顶部品牌条：标识 + 名称 + 版本 + 右侧状态胶囊 + 界面不透明度 + 底部渐变细线。
+
+    Signals:
+        opacityChanged(int): 滑杆拖动中实时发出（10–100），主窗口立即改整窗透明度。
+        opacityReleased(int): 松手时发出，主窗口据此落盘（拖动过程中不写文件）。
+    """
+
+    opacityChanged = Signal(int)
+    opacityReleased = Signal(int)
 
     def __init__(self, version: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -212,6 +226,65 @@ class BrandBar(QFrame):
         self.status_pill = Pill("就绪", theme.FG_DIM)
         layout.addWidget(self.status_pill)
 
+        # 界面不透明度：小标签 + 滑杆 + 百分比。沿用迷你条的同款交互（拖即时生效，
+        # 松手才落盘），高度不加 —— 品牌条仍是固定 56 px。
+        layout.addSpacing(10)
+        self.opacity_label = QLabel(i18n.tr_text("界面不透明度"))
+        self.opacity_label.setObjectName("hint")
+        layout.addWidget(self.opacity_label)
+
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setObjectName("uiOpacity")
+        self.opacity_slider.setRange(UI_OPACITY_MIN, UI_OPACITY_MAX)
+        self.opacity_slider.setValue(UI_OPACITY_DEFAULT)
+        self.opacity_slider.setFixedWidth(96)
+        self.opacity_slider.setCursor(Qt.PointingHandCursor)
+        self.opacity_slider.setToolTip(
+            i18n.tr_text("界面不透明度（10–100%，默认 95%）")
+        )
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self.opacity_slider.sliderReleased.connect(self._on_opacity_released)
+        layout.addWidget(self.opacity_slider)
+
+        self.opacity_value = QLabel(f"{UI_OPACITY_DEFAULT}%")
+        self.opacity_value.setObjectName("hint")
+        self.opacity_value.setFont(mono_font(11))
+        self.opacity_value.setFixedWidth(38)
+        self.opacity_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self.opacity_value)
+
+    # ------------------------------------------------------------ 不透明度
+
+    def set_opacity(self, value: int) -> None:
+        """同步滑杆与百分比标签（**不发信号**，避免回环把主窗口的写入再触发一遍）。
+
+        注意 ``0`` 是合法输入而不是「没传值」：这里只把 ``None`` 当缺省，
+        非 ``None`` 一律夹紧到 10–100（``0 or 95`` 的写法会把 0 悄悄变成 95）。
+        """
+        raw = UI_OPACITY_DEFAULT if value is None else value
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            number = UI_OPACITY_DEFAULT
+        clamped = max(UI_OPACITY_MIN, min(UI_OPACITY_MAX, number))
+        blocked = self.opacity_slider.blockSignals(True)
+        try:
+            self.opacity_slider.setValue(clamped)
+        finally:
+            self.opacity_slider.blockSignals(blocked)
+        self.opacity_value.setText(f"{clamped}%")
+
+    def opacity(self) -> int:
+        """当前滑杆值（10–100）。"""
+        return int(self.opacity_slider.value())
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self.opacity_value.setText(f"{int(value)}%")
+        self.opacityChanged.emit(int(value))
+
+    def _on_opacity_released(self) -> None:
+        self.opacityReleased.emit(int(self.opacity_slider.value()))
+
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
         painter = QPainter(self)
@@ -233,9 +306,10 @@ class BrandBar(QFrame):
         painter.drawEllipse(QRectF(-110, -140, 430, 330))
 
         # 右侧极淡波形线：音频工具的视觉符号，不遮挡文字
+        # 右端收在「界面不透明度」控件之前（v1.8 新增），避免压到滑杆标签上
         wave = QPainterPath()
-        left = max(self.width() - 460, 360)
-        right = self.width() - 150
+        left = max(self.width() - 640, 360)
+        right = max(left + 80, self.width() - 300)
         mid = self.height() / 2 - 4
         samples = 90
         for index in range(samples + 1):

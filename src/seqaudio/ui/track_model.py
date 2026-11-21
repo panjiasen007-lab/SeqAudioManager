@@ -50,14 +50,21 @@ STATUS_COLORS = {
 
 
 class TrackTableModel(QAbstractTableModel):
+    #: 自定义角色：该行是否为「正在播放」（delegate 用它画左侧播放条与 ▶ 标记）
+    PlayingRole = Qt.UserRole + 1
+
     def __init__(self, tracks: Optional[list[Track]] = None, parent=None):
         super().__init__(parent)
-        self._tracks: list[Track] = tracks or []
+        self._tracks: list[Track] = list(tracks) if tracks else []
         self._row_of: dict[int, int] = self._build_index()
         # 当前正在播放的曲目（path + CUE 轨号联合标识）。v1.6 队列并入列表后，
         # 表格就是播放队列，用整行加粗标记"正在播哪首"——不污染文本、不抢选择焦点。
         self._playing_path = ""
         self._playing_cue_seq = -1
+        self._playing_track_ref = None
+        # 播放行行号缓存：delegate 每列都会问 PlayingRole，逐次 O(n) 扫描会退化成
+        # O(n²)，这里在结构或标记变化时一次算好。
+        self._playing_row = -1
 
     # ------------------------------------------------------------ 播放标记
 
@@ -75,12 +82,17 @@ class TrackTableModel(QAbstractTableModel):
         old_rows = self._playing_rows()
         self._playing_path, self._playing_cue_seq = ident
         self._playing_track_ref = track
+        self._refresh_playing_row()
         new_rows = self._playing_rows()
         for row in sorted(set(old_rows) | set(new_rows)):
             if 0 <= row < len(self._tracks):
                 self.dataChanged.emit(
                     self.index(row, 0), self.index(row, self.columnCount() - 1)
                 )
+
+    def _refresh_playing_row(self) -> None:
+        rows = self._playing_rows()
+        self._playing_row = rows[0] if rows else -1
 
     def _playing_rows(self) -> list[int]:
         if not self._playing_path:
@@ -95,8 +107,9 @@ class TrackTableModel(QAbstractTableModel):
         return rows
 
     def playing_row(self) -> int:
-        rows = self._playing_rows()
-        return rows[0] if rows else -1
+        if 0 <= self._playing_row < len(self._tracks):
+            return self._playing_row
+        return -1
 
     def _default_font(self):
         from PySide6.QtGui import QGuiApplication
@@ -143,14 +156,13 @@ class TrackTableModel(QAbstractTableModel):
         if role == Qt.ToolTipRole:
             return self._tooltip(track)
 
-        if role == Qt.FontRole and self._playing_path:
-            if self._identity(track) == (self._playing_path, self._playing_cue_seq) or (
-                getattr(self, "_playing_track_ref", None) is not None
-                and track is self._playing_track_ref
-            ):
-                bold = QFont(self._default_font())
-                bold.setBold(True)
-                return bold
+        if role == self.PlayingRole:
+            return self._playing_row == index.row()
+
+        if role == Qt.FontRole and self._playing_row >= 0 and self._playing_row == index.row():
+            bold = QFont(self._default_font())
+            bold.setBold(True)
+            return bold
 
         if role == Qt.ForegroundRole:
             if index.column() == 0:
@@ -226,8 +238,10 @@ class TrackTableModel(QAbstractTableModel):
     # ---- 数据操作 ----
     def set_tracks(self, tracks: list[Track]) -> None:
         self.beginResetModel()
-        self._tracks = tracks
+        # 拷贝一份：模型删行用 list.pop，共享引用会把调用方的列表也删掉
+        self._tracks = list(tracks)
         self._row_of = self._build_index()
+        self._refresh_playing_row()
         self.endResetModel()
 
     def add_tracks(self, tracks: list[Track]) -> int:
@@ -236,6 +250,7 @@ class TrackTableModel(QAbstractTableModel):
         self.beginInsertRows(QModelIndex(), len(self._tracks), len(self._tracks) + len(tracks) - 1)
         self._tracks.extend(tracks)
         self._row_of = self._build_index()
+        self._refresh_playing_row()
         self.endInsertRows()
         return len(tracks)
 
@@ -261,14 +276,23 @@ class TrackTableModel(QAbstractTableModel):
         )
 
     def remove_rows(self, rows: list[int]) -> int:
+        """删除若干行。
+
+        beginRemoveRows() 必须与 endRemoveRows() 成对出现，否则视图收不到
+        行数变化通知，删除后列表会残留空行（不重新补位）。
+        """
         removed = 0
         for row in sorted(set(rows), reverse=True):
             if 0 <= row < len(self._tracks):
                 self.beginRemoveRows(QModelIndex(), row, row)
-                self._tracks.pop(row)
-                removed += 1
+                try:
+                    self._tracks.pop(row)
+                    removed += 1
+                finally:
+                    self.endRemoveRows()
         if removed:
             self._row_of = self._build_index()
+            self._refresh_playing_row()
         return removed
 
     def remove_tracks(self, tracks: list[Track]) -> int:

@@ -191,7 +191,8 @@ class AudioOutput:
             （``settings.playback_output_backend``），库层面默认值不该假装知道。
         exclusive: WASAPI 独占（仅在 WASAPI 设备上生效）。
         blocksize: 回调块帧数。
-        latency: PortAudio 延迟提示（``"low"`` / ``"high"`` / 秒数）。
+        latency: PortAudio 延迟提示（``"low"`` / ``"high"`` / 秒数）。引擎按
+            ``playback_buffer_ms`` 传秒数，让「缓冲深度」这个设置真正生效。
         hook: 引擎 DSP 钩子，``None`` 表示纯直通。
     """
 
@@ -204,7 +205,7 @@ class AudioOutput:
         exclusive: bool = False,
         mode: OutputMode | str | None = None,
         blocksize: int = BLOCK_FRAMES_DEFAULT,
-        latency: str = "high",
+        latency: str | float = "high",
         hook: Optional[DspHook] = None,
     ) -> None:
         self.ring = ring

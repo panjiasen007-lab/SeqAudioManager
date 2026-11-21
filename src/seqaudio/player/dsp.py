@@ -1,4 +1,4 @@
-"""DSP 固定链：增益 → 10 段 EQ → 斜坡（全流程就地处理 float32）。
+"""DSP 固定链：增益 → 31 段 EQ → 斜坡（全流程就地处理 float32）。
 
 为什么这条链必须就地、无分配、无三角函数
 ----------------------------------------
@@ -13,9 +13,9 @@
 
 EQ 为什么不是逐样本的 IIR 循环
 ------------------------------
-二阶 IIR（RBJ 峰值滤波器）本身是逐样本递推的。Python 里 1024 帧 × 10 段 ×
+二阶 IIR（RBJ 峰值滤波器）本身是逐样本递推的。Python 里 1024 帧 × 31 段 ×
 2 声道 = 2 万次解释器级迭代，单次回调要几毫秒且全程持有 GIL —— 那才是真正
-违反「回调不做重活」的做法。这里改用**重叠保留法（overlap-save）**：把 10 段
+违反「回调不做重活」的做法。这里改用**重叠保留法（overlap-save）**：把 31 段
 biquad 的级联频响在 FFT 频点上逐点相乘，一次 IFFT 得到整块输出。
 
 数学上等价：biquad 的 H(z) 在每个频点上取精确值，窗口长度 8192 / 跳距 1024
@@ -91,15 +91,21 @@ def int_pipeline_allowed(settings: Any, volume_db: Optional[float] = None) -> bo
     # 交叉淡变必须浮点（本期默认 0，但别留个定时炸弹）
     if float(getattr(settings, "playback_crossfade_sec", 0.0) or 0.0) > 0.0:
         return False
+    # 软件音量**与 dsp_bypass 无关**：``PlayerEngine.set_volume`` 只看
+    # ``volume_mode`` 就直接把增益交给 GainStage，从不检查 bypass。所以这里
+    # 也必须独立判，不能像从前那样挂在 ``not bypass`` 分支里 —— 否则默认
+    # 「直通 + 软件音量 -20 dB + 整数通路」会被判成"不用改样本"，解码器给
+    # int16、回调里却做浮点乘法，numpy 2.x 抛 UFuncOutputCastingError，
+    # 异常被回调兜底吞掉 → 整场静音（正是下面注释里那个坑的漏网分支）。
+    mode = str(getattr(settings, "playback_volume_mode", "bypass") or "bypass")
+    db = float(
+        volume_db
+        if volume_db is not None
+        else (getattr(settings, "playback_volume_db", 0.0) or 0.0)
+    )
+    if mode == "software" and abs(db) > 1e-9:
+        return False
     if not bool(getattr(settings, "playback_dsp_bypass", True)):
-        mode = str(getattr(settings, "playback_volume_mode", "bypass") or "bypass")
-        db = float(
-            volume_db
-            if volume_db is not None
-            else (getattr(settings, "playback_volume_db", 0.0) or 0.0)
-        )
-        if mode == "software" and abs(db) > 1e-9:
-            return False
         if bool(getattr(settings, "playback_eq_enabled", False)):
             return False
     return True
@@ -153,10 +159,12 @@ class GainStage:
 
 
 class BiquadEq:
-    """10 段图形 EQ：RBJ 峰值滤波器级联 + 重叠保留 FFT 实现。
+    """31 段图形 EQ：RBJ 峰值滤波器级联 + 重叠保留 FFT 实现。
+
+    段数由 ``bands_hz`` 决定（默认 ``EQ_BANDS_HZ`` 的 31 段 1/3 倍频程频点）。
 
     Args:
-        gains_db: 10 段增益（dB），长度不符时截断/补零。
+        gains_db: 每段增益（dB），长度与 ``bands_hz`` 不符时截断/补零。
         bands_hz: 中心频率。
         q: 品质因数（ISO 倍频程用 1.41）。
     """
@@ -219,7 +227,7 @@ class BiquadEq:
         self._enabled = bool(enabled)
 
     def set_gains(self, gains: Sequence[float]) -> None:
-        """更新 10 段增益（GUI 线程调用）：先算新频响，再整体替换引用。"""
+        """更新各段增益（GUI 线程调用）：先算新频响，再整体替换引用。"""
         self._gains = self._normalize_gains(gains)
         if self._sample_rate > 0:
             self._rebuild_response()
@@ -286,7 +294,7 @@ class BiquadEq:
         return result
 
     def _rebuild_response(self) -> None:
-        """把 10 段 biquad 的级联频响算到 FFT 频点上（GUI 线程）。"""
+        """把全部 biquad 的级联频响算到 FFT 频点上（GUI 线程）。"""
         size = self._fft_size
         if size <= 0:
             return

@@ -717,11 +717,23 @@ def describe_no_option(
     channels: int,
     mode: OutputMode,
     skipped: set[int] | frozenset[int] = (),
+    *,
+    shared_available: bool = False,
 ) -> str:
     """「所有候选都打不开」的中文说明——**必须列出全部维度**。
 
     TC-EX-13 的教训：只报采样率会让 6 声道失败的用户去改采样率，改一辈子也改不好。
     归因错维度比不报错更糟（和 v1.6 那个 ``-9997`` 双义是同一类问题）。
+
+    **源声道数少于设备声道数**是另一类归因错误（v1.8 实测）：
+    某些环绕设备（如「扬声器 (Strix 7.1)」8 声道）在 WASAPI 下只接受**设备原生
+    声道数**，给它 2 声道会直接被拒（共享/独占都一样）；而同一个物理设备在
+    MME / DirectSound 下 2 声道完全正常。这种时候提「改用共享」或「下混 2.0」
+    都是白费力气 —— 必须指向后端。
+
+    Args:
+        shared_available: 共享级是否**真的**有候选。只有它为真时才敢建议
+            「改用共享输出」，否则那句话会把用户推向下一个死胡同。
     """
     dims: list[str] = []
     if candidates:
@@ -730,10 +742,22 @@ def describe_no_option(
         dims.append(f"{channels} 声道")
     dims.append("独占模式" if mode.is_exclusive else "共享模式")
     text = f"设备 {device.label} 在上述候选下都打不开：" + "；".join(dims)
-    if channels > 2:
+
+    native = int(getattr(device, "channels", 0) or 0)
+    if channels and native and channels < native:
+        host = str(getattr(device, "hostapi_name", "") or "").replace("Windows ", "")
+        text += (
+            f"。该设备{('（' + host + '）') if host else ''}只接受 {native} 声道，"
+            f"当前源是 {channels} 声道——请把输出后端改为 MME 或 DirectSound，"
+            f"或换一台立体声设备"
+        )
+    elif channels > 2:
         text += f"。该设备可能不支持 {channels} 声道——可在设置里开启「多声道下混为 2.0」后重试"
-    if mode.is_exclusive:
+
+    if mode.is_exclusive and shared_available:
         text += "。也可以改用共享输出"
+    elif mode.is_exclusive and not shared_available:
+        text += "。共享模式同样开不了，换个后端或设备才能出声"
     if skipped:
         text += f"（本次已跳过层级 {sorted(int(level) for level in skipped)}）"
     return text
@@ -821,8 +845,13 @@ def plan_output(
         base_note = "独占各级开流均失败，已退回共享"
     else:
         base_note = "该设备不支持独占，已退回共享" if requested_mode.is_exclusive else ""
+    # 共享到底有没有候选：下面那句「也可以改用共享输出」只有它为真时才成立。
+    # 实测反例：8 声道环绕设备在 WASAPI 下 2 声道连共享都开不了，旧文案却一直
+    # 建议「改用共享」，把用户从一个死胡同推向另一个。
+    shared_ok = False
     for rate in candidates:
         if check(device, rate, ch, OutputMode.SHARED):
+            shared_ok = True
             rate_fell_back = rate != want_rate
             note = base_note
             if rate_fell_back:
@@ -839,7 +868,9 @@ def plan_output(
     if plans:
         return plans[0]
     raise RateUnsupportedError(
-        describe_no_option(device, candidates, ch, requested_mode, skipped),
+        describe_no_option(
+            device, candidates, ch, requested_mode, skipped, shared_available=shared_ok
+        ),
         tried=candidates,
     )
 

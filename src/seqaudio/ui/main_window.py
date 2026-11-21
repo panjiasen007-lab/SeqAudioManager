@@ -21,6 +21,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -82,7 +83,16 @@ from .track_model import (
     TrackFilterProxy,
     TrackTableModel,
 )
-from .widgets import BrandBar, EmptyState, SearchInput, SectionHeader, StatCard
+from .widgets import (
+    UI_OPACITY_DEFAULT,
+    UI_OPACITY_MAX,
+    UI_OPACITY_MIN,
+    BrandBar,
+    EmptyState,
+    SearchInput,
+    SectionHeader,
+    StatCard,
+)
 from .worker import (
     AuthenticityWorker,
     CoverWorker,
@@ -135,6 +145,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         i18n.set_locale(getattr(settings, "language", "zh_CN") or "zh_CN")
         self.settings = settings
+        # 上次「保存生效」的输出模式：用于判断用户是否刚刚切到独占（需要提醒）
+        self._last_output_mode = str(
+            getattr(settings, "playback_output_mode", "shared") or "shared"
+        )
         # 字体必须在构建控件之前选好：QSS 里的 font-family 与全局字体都依赖它
         fonts.configure(settings.ui_font, settings.mono_font, settings.font_scale)
         app = QApplication.instance()
@@ -200,6 +214,12 @@ class MainWindow(QMainWindow):
 
         self.brand_bar = BrandBar(f"{__version__}")
         root.addWidget(self.brand_bar)
+        # 界面不透明度：拖动即时生效（整窗），松手才落盘
+        self.brand_bar.opacityChanged.connect(self._on_ui_opacity)
+        self.brand_bar.opacityReleased.connect(self._persist_ui_opacity)
+        initial_opacity = self._stored_ui_opacity()
+        self.brand_bar.set_opacity(initial_opacity)
+        self._apply_ui_opacity(initial_opacity)
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -218,6 +238,9 @@ class MainWindow(QMainWindow):
         self.settings_panel.settingsChanged.connect(self._on_settings_changed)
         self.settings_panel.saved.connect(self._on_settings_saved)
         self.settings_panel.appearancePreviewChanged.connect(self._preview_appearance)
+        self.settings_panel.outputDeviceRefreshRequested.connect(
+            self._on_output_device_refresh
+        )
 
         self.inspector = InspectorPanel()
         self.inspector.editRequested.connect(self.edit_selected)
@@ -309,10 +332,14 @@ class MainWindow(QMainWindow):
         self.player_bar.modeChanged.connect(self._on_mode_changed)
         self.player_bar.collapseToggled.connect(self._on_bar_collapsed)
         self.player_bar.signalPanelToggled.connect(self.set_signal_panel_visible)
+        # 最右侧的 EQ 按钮（取代了原来的「收起播放条」按钮）
+        self.player_bar.eqRequested.connect(self.toggle_eq_panel)
 
 
         self.player_eq.gainsChanged.connect(self._on_eq_gains)
         self.player_eq.enabledChanged.connect(self._on_eq_enabled)
+        self.player_eq.customPresetSaved.connect(self._on_eq_preset_saved)
+        self.player_eq.customPresetDeleted.connect(self._on_eq_preset_deleted)
 
         # 初始状态（设置里的值，而不是硬编码默认）
         self.player_bar.set_volume(float(getattr(self.settings, "playback_volume_db", 0.0) or 0.0))
@@ -322,13 +349,25 @@ class MainWindow(QMainWindow):
         self.player_bar.set_mode(str(getattr(self.settings, "playback_mode", "sequential")))
         self.player_signals.update_from({"signal_path": self.player_bridge.signal_snapshot()})
         self.player_eq.set_gains(
-            list(getattr(self.settings, "playback_eq_gains", []) or [0.0] * 10)
+            list(getattr(self.settings, "playback_eq_gains", []) or [0.0] * 20)
         )
         self.player_eq.set_enabled(bool(getattr(self.settings, "playback_eq_enabled", False)))
-        self.settings_panel.set_output_devices(self.player_bridge.list_output_devices())
+        self.player_eq.set_custom_presets(
+            dict(getattr(self.settings, "playback_eq_custom_presets", {}) or {})
+        )
+        # 设备下拉按当前后端过滤：否则同一物理设备会在 MME/DirectSound/WASAPI/
+        # WDM-KS 下各出现一次，用户看到 20+ 条重复项（v1.8.0 反馈）。
+        initial_backend = str(
+            getattr(self.settings, "playback_output_backend", "mme") or "mme"
+        )
+        self.settings_panel.set_output_devices(
+            self.player_bridge.list_output_devices(initial_backend), scoped=True
+        )
 
-        collapsed = bool(getattr(self.settings, "playback_bar_collapsed", False))
-        self.player_bar.set_collapsed(collapsed)
+        # 折叠按钮已按用户要求移除（原位置改为 EQ 按钮）。若沿用旧的
+        # `playback_bar_collapsed` 配置，用户会卡在 32 px 且没有任何按钮能展开，
+        # 所以这里**始终**按展开态启动；字段本身保留只为兼容旧配置文件。
+        self.player_bar.set_collapsed(False)
         self.player_bar.setVisible(bool(getattr(self.settings, "playback_bar_visible", True)))
 
         self._restore_playback_session()
@@ -381,6 +420,14 @@ class MainWindow(QMainWindow):
             i18n.tr(f"play_state_{str(state).lower()}"),
             theme.CYAN if str(state) == "PLAYING" else theme.FG_DIM,
         )
+        self._refresh_signal_panel()
+
+    def _refresh_signal_panel(self) -> None:
+        """信号路径面板跟随引擎最新快照刷新（设置变化/切歌/音量等共用）。"""
+        bridge = getattr(self, "player_bridge", None)
+        if bridge is None:
+            return
+        self.player_signals.update_from(bridge.last_snapshot() or None)
 
     def _on_player_track(self, track) -> None:
         data = track if isinstance(track, dict) else None
@@ -394,6 +441,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.update_lyrics()
         self._sync_playing_row(data)
+        # 切歌后声道/采样率/EQ 状态可能整体变化，信号路径必须跟着刷（反馈 2）
+        self._refresh_signal_panel()
         self.player_bridge.poll_now()
 
     def _on_player_position(self, position: int) -> None:
@@ -421,7 +470,7 @@ class MainWindow(QMainWindow):
             self.status_hint.setText(text)
 
     def _on_player_signal(self, _payload) -> None:
-        self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
+        self._refresh_signal_panel()
 
     def _on_player_queue(self, _length: int) -> None:
         self._refresh_queue_panel()
@@ -776,6 +825,7 @@ class MainWindow(QMainWindow):
         self.player_bridge.set_volume(float(db))
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.set_volume(float(db))
+        self._refresh_signal_panel()
 
     def _on_volume_reset(self) -> None:
         """双击归零：回到 0 dB 旁路（位完美取向）。"""
@@ -785,6 +835,7 @@ class MainWindow(QMainWindow):
             self.player_bar.set_volume_mode("bypass")
         self.player_bar.set_volume(0.0)
         self.player_bridge.set_volume(0.0)
+        self._refresh_signal_panel()
 
     def _on_mode_changed(self, mode: str) -> None:
         self.settings.playback_mode = str(mode)
@@ -796,6 +847,7 @@ class MainWindow(QMainWindow):
             i18n.tr(f"pl_mode_{str(applied)}")
         )
         self._refresh_queue_panel()
+        self._refresh_signal_panel()
 
     def _set_mode_from_menu(self, key: str) -> None:
         """菜单里选播放模式：同步按钮、设置与引擎。"""
@@ -826,6 +878,7 @@ class MainWindow(QMainWindow):
         values = [float(value) for value in (gains or [])]
         self.settings.playback_eq_gains = values
         self.player_bridge.set_eq_gains(values)
+        self._refresh_signal_panel()
 
     def _on_eq_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -836,24 +889,117 @@ class MainWindow(QMainWindow):
             self.settings.playback_dsp_bypass = False
             self.player_bridge.set_bypass(False)
             self._append_log("INFO", "启用均衡器：已关闭全局 DSP 直通")
+        self._refresh_signal_panel()
         self._append_log(
             "INFO",
             i18n.tr_text("均衡器已启用" if enabled else "均衡器已旁路"),
         )
 
+    def _on_eq_preset_saved(self, name: str, gains) -> None:
+        """用户保存了自定义 EQ 预设：写进 Settings 并落盘（重启后仍在）。"""
+        key = str(name or "").strip()
+        if not key:
+            return
+        presets = dict(getattr(self.settings, "playback_eq_custom_presets", {}) or {})
+        presets[key] = [float(value) for value in (gains or [])]
+        self.settings.playback_eq_custom_presets = presets
+        self._save_settings_quietly()
+        self._append_log("INFO", f"已保存自定义 EQ 预设：{key}")
+
+    def _on_eq_preset_deleted(self, name: str) -> None:
+        """用户删除了自定义 EQ 预设：同步设置并落盘。"""
+        key = str(name or "").strip()
+        if not key:
+            return
+        presets = dict(getattr(self.settings, "playback_eq_custom_presets", {}) or {})
+        if presets.pop(key, None) is None:
+            return
+        self.settings.playback_eq_custom_presets = presets
+        self._save_settings_quietly()
+        self._append_log("INFO", f"已删除自定义 EQ 预设：{key}")
+
+    def _save_settings_quietly(self) -> None:
+        """保存设置；磁盘不可写时只记日志，绝不弹窗打断播放。"""
+        try:
+            self.settings.save()
+        except OSError as exc:
+            self._append_log("WARNING", f"设置保存失败：{exc}")
+
     def show_eq_panel(self) -> None:
         """EQ 面板（非模态）：独立窗口，不占主布局空间。"""
         if self.eq_dialog is None:
             dialog = QDialog(self)
-            dialog.setWindowTitle(i18n.tr_text("均衡器"))
-            dialog.resize(560, 380)
+            dialog.setObjectName("eqDialog")
+            dialog.setWindowTitle(i18n.tr_text("均衡器 · 20 段"))
+            dialog.resize(1000, 560)
+            dialog.setMinimumSize(880, 500)
             layout = QVBoxLayout(dialog)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(self.player_eq)
             self.eq_dialog = dialog
+            self._center_dialog(dialog, 1000, 560)
         self.eq_dialog.show()
         self.eq_dialog.raise_()
         self.eq_dialog.activateWindow()
+
+    def _center_dialog(self, dialog: QDialog, width: int, height: int) -> None:
+        """把对话框居中到主窗口（并夹到屏幕可用区域内，避免多屏时跑出视野）。"""
+        if dialog.width() != width or dialog.height() != height:
+            dialog.resize(width, height)
+        try:
+            frame = self.frameGeometry()
+            left = frame.x() + (frame.width() - width) // 2
+            top = frame.y() + (frame.height() - height) // 2
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                left = max(area.left(), min(left, area.right() - width))
+                top = max(area.top(), min(top, area.bottom() - height))
+            dialog.move(left, top)
+        except Exception:  # noqa: BLE001 - 定位失败不该影响面板打开
+            pass
+
+    # ------------------------------------------------------------ 界面不透明度
+
+    def _stored_ui_opacity(self) -> int:
+        """读设置里的整窗不透明度（缺字段/坏值回落 95，``0`` 原样返回交给夹紧）。"""
+        raw = getattr(self.settings, "ui_opacity", UI_OPACITY_DEFAULT)
+        if raw is None:
+            return UI_OPACITY_DEFAULT
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return UI_OPACITY_DEFAULT
+
+    def _apply_ui_opacity(self, value: int, *, persist: bool = False) -> None:
+        """整窗不透明度（10–100%）：立即生效，``persist`` 时写盘。
+
+        只对主窗口用 ``setWindowOpacity``：子面板（迷你条）有自己的透明度设置，
+        两者互不影响。个别平台（无合成器）不支持整窗透明度，此时静默跳过。
+        """
+        try:
+            percent = int(value)
+        except (TypeError, ValueError):
+            percent = UI_OPACITY_DEFAULT
+        percent = max(UI_OPACITY_MIN, min(UI_OPACITY_MAX, percent))
+        try:
+            self.setWindowOpacity(percent / 100.0)
+        except Exception:  # noqa: BLE001 - 平台不支持时不能让主界面崩
+            pass
+        if persist:
+            self.settings.ui_opacity = percent
+            try:
+                self.settings.save()
+            except OSError:
+                pass
+
+    def _on_ui_opacity(self, value: int) -> None:
+        """滑杆拖动中：只改窗口，不写盘（避免每一步都存一次文件）。"""
+        self._apply_ui_opacity(value, persist=False)
+
+    def _persist_ui_opacity(self, value: int) -> None:
+        """滑杆松手：落盘 ``ui_opacity``，重启后保持。"""
+        self._apply_ui_opacity(value, persist=True)
 
     def toggle_eq_panel(self) -> None:
         if self.eq_dialog is not None and self.eq_dialog.isVisible():
@@ -872,7 +1018,7 @@ class MainWindow(QMainWindow):
             self.mini_player.set_nav_enabled(has_tracks)
 
     def _sync_playing_row(self, data) -> None:
-        """把正在播放的曲目映射到主表格行并加粗标记。"""
+        """把正在播放的曲目映射到主表格行：加粗标记 + 自动滚动定位。"""
         try:
             track = None
             if isinstance(data, dict):
@@ -882,9 +1028,56 @@ class MainWindow(QMainWindow):
                 cur = snap.get("track")
                 if isinstance(cur, dict):
                     track = self._track_by_payload(cur)
+            before = self.model.playing_row()
             self.model.set_playing(track)
+            after = self.model.playing_row()
+            # 只在「播放的曲目真的换了」时滚动：progress 刷新等重复调用不会
+            # 反复抢走用户正在浏览的视图位置
+            if after >= 0 and after != before:
+                self._scroll_to_row(after)
         except Exception:  # noqa: BLE001 - 标记失败不影响播放
             log.debug("播放行同步失败", exc_info=True)
+
+    def _scroll_to_row(self, row: int, select: bool = False) -> bool:
+        """按源模型行号把表格滚到该行（经 proxy 映射，兼容筛选与排序）。
+
+        返回 ``True`` 表示该行当前可见并已定位；``False`` 表示被筛选条件隐藏。
+        """
+        if row < 0 or row >= self.model.rowCount():
+            return False
+        proxy_index = self.proxy.mapFromSource(self.model.index(row, 0))
+        if not proxy_index.isValid():
+            return False
+        view = getattr(self, "table", None)
+        if view is None:
+            return False
+        view.scrollTo(proxy_index, QAbstractItemView.PositionAtCenter)
+        if select:
+            view.selectionModel().select(
+                proxy_index,
+                QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows,
+            )
+            view.setCurrentIndex(proxy_index)
+        return True
+
+    def _locate_playing(self) -> None:
+        """用户主动要求「定位到正在播放」：必要时先放宽筛选再定位并选中。"""
+        row = self.model.playing_row()
+        if row < 0:
+            self.status_hint.setText(i18n.tr_text("当前没有正在播放的歌曲"))
+            return
+        if not self._scroll_to_row(row, select=True):
+            # 被搜索/筛选挡住：清掉筛选，再定位一次（只在用户主动触发时这么做）
+            self.search_edit.clear()
+            self.proxy.set_text("")
+            if hasattr(self, "_select_verdict_filter"):
+                self._select_verdict_filter("all")
+            elif hasattr(self.proxy, "set_verdict_group"):
+                self.proxy.set_verdict_group("all")
+            if not self._scroll_to_row(row, select=True):
+                self.status_hint.setText(i18n.tr_text("当前没有正在播放的歌曲"))
+                return
+        self.table.setFocus(Qt.OtherFocusReason)
 
     def _track_by_payload(self, data: dict):
         path = str(data.get("path") or "")
@@ -1455,6 +1648,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Up"), self, lambda: self.player_volume_step(1.0))
         QShortcut(QKeySequence("Ctrl+Down"), self, lambda: self.player_volume_step(-1.0))
         QShortcut(QKeySequence("Ctrl+L"), self, self.show_lyrics_tab)
+        # 定位到正在播放的曲目（列表自动定位之外的手动入口）
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self, self._locate_playing)
         # 空格是全局键，需要应用级过滤器（受焦点的控件会把空格吃掉）
         app = QApplication.instance()
         if app is not None:
@@ -1466,8 +1661,10 @@ class MainWindow(QMainWindow):
         self.player_lyrics.setFocus()
 
     def show_queue_tab(self) -> None:
-        """队列并入主表格后，"查看队列"等价于回到列表（焦点交给表格）。"""
+        """队列并入主表格后，"查看队列"等价于回到列表（有播放曲目则直接定位过去）。"""
         self.table.setFocus()
+        if self.model.playing_row() >= 0 and self._scroll_to_row(self.model.playing_row()):
+            return
         self.table.scrollToTop()
 
     def _space_should_play(self, widget) -> bool:
@@ -1526,6 +1723,8 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # 个别平台在 show() 之前设置的整窗透明度会被丢掉，这里再应用一次（幂等）
+        self._apply_ui_opacity(self._stored_ui_opacity())
         # 幂等启动轮询（最小化/托盘/迷你条期间也保持 active，见 hideEvent）
         if getattr(self, "player_bridge", None) is not None:
             self.player_bridge.start()
@@ -1538,21 +1737,25 @@ class MainWindow(QMainWindow):
             apply_dark_titlebar(int(self.winId()))
             self._titlebar_done = True
 
-    def _maybe_announce_exclusive(self) -> None:
-        """Q9：默认切到「宽松独占」后，首次启动必须说明它会抢占设备。
+    def _maybe_announce_exclusive(self, force: bool = False) -> None:
+        """切到「独占 / 宽松独占」时说明它会绕开系统音量并抢占设备。
 
-        三条缓解缺一不可：① 弹一次说明；② 弹窗内可一键改回共享；
-        ③ 面板显式标注当前模式（见 SettingsPanel）。**不允许静默变更**。
+        为什么必须提醒：独占模式下 PortAudio 直接以设备原生格式开流，
+        声音不经过 Windows 混音器，**系统音量滑块随之失效**，只能靠播放条上的
+        软件音量（``playback_volume_db``）调；同时其它程序会没声音。
+        不提醒的话用户只会觉得「一开独占就特别大声，而且音量键不管用」。
+
+        ``force=True``：用户刚刚主动切到独占 —— 每次切换都提醒一遍；
+        ``force=False``：启动时的一次性检查（老配置升级上来可能就是独占）。
         离屏/无人值守环境（自动化测试）不弹窗，否则会把用例卡死。
         """
-        if bool(getattr(self.settings, "playback_exclusive_notice_shown", False)):
+        if not force and bool(getattr(self.settings, "playback_exclusive_notice_shown", False)):
             return
         mode = str(getattr(self.settings, "playback_output_mode", "") or "")
         if mode not in ("exclusive", "exclusive_strict"):
             return
         if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
             return
-        notchanged = False
         try:
             box = QMessageBox(self)
             box.setWindowTitle(i18n.tr("exclusive_notice_title"))
@@ -1564,14 +1767,17 @@ class MainWindow(QMainWindow):
             if box.clickedButton() is back:
                 self.settings.playback_output_mode = "shared"
                 self.settings.playback_exclusive = False
+                self._last_output_mode = "shared"
                 self.settings_panel.load_from(self.settings)
                 if getattr(self, "player_bridge", None) is not None:
                     self.player_bridge.set_output_mode("shared")
+                self._refresh_signal_panel()
                 self._append_log("INFO", "已改回共享输出（不再独占设备）")
             elif box.clickedButton() is keep:
                 self._append_log(
                     "INFO",
-                    "输出模式：独占（会抢占其它应用的声音，停止/暂停即释放）",
+                    "输出模式：独占（会抢占其它应用的声音，停止/暂停即释放；"
+                    "系统音量失效，请用播放条音量）",
                 )
         finally:
             self.settings.playback_exclusive_notice_shown = True
@@ -2442,6 +2648,9 @@ class MainWindow(QMainWindow):
         menu.addAction(
             i18n.tr_text("加入队列"), lambda: self.add_selected_to_queue(play_next=False)
         )
+        menu.addAction(
+            i18n.tr_text("定位到正在播放") + "\tCtrl+Shift+P", self._locate_playing
+        )
         menu.addSeparator()
         menu.addAction(i18n.tr_text("编辑标签") + "\tCtrl+E", self.edit_selected)
         menu.addAction(i18n.tr_text("批量编辑标签…"), self.batch_edit_selected)
@@ -3055,6 +3264,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.refresh_theme()
         self.player_eq.refresh_texts()
+        self.player_eq.refresh_theme()
         self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
         try:
             from .win_effects import apply_titlebar
@@ -3315,7 +3525,60 @@ class MainWindow(QMainWindow):
         )
 
     def _on_settings_saved(self) -> None:
+        """参数保存后**立即**把播放相关设置推给引擎，不等下一首。
+
+        以前这里只改状态栏文本，用户切换输出模式/设备/后端、改音量或 DSP
+        旁路后必须重开一首才生效（反馈 3）。现在统一重放一遍：所有 setter
+        都是幂等的，且引擎内部在 PLAYING/PAUSED 时会自行 reconnect。
+        """
         self.status_hint.setText(i18n.tr_text("参数已保存"))
+        # 模式切换检测放在最前面：即使引擎不可用，切到独占也必须提醒
+        mode = str(getattr(self.settings, "playback_output_mode", "shared") or "shared")
+        previous = getattr(self, "_last_output_mode", mode)
+        just_switched = mode != previous
+        self._last_output_mode = mode
+        if just_switched and mode in ("exclusive", "exclusive_strict"):
+            self._maybe_announce_exclusive(force=True)
+            # 用户在提醒里选了「改回共享」：以改后的模式为准，别再推独占
+            mode = str(getattr(self.settings, "playback_output_mode", "shared") or "shared")
+        bridge = getattr(self, "player_bridge", None)
+        if bridge is None:
+            return
+        # 输出模式（会写回 settings 的布尔镜像并在播放中重连）
+        bridge.set_output_mode(mode)
+        # 设备 + 后端（同样在播放中重连）
+        bridge.set_output(
+            device=str(getattr(self.settings, "playback_device", "") or ""),
+            backend=str(getattr(self.settings, "playback_output_backend", "") or ""),
+        )
+        # 全局 DSP 直通 / 音量 / EQ 开关与曲线
+        bridge.set_bypass(bool(getattr(self.settings, "playback_dsp_bypass", True)))
+        bridge.set_volume(float(getattr(self.settings, "playback_volume_db", 0.0) or 0.0))
+        bridge.set_eq_enabled(bool(getattr(self.settings, "playback_eq_enabled", False)))
+        bridge.set_eq_gains(list(getattr(self.settings, "playback_eq_gains", []) or []))
+        # 信号路径面板立刻反映新链路（反馈 2：设置变化就刷新）
+        self.player_signals.update_from(bridge.last_snapshot() or None)
+        self._append_log("INFO", i18n.tr_text("播放参数已即时应用到当前播放"))
+
+    def _on_output_device_refresh(self, backend_key: str) -> None:
+        """后端切换后重建设备下拉，并清掉不属于新后端的旧设备选择。
+
+        设备表由 ``PlayerBridge`` 持有（设备枚举只能在桥接层做），面板只发后端键。
+        旧设备名在新后端的 ``name`` 集合里找不到时回到「系统默认设备」，否则
+        引擎会拿着一个属于别的 hostapi 的设备名去开流。
+        """
+        key = str(backend_key or "mme")
+        devices = self.player_bridge.list_output_devices(key)
+        names = {
+            str(entry.get("name") or "")
+            for entry in devices
+            if isinstance(entry, dict) and str(entry.get("name") or "")
+        }
+        current = str(getattr(self.settings, "playback_device", "") or "")
+        if current and current not in names:
+            self.settings.playback_device = ""
+        # scoped=True：已经按后端过滤，显示纯设备名，不再重复 hostapi 前缀。
+        self.settings_panel.set_output_devices(devices, scoped=True)
 
     # ------------------------------------------------------------ 日志与状态
 

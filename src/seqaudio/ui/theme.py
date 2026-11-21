@@ -138,83 +138,86 @@ def _dark(
 
 
 THEMES: dict[str, Palette] = {
+    # 现代质感调色准则：背景克制的低饱和底色 + 通透玻璃面板（accent 低 alpha 描边），
+    # 强调色降饱和但保留主题个性，fg/fg_dim/fg_mute 三级对比清晰；状态色只做点缀。
     "深空": _dark(
-        "深空", "#6aa8ff", base="#060b18", tint="#0e1a33",
-        accent_hover="#9cc5ff", cyan="#45e0cf", on_accent="#061020",
-        pattern="stars", fg="#e9effb", fg_dim="#8e9ab4", fg_mute="#5d6882",
-        line="#2a3852", line_soft="#1b2436",
+        "深空", "#6ea8e8", base="#070b14", tint="#101a2c",
+        accent_hover="#9cc4f2", cyan="#4ec9be", on_accent="#06101e",
+        pattern="stars", fg="#eaf0fa", fg_dim="#9aa7bd", fg_mute="#68758c",
+        line="#26344a", line_soft="#192334",
+        ok="#4fcf95", warn="#e8c46a", bad="#ef7a86", purple="#a99ce0",
     ),
     "黑胶": _dark(
-        "黑胶", "#e6a23c", base="#100b08", tint="#24170f",
-        accent_hover="#f7c46c", cyan="#d98a5c", on_accent="#1a0f07",
-        pattern="vinyl", fg="#f2e9dd", fg_dim="#a8957f", fg_mute="#6e5b49",
-        line="#3a2a1c", line_soft="#271b12",
-        ok="#8fbf6a", warn="#e6a23c", bad="#e06b5b", purple="#c79b6b",
+        "黑胶", "#d9a05b", base="#0e0b09", tint="#211a16",
+        accent_hover="#f0c285", cyan="#c98f6a", on_accent="#1a0f07",
+        pattern="vinyl", fg="#f0e8dc", fg_dim="#a89a88", fg_mute="#756757",
+        line="#3a2c20", line_soft="#251c15",
+        ok="#8fbf6a", warn="#d9a05b", bad="#d97060", purple="#b99a78",
     ),
     "春": _dark(
-        "春", "#5fd39a", base="#07140f", tint="#10271c",
-        accent_hover="#8ce8b7", cyan="#7fe0d0", on_accent="#06150f",
-        pattern="blossom", fg="#e6f6ee", fg_dim="#8fb5a3", fg_mute="#5d7d6c",
-        line="#244536", line_soft="#173026",
-        ok="#5fd39a", warn="#f0c987", bad="#ef7f8f", purple="#f2a7c8",
+        "春", "#5cc595", base="#0a1411", tint="#142620",
+        accent_hover="#8ee0b5", cyan="#74cfc2", on_accent="#06150f",
+        pattern="blossom", fg="#e6f4ed", fg_dim="#92b0a2", fg_mute="#637d70",
+        line="#244336", line_soft="#172b23",
+        ok="#5cc595", warn="#e8c887", bad="#e07d8c", purple="#e0a2c0",
     ),
     "夏": _dark(
-        "夏", "#ffb347", base="#181006", tint="#2c1d0b",
-        accent_hover="#ffd27a", cyan="#55d6c2", on_accent="#2a1806",
-        pattern="sun", fg="#fff3e2", fg_dim="#bda98e", fg_mute="#826d52",
-        line="#4a351c", line_soft="#33240f",
-        ok="#7fd08a", warn="#ffb347", bad="#ff7a5c", purple="#ff9f68",
+        "夏", "#f0ae5c", base="#14100a", tint="#272015",
+        accent_hover="#f8ce8a", cyan="#58c8b8", on_accent="#2a1806",
+        pattern="sun", fg="#fdf1e0", fg_dim="#b8a68d", fg_mute="#86735c",
+        line="#493821", line_soft="#322719",
+        ok="#7ec78a", warn="#f0ae5c", bad="#ec7a60", purple="#ec9c70",
     ),
     "秋": _dark(
-        "秋", "#e07a3f", base="#160d08", tint="#2b180e",
-        accent_hover="#f2a06b", cyan="#d6b36f", on_accent="#1b0d06",
-        pattern="leaves", fg="#f7e9df", fg_dim="#b89a86", fg_mute="#7d6352",
-        line="#46301f", line_soft="#2e1e13",
-        ok="#91b96a", warn="#e0a43f", bad="#df6a5a", purple="#c9855f",
+        "秋", "#d67a45", base="#120e0a", tint="#251c14",
+        accent_hover="#ed9c68", cyan="#c9ac74", on_accent="#1b0d06",
+        pattern="leaves", fg="#f4e9de", fg_dim="#ad9784", fg_mute="#796556",
+        line="#443222", line_soft="#2d211a",
+        ok="#8ab468", warn="#d6a44f", bad="#d66f5f", purple="#c08b6c",
     ),
     "冬": _dark(
-        "冬", "#8fd4ff", base="#050e19", tint="#0b2034",
-        accent_hover="#bde8ff", cyan="#d4f4ff", on_accent="#061421",
-        pattern="snow", fg="#e9f5ff", fg_dim="#8faabe", fg_mute="#5b7285",
-        line="#26445c", line_soft="#182d40",
-        ok="#77d6bf", warn="#f2cf7a", bad="#ff8595", purple="#b7b3ff",
+        "冬", "#86c7ec", base="#080e16", tint="#101d2d",
+        accent_hover="#b3dff5", cyan="#c9e9f5", on_accent="#061421",
+        pattern="snow", fg="#e9f4fc", fg_dim="#94adbf", fg_mute="#61788a",
+        line="#264156", line_soft="#182b3b",
+        ok="#74cdb8", warn="#eacc82", bad="#ec8492", purple="#b2addd",
     ),
     "海岸": _dark(
-        "海岸", "#35d6c4", base="#04141a", tint="#0a2a32",
-        accent_hover="#6be9da", cyan="#ffd29d", on_accent="#042023",
-        pattern="waves", fg="#e6fbf8", fg_dim="#8db8b6", fg_mute="#5b7f7e",
-        line="#20494c", line_soft="#123033",
-        ok="#35d6c4", warn="#ffc46b", bad="#ff7f7f", purple="#8bd3ff",
+        "海岸", "#3cc4b4", base="#071316", tint="#10262a",
+        accent_hover="#6bdcd0", cyan="#e8c69c", on_accent="#042023",
+        pattern="waves", fg="#e4f8f4", fg_dim="#8cb4b0", fg_mute="#5c807c",
+        line="#1f4648", line_soft="#122f31",
+        ok="#3cc4b4", warn="#e0bd70", bad="#e87d7d", purple="#86c9f0",
     ),
     "暮光": _dark(
-        "暮光", "#c084fc", base="#0c0717", tint="#1d1131",
-        accent_hover="#d9aaff", cyan="#f0a6d8", on_accent="#160a2a",
-        pattern="dusk", fg="#f2e9ff", fg_dim="#a795bd", fg_mute="#6f5f86",
-        line="#3a2853", line_soft="#271a3a",
-        ok="#8dd7b0", warn="#f0c87a", bad="#ff7f9c", purple="#c084fc",
+        "暮光", "#b888e8", base="#0d0a14", tint="#1e1730",
+        accent_hover="#d3aaf2", cyan="#dfa2cf", on_accent="#160a2a",
+        pattern="dusk", fg="#f0e9fb", fg_dim="#a598b8", fg_mute="#746686",
+        line="#3a2c4f", line_soft="#271e38",
+        ok="#86ccae", warn="#e8c680", bad="#ec82a0", purple="#b888e8",
     ),
     "太极": _dark(
-        "太极", "#f2f2f2", base="#050505", tint="#141414",
-        accent_hover="#ffffff", cyan="#bdbdbd", on_accent="#0a0a0a",
-        pattern="taiji", fg="#f4f4f4", fg_dim="#a8a8a8", fg_mute="#6e6e6e",
+        "太极", "#ededed", base="#070707", tint="#161616",
+        accent_hover="#ffffff", cyan="#b8b8b8", on_accent="#0a0a0a",
+        pattern="taiji", fg="#f2f2f2", fg_dim="#a6a6a6", fg_mute="#6e6e6e",
         line="#3a3a3a", line_soft="#242424",
         ok="#9ccf9c", warn="#d9c27a", bad="#d98a8a", purple="#b0a8c0",
     ),
     "纸白": Palette(
-        name="纸白", light=True, base="#efe7d8",
-        panel="#f8f2e6", card="#fffbf1", input="#fffdf7",
-        hover="#e9dfcf", active="#e0d4c2", table="#fcf7ec", log="#f4eddf",
-        line="#cdbda7", line_soft="#ddd1bf",
-        fg="#2b241a", fg_dim="#6a5e50", fg_mute="#7a6e62",
-        accent="#9a5b2c", accent_hover="#7c4520", accent_dim="#e6c6a8",
+        name="纸白", light=True, base="#ece5d8",
+        panel="#f6f0e4", card="#fdf9f0", input="#fbf8f0",
+        hover="#e9dfcf", active="#e0d4c2", table="#f9f4e9", log="#f3ecdd",
+        line="#c9b9a2", line_soft="#ddd2c0",
+        fg="#2b241a", fg_dim="#655a4c", fg_mute="#7a6f62",
+        accent="#96602f", accent_hover="#7c4820", accent_dim="#e2c7ab",
         cyan="#3f7d78", ok="#3f7d4b", warn="#a86a1f", bad="#b03a2e", purple="#7b4fa3",
         on_accent="#fff8ee", pattern="paper",
     ),
     "黑白极简": Palette(
-        name="黑白极简", light=True, base="#f1f2f5",
-        panel="#ffffff", card="#ffffff", input="#ffffff",
-        hover="#e7e9ee", active="#dde0e6", table="#ffffff", log="#f7f8fa",
-        line="#cfd3db", line_soft="#e2e5ea",
+        name="黑白极简", light=True, base="#eef0f3",
+        panel="#fafbfc", card="#fbfcfd", input="#fbfcfd",
+        hover="#e7e9ee", active="#dde0e6", table="#fafbfc", log="#f5f7f9",
+        line="#ccd1da", line_soft="#e0e4ea",
         fg="#111318", fg_dim="#4c515b", fg_mute="#6e737d",
         accent="#111318", accent_hover="#343945", accent_dim="#c9ccd4",
         cyan="#167d8d", ok="#16784a", warn="#a35f00", bad="#b3261e", purple="#6b4fa0",
@@ -247,7 +250,6 @@ def _status_colors(p: Palette) -> dict[str, tuple[str, str]]:
 def build_qss(p: Palette) -> str:
     from . import fonts
 
-    dim_border = p.line
     ui_font = fonts.ui_css()
     mono_font = fonts.mono_css()
     qss = f"""
@@ -279,17 +281,23 @@ QToolBar {{ background: transparent; border: none; padding: 0; spacing: 6px; }}
 QToolBar::separator {{ background: {p.line}; width: 1px; margin: 8px 10px; }}
 
 QToolButton {{
-    background: transparent; border: 1px solid transparent; border-radius: 7px;
+    background: transparent; border: 1px solid transparent; border-radius: 10px;
     padding: 7px 13px; color: {p.fg_dim}; font-size: 12px;
 }}
-QToolButton:hover {{ background: {p.hover}; border-color: {p.line}; color: {p.fg}; }}
-QToolButton:pressed {{ background: {p.active}; }}
+QToolButton:hover {{ background: {_rgba(p.accent, 0.10)}; border-color: {_rgba(p.accent, 0.55)}; color: {p.fg}; }}
+QToolButton:pressed {{ background: {_rgba(p.accent, 0.16)}; }}
 QToolButton:disabled {{ color: {p.fg_mute}; background: transparent; border-color: transparent; }}
 QToolButton#accent {{
-    background: {p.accent}; border: 1px solid {p.accent};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p.accent}, stop:1 {_mix(p.accent, p.cyan, 0.35)});
+    border: 1px solid {_rgba(p.accent_hover, 0.85)};
     color: {p.on_accent}; font-weight: 600;
 }}
-QToolButton#accent:hover {{ background: {p.accent_hover}; border-color: {p.accent_hover}; }}
+QToolButton#accent:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p.accent_hover}, stop:1 {_mix(p.accent_hover, p.cyan, 0.35)});
+    border-color: {p.accent_hover};
+}}
 QToolButton#accent:disabled {{
     background: {p.accent_dim}; border-color: {p.accent_dim};
     color: {_mix(p.on_accent, p.base, 0.55)};
@@ -297,27 +305,55 @@ QToolButton#accent:disabled {{
 
 /* ============================== 按钮 ============================== */
 QPushButton {{
-    background: {p.card}; border: 1px solid {p.line}; border-radius: 7px;
+    background: {_rgba(p.fg, 0.035)};
+    border: 1px solid {_rgba(p.line, 0.90)};
+    border-radius: 10px;
     padding: 7px 15px; color: {p.fg};
 }}
-QPushButton:hover {{ background: {p.hover}; border-color: {dim_border}; }}
-QPushButton:pressed {{ background: {p.active}; }}
-QPushButton:disabled {{ color: {p.fg_mute}; background: transparent; border-color: {p.line_soft}; }}
-QPushButton#primary {{
-    background: {p.accent}; border: 1px solid {p.accent}; color: {p.on_accent};
-    font-weight: 600; padding: 7px 18px;
+QPushButton:hover {{
+    background: {_rgba(p.accent, 0.10)};
+    border-color: {_rgba(p.accent, 0.55)};
 }}
-QPushButton#primary:hover {{ background: {p.accent_hover}; }}
+QPushButton:pressed {{ background: {_rgba(p.accent, 0.16)}; }}
+QPushButton:disabled {{
+    color: {p.fg_mute}; background: transparent;
+    border-color: {_rgba(p.line_soft, 0.90)};
+}}
+/* 主按钮：渐变底 + 亮色微光描边 —— 「边框加点微光」的落点 */
+QPushButton#primary {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p.accent}, stop:0.55 {_mix(p.accent, p.accent_hover, 0.35)},
+        stop:1 {_mix(p.accent, p.cyan, 0.28)});
+    border: 1px solid {_rgba(p.accent_hover, 0.92)};
+    color: {p.on_accent}; font-weight: 600; padding: 7px 18px;
+}}
+QPushButton#primary:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p.accent_hover}, stop:0.55 {_mix(p.accent_hover, p.cyan, 0.22)},
+        stop:1 {_mix(p.accent_hover, p.cyan, 0.40)});
+    border-color: {p.accent_hover};
+}}
+QPushButton#primary:pressed {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {_mix(p.accent, p.base, 0.18)}, stop:1 {_mix(p.accent, p.cyan, 0.20)});
+}}
 QPushButton#primary:disabled {{
     background: {p.accent_dim}; border-color: {p.accent_dim};
     color: {_mix(p.on_accent, p.base, 0.55)};
 }}
-QPushButton#ghost {{ background: transparent; border: 1px solid {p.line}; color: {p.fg_dim}; }}
-QPushButton#ghost:hover {{ border-color: {p.accent}; color: {p.fg}; background: {_rgba(p.accent, 0.10)}; }}
+QPushButton#ghost {{
+    background: transparent; border: 1px solid {_rgba(p.line, 0.85)}; color: {p.fg_dim};
+}}
+QPushButton#ghost:hover {{
+    background: {_rgba(p.accent, 0.10)}; border-color: {_rgba(p.accent, 0.60)};
+    color: {p.fg};
+}}
 QPushButton#danger {{ color: {p.bad}; border-color: {_rgba(p.bad, 0.45)}; }}
 QPushButton#danger:hover {{ border-color: {p.bad}; background: {_rgba(p.bad, 0.12)}; }}
 QPushButton#dangerSolid {{
-    background: {_rgba(p.bad, 0.92)}; border: 1px solid {_rgba(p.bad, 0.6)};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {_rgba(p.bad, 0.92)}, stop:1 {_rgba(_mix(p.bad, p.cyan, 0.25), 0.92)});
+    border: 1px solid {_rgba(p.bad, 0.72)};
     color: {_readable(p.bad)}; font-weight: 600;
 }}
 QPushButton#dangerSolid:hover {{ background: {p.bad}; }}
@@ -326,38 +362,62 @@ QPushButton#dangerSolid:disabled {{
     color: {p.fg_mute};
 }}
 QPushButton#success {{
-    background: {_rgba(p.ok, 0.90)}; border: 1px solid {_rgba(p.ok, 0.55)};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {_rgba(p.ok, 0.94)}, stop:1 {_rgba(_mix(p.ok, p.cyan, 0.28), 0.94)});
+    border: 1px solid {_rgba(p.ok, 0.80)};
     color: {_readable(p.ok)}; font-weight: 600;
 }}
-QPushButton#success:hover {{ background: {p.ok}; }}
+QPushButton#success:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {p.ok}, stop:1 {_mix(p.ok, p.cyan, 0.22)});
+    border-color: {_mix(p.ok, p.cyan, 0.30)};
+}}
 QPushButton#success:disabled {{
     background: {_rgba(p.ok, 0.35)}; border-color: {_rgba(p.ok, 0.2)};
     color: {p.fg_mute};
 }}
 QPushButton#chip {{
-    background: transparent; border: 1px solid {p.line}; border-radius: 14px;
-    padding: 3px 12px; color: {p.fg_dim}; font-size: 11px;
+    background: transparent; border: 1px solid {_rgba(p.line, 0.90)};
+    border-radius: 16px; padding: 3px 12px; color: {p.fg_dim}; font-size: 11px;
 }}
-QPushButton#chip:hover {{ border-color: {p.accent}; color: {p.fg}; }}
+QPushButton#chip:hover {{ border-color: {_rgba(p.accent, 0.60)}; color: {p.fg}; }}
 QPushButton#chip:checked {{
     background: {_rgba(p.accent, 0.16)}; border-color: {p.accent};
     color: {p.fg}; font-weight: 600;
 }}
 
 /* ============================== 容器 ============================== */
-QFrame#card {{ background: {p.card}; border: 1px solid {p.line_soft}; border-radius: 10px; }}
+QFrame#card {{
+    background: {p.card}; border: 1px solid {_rgba(p.accent, 0.18)}; border-radius: 14px;
+}}
+QFrame#card:hover {{ border-color: {_rgba(p.accent, 0.48)}; }}
 QFrame#statCard {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 {p.card}, stop:1 {_mix(_solid(p.card), p.accent, 0.10)});
-    border: 1px solid {p.line_soft}; border-radius: 9px;
+    border: 1px solid {_rgba(p.accent, 0.16)}; border-radius: 12px;
 }}
-QFrame#statCard:hover {{ border-color: {_rgba(p.accent, 0.45)}; }}
+QFrame#statCard:hover {{ border-color: {_rgba(p.accent, 0.55)}; }}
 QFrame#brandBar {{
     background: {_rgba(p.base, 0.55)};
     border: none; border-bottom: 1px solid {_rgba(p.accent, 0.28)};
 }}
-QFrame#panelBox {{ background: {p.panel}; border: 1px solid {p.line_soft}; border-radius: 12px; }}
+QFrame#panelBox {{
+    background: {p.panel}; border: 1px solid {_rgba(p.accent, 0.16)}; border-radius: 14px;
+}}
 QFrame#hLine {{ background: {p.line_soft}; border: none; }}
+QFrame#vLine {{ background: {p.line_soft}; border: none; }}
+
+/* 均衡器频段小卡：圆角 8 px + 极淡底，hover 时 accent 提亮 */
+QFrame#eqBandCell {{
+    background: {_rgba(p.fg, 0.03)};
+    border: 1px solid {_rgba(p.line_soft, 0.60)};
+    border-radius: 8px;
+}}
+QFrame#eqBandCell:hover {{
+    background: {_rgba(p.accent, 0.10)};
+    border-color: {_rgba(p.accent, 0.35)};
+}}
+QFrame#eqBandCell[eqActive="false"] {{ background: transparent; border-color: {p.line_soft}; }}
 
 QLabel#brandTitle {{ color: {p.fg}; font-size: 16px; font-weight: 700; }}
 QLabel#brandSub {{ color: {p.fg_mute}; font-size: 10px; }}
@@ -369,79 +429,96 @@ QLabel#strong {{ color: {p.fg}; font-weight: 600; }}
 QLabel#warnHint {{ color: {p.warn}; font-size: 11px; }}
 QLabel#mono {{ font-family: {mono_font}; color: {p.fg_dim}; }}
 QLabel#fontPreview {{
-    padding: 8px 10px; border: 1px solid {p.line_soft}; border-radius: 8px;
+    padding: 8px 10px; border: 1px solid {p.line_soft}; border-radius: 10px;
     color: {p.fg_dim};
 }}
 QLabel#monoPreview {{
-    padding: 6px 10px; border: 1px solid {p.line_soft}; border-radius: 8px;
+    padding: 6px 10px; border: 1px solid {p.line_soft}; border-radius: 10px;
     color: {p.fg_mute};
 }}
-QFrame#vLine {{ background: {p.line_soft}; border: none; }}
 QPushButton#smallGhost {{
-    background: transparent; border: 1px solid {p.line_soft}; border-radius: 6px;
-    color: {p.fg_mute}; padding: 1px 10px; font-size: 11px;
+    background: {_rgba(p.fg, 0.03)};
+    border: 1px solid {_rgba(p.line, 0.80)};
+    border-radius: 8px; color: {p.fg_mute}; padding: 1px 10px; font-size: 11px;
 }}
-QPushButton#smallGhost:hover {{ color: {p.fg}; border-color: {p.line}; }}
+QPushButton#smallGhost:hover {{
+    color: {p.fg}; border-color: {_rgba(p.accent, 0.55)};
+    background: {_rgba(p.accent, 0.10)};
+}}
 
 /* ============================== 表格 ============================== */
 QTableView, QTableWidget {{
     background: {p.table}; alternate-background-color: {_rgba(p.base, 0.55)};
-    border: 1px solid {p.line_soft}; border-radius: 10px;
-    selection-background-color: {_rgba(p.accent, 0.20)}; selection-color: {p.fg};
+    border: 1px solid {_rgba(p.line_soft, 0.90)}; border-radius: 12px;
+    selection-background-color: {_mix(_solid(p.table), p.accent, 0.24)}; selection-color: {p.fg};
     outline: none; gridline-color: transparent;
 }}
 QTableView::item {{ padding: 2px 8px; border: none; }}
-QTableView::item:selected {{ background: {_rgba(p.accent, 0.20)}; color: {p.fg}; }}
-QTableView::item:hover {{ background: {_rgba(p.fg, 0.04)}; }}
-QTableView::item:selected:hover {{ background: {_rgba(p.accent, 0.26)}; }}
+QTableView::item:selected {{ background: {_mix(_solid(p.table), p.accent, 0.24)}; color: {p.fg}; }}
+QTableView::item:hover {{ background: {_mix(_solid(p.table), p.accent, 0.09)}; }}
+QTableView::item:selected:hover {{ background: {_mix(_solid(p.table), p.accent, 0.32)}; }}
 
 QHeaderView {{ background: transparent; }}
 QHeaderView::section {{
-    background: {_rgba(p.base, 0.78)}; color: {p.fg_dim}; border: none;
-    border-bottom: 1px solid {_rgba(p.accent, 0.30)};
+    background: {_rgba(p.base, 0.55)}; color: {p.fg_dim}; border: none;
+    border-bottom: 1px solid {_rgba(p.accent, 0.25)};
     padding: 9px 8px; font-size: 11px; font-weight: 600;
 }}
-QHeaderView::section:hover {{ color: {p.fg}; background: {p.hover}; }}
-QTableCornerButton::section {{ background: {_rgba(p.base, 0.86)}; border: none; }}
+QHeaderView::section:hover {{ color: {p.fg}; background: {_rgba(p.accent, 0.10)}; }}
+QTableCornerButton::section {{ background: {_rgba(p.base, 0.60)}; border: none; }}
 
 /* ============================== 输入 ============================== */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
-    background: {p.input}; border: 1px solid {p.line}; border-radius: 7px;
+    background: {p.input}; border: 1px solid {_rgba(p.line, 0.90)}; border-radius: 10px;
     padding: 6px 9px; color: {p.fg};
     selection-background-color: {p.accent_dim}; selection-color: {p.fg};
 }}
-QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {dim_border}; }}
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
+    border-color: {_rgba(p.accent, 0.45)};
+}}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
-    border-color: {p.accent};
+    /* 用不透明的混合色而不是 rgba()：半透明底在没有绘制背景的父控件上会叠到
+       系统默认白底，导致「白底白字」（输入框失焦后看不出，聚焦时整块变白）。
+       边框用 accent 提亮到 accent_hover 模拟发光，背景只掺 10% accent 内发光。 */
+    border: 1px solid {_mix(p.accent, p.accent_hover, 0.35)};
+    background: {_mix(_solid(p.input), p.accent, 0.10)};
 }}
 QLineEdit::placeholder {{ color: {p.fg_mute}; }}
 QLineEdit#searchInput {{
-    background: {p.input}; border: 1px solid {p.line}; border-radius: 8px;
+    background: {p.input}; border: 1px solid {_rgba(p.line, 0.90)}; border-radius: 10px;
     padding-left: 30px; padding-right: 8px; color: {p.fg};
 }}
-QLineEdit#searchInput:focus {{ border-color: {p.accent}; }}
-QComboBox::drop-down {{ border: none; width: 20px; }}
+QLineEdit#searchInput:focus {{
+    border: 1px solid {_mix(p.accent, p.accent_hover, 0.35)};
+    background: {_mix(_solid(p.input), p.accent, 0.10)};
+}}
+/* 下拉标记：QSS 只能用矩形/椭圆（「透明左右边框 + 实心上边框」的三角技巧在
+   Windows 样式下会画成方块），这里用一个 6 px 圆点作为弹出指示，与整体圆角
+   语言一致；不写规则则退化成深色系统箭头（深色主题下不可见）。 */
+QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox::down-arrow {{
-    image: none; border-left: 4px solid transparent; border-right: 4px solid transparent;
-    border-top: 5px solid {p.fg_mute}; margin-right: 8px;
+    image: none; background: {p.fg_mute}; border-radius: 3px;
+    width: 6px; height: 6px; margin-right: 7px;
 }}
 QComboBox QAbstractItemView {{
-    background: {p.panel}; border: 1px solid {p.line}; border-radius: 7px; padding: 4px;
-    selection-background-color: {p.active}; outline: none;
+    background: {p.panel}; border: 1px solid {_rgba(p.accent, 0.25)}; border-radius: 12px;
+    padding: 4px; selection-background-color: {_rgba(p.accent, 0.16)}; outline: none;
 }}
 QSpinBox::up-button, QDoubleSpinBox::up-button,
 QSpinBox::down-button, QDoubleSpinBox::down-button {{ background: transparent; border: none; width: 16px; }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
-    image: none; border-left: 3px solid transparent; border-right: 3px solid transparent;
+    image: none; width: 0; height: 0;
+    border-left: 3px solid transparent; border-right: 3px solid transparent;
     border-bottom: 4px solid {p.fg_mute};
 }}
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
-    image: none; border-left: 3px solid transparent; border-right: 3px solid transparent;
+    image: none; width: 0; height: 0;
+    border-left: 3px solid transparent; border-right: 3px solid transparent;
     border-top: 4px solid {p.fg_mute};
 }}
 
 QTextBrowser {{
-    background: {p.card}; border: 1px solid {p.line_soft}; border-radius: 8px;
+    background: {p.card}; border: 1px solid {_rgba(p.line_soft, 0.90)}; border-radius: 12px;
     padding: 6px; color: {p.fg_dim};
 }}
 QTextBrowser#licenseView {{ font-family: {mono_font}; font-size: 11px; }}
@@ -450,22 +527,24 @@ QTextBrowser#licenseView {{ font-family: {mono_font}; font-size: 11px; }}
 QCheckBox {{ spacing: 8px; color: {p.fg_dim}; background: transparent; }}
 QCheckBox:hover {{ color: {p.fg}; }}
 QCheckBox::indicator {{
-    width: 15px; height: 15px; border: 1px solid {p.line}; border-radius: 4px; background: {p.input};
+    width: 15px; height: 15px; border: 1px solid {_rgba(p.line, 0.90)};
+    border-radius: 5px; background: {p.input};
 }}
 QCheckBox::indicator:hover {{ border-color: {p.accent}; }}
-QCheckBox::indicator:checked {{ background: {p.accent}; border-color: {p.accent}; image: none; }}
+QCheckBox::indicator:checked {{ background: {p.accent}; border-color: {p.accent_hover}; image: none; }}
 
 QRadioButton {{ spacing: 9px; color: {p.fg_dim}; background: transparent; padding: 3px 0; }}
 QRadioButton:hover {{ color: {p.fg}; }}
 QRadioButton::indicator {{
-    width: 15px; height: 15px; border: 1px solid {p.line}; border-radius: 8px; background: {p.input};
+    width: 15px; height: 15px; border: 1px solid {_rgba(p.line, 0.90)};
+    border-radius: 8px; background: {p.input};
 }}
 QRadioButton::indicator:hover {{ border-color: {p.accent}; }}
-QRadioButton::indicator:checked {{ border: 1px solid {p.accent}; background: {p.accent}; }}
+QRadioButton::indicator:checked {{ border: 1px solid {p.accent_hover}; background: {p.accent}; }}
 
 /* ============================== 分组 ============================== */
 QGroupBox {{
-    background: {p.panel}; border: 1px solid {p.line_soft}; border-radius: 10px;
+    background: {p.panel}; border: 1px solid {_rgba(p.accent, 0.16)}; border-radius: 14px;
     margin-top: 16px; padding: 14px 12px 12px 12px; font-size: 12px; font-weight: 700; color: {p.fg};
 }}
 QGroupBox::title {{
@@ -474,53 +553,103 @@ QGroupBox::title {{
 }}
 
 /* ============================== 进度 ============================== */
-QProgressBar {{ background: {p.card}; border: none; border-radius: 2px; height: 4px; text-align: center; color: transparent; }}
+QProgressBar {{
+    background: {p.card}; border: none; border-radius: 3px;
+    height: 5px; text-align: center; color: transparent;
+}}
 QProgressBar::chunk {{
-    border-radius: 2px;
+    border-radius: 3px;
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {p.accent}, stop:1 {p.cyan});
 }}
 
+/* ============================== 滑杆 ============================== */
+/* 界面不透明度（品牌条右侧）：3 px 轨道 + 圆角 handle */
+QSlider#uiOpacity::groove:horizontal {{
+    height: 3px; background: {_rgba(p.fg, 0.14)}; border-radius: 2px;
+}}
+QSlider#uiOpacity::sub-page:horizontal {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {p.accent}, stop:1 {p.cyan});
+    border-radius: 2px;
+}}
+QSlider#uiOpacity::handle:horizontal {{
+    width: 12px; height: 12px; margin: -5px 0; border-radius: 6px;
+    background: {p.fg}; border: 1px solid {p.accent};
+}}
+QSlider#uiOpacity::handle:horizontal:hover {{ background: {p.accent_hover}; border-color: {p.cyan}; }}
+
+/* EQ 频段竖向滑杆：4 px 轨道 + 12×12 圆角 handle。
+   轨道上下**同色**（中性 10% 前景）：Qt 的 vertical sub-page 是 handle 上方、
+   add-page 是下方，只给一侧上色会读成「电平柱」而不是推子；数值靠 handle 位置、
+   顶部 dB 数字与曲线预览三处表达。 */
+QSlider#eqBand::groove:vertical {{
+    width: 4px; background: {_rgba(p.fg, 0.10)}; border-radius: 2px;
+}}
+QSlider#eqBand::sub-page:vertical {{
+    background: {_rgba(p.fg, 0.10)}; border-radius: 2px;
+}}
+QSlider#eqBand::add-page:vertical {{
+    background: {_rgba(p.fg, 0.10)}; border-radius: 2px;
+}}
+QSlider#eqBand::handle:vertical {{
+    height: 13px; width: 13px; margin: 0 -5px; border-radius: 7px;
+    background: {p.fg}; border: 1px solid {p.accent};
+}}
+QSlider#eqBand::handle:vertical:hover {{ background: {p.accent_hover}; border-color: {p.cyan}; }}
+QSlider#eqBand:disabled::handle:vertical {{ background: {p.fg_mute}; border-color: transparent; }}
+
 /* ============================== 状态栏 ============================== */
-QStatusBar {{ background: {_rgba(p.base, 0.72)}; border-top: 1px solid {p.line_soft}; color: {p.fg_mute}; font-size: 11px; }}
+QStatusBar {{ background: {_rgba(p.base, 0.72)}; border-top: 1px solid {_rgba(p.line_soft, 0.90)}; color: {p.fg_mute}; font-size: 11px; }}
 QStatusBar::item {{ border: none; }}
 
 /* ============================== 分割器 ============================== */
 QSplitter::handle {{ background: transparent; }}
 QSplitter::handle:horizontal {{ width: 10px; }}
-QSplitter::handle:hover {{ background: {p.line_soft}; }}
+QSplitter::handle:hover {{ background: {_rgba(p.accent, 0.18)}; }}
 
 /* ============================== 滚动条 ============================== */
-QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: {_rgba(p.fg, 0.20)}; border-radius: 4px; min-height: 28px; }}
-QScrollBar::handle:vertical:hover {{ background: {_rgba(p.fg, 0.30)}; }}
+QScrollBar:vertical {{ background: transparent; width: 7px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {_rgba(p.fg, 0.16)}; border-radius: 4px; min-height: 26px; }}
+QScrollBar::handle:vertical:hover {{ background: {_rgba(p.accent, 0.55)}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: {_rgba(p.fg, 0.20)}; border-radius: 4px; min-width: 28px; }}
-QScrollBar::handle:horizontal:hover {{ background: {_rgba(p.fg, 0.30)}; }}
+QScrollBar:horizontal {{ background: transparent; height: 7px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {_rgba(p.fg, 0.16)}; border-radius: 4px; min-width: 26px; }}
+QScrollBar::handle:horizontal:hover {{ background: {_rgba(p.accent, 0.55)}; }}
+QScrollArea#eqScroll {{ background: transparent; border: none; }}
 
 /* ============================== 菜单 ============================== */
-QMenu {{ background: {p.panel}; border: 1px solid {p.line}; border-radius: 9px; padding: 6px; }}
-QMenu::item {{ padding: 7px 24px 7px 14px; border-radius: 6px; color: {p.fg_dim}; }}
-QMenu::item:selected {{ background: {p.active}; color: {p.fg}; }}
+QMenu {{
+    background: {p.panel}; border: 1px solid {_rgba(p.accent, 0.22)};
+    border-radius: 12px; padding: 6px;
+}}
+QMenu::item {{ padding: 7px 24px 7px 14px; border-radius: 8px; color: {p.fg_dim}; }}
+QMenu::item:selected {{ background: {_rgba(p.accent, 0.16)}; color: {p.fg}; }}
 QMenu::item:disabled {{ color: {p.fg_mute}; }}
 QMenu::separator {{ height: 1px; background: {p.line_soft}; margin: 5px 8px; }}
 QMenu::indicator {{ width: 13px; height: 13px; margin-left: 6px; }}
 
 /* ============================== 日志 ============================== */
 QPlainTextEdit#logView {{
-    background: {p.log}; border: 1px solid {p.line_soft}; border-radius: 10px;
+    background: {p.log}; border: 1px solid {_rgba(p.line_soft, 0.90)}; border-radius: 12px;
     padding: 8px 10px; font-family: {mono_font}; font-size: 11px; color: {p.fg_dim};
 }}
 
 /* ============================== Tab ============================== */
 QTabWidget::pane {{
-    border: 1px solid {_rgba(p.accent, 0.22)}; border-radius: 10px;
+    border: 1px solid {_rgba(p.accent, 0.20)}; border-radius: 12px;
     background: {p.panel}; top: -1px;
 }}
-QTabBar::tab {{ background: transparent; padding: 8px 16px; color: {p.fg_mute}; border: none; border-bottom: 2px solid transparent; }}
-QTabBar::tab:hover {{ color: {p.fg_dim}; }}
-QTabBar::tab:selected {{ color: {p.fg}; border-bottom-color: {p.accent}; }}
+QTabBar::tab {{
+    background: transparent; padding: 8px 18px; border-radius: 9px;
+    color: {p.fg_mute}; border: none; margin-right: 4px;
+}}
+QTabBar::tab:hover {{ color: {p.fg_dim}; background: {_rgba(p.accent, 0.08)}; }}
+QTabBar::tab:selected {{
+    color: {p.fg};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {_rgba(p.accent, 0.22)}, stop:1 {_rgba(p.accent, 0.10)});
+    font-weight: 600;
+}}
 """
     # 字号倍率：QSS 里所有 font-size:Npx 统一缩放，避免逐条改模板
     return re.sub(

@@ -40,6 +40,8 @@ class SettingsPanel(QWidget):
     settingsChanged = Signal()   # 有未保存的修改（不再自动落盘，仅标记脏）
     saved = Signal()             # 「保存参数」成功后发出，主窗口据此刷新依赖设置的状态
     appearancePreviewChanged = Signal(str, str, float)  # 字体/字号预览（id, id, scale）
+    # 后端变了 → 请求主窗口重新枚举设备（设备表由 PlayerBridge 持有，面板不碰 player）
+    outputDeviceRefreshRequested = Signal(str)
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -51,6 +53,8 @@ class SettingsPanel(QWidget):
         self._sticky_notice = ""
         self._last_base_hint = ""
         self._auto_downgrading = False
+        #: 设备名 → 该设备上报的声道数（set_output_devices 填充）
+        self._device_channels: dict[str, int] = {}
         self.setMinimumWidth(380)
         # 上限放宽到 900：窗口最大化/变宽时右侧参数面板能真正用上空间，
         # 而不是被 560px 硬顶住、留一条空白（需求 5）。
@@ -436,10 +440,7 @@ class SettingsPanel(QWidget):
 
         self.device_combo = QComboBox()
         self.device_combo.setMinimumWidth(200)
-        self.device_combo.setToolTip(
-            "留空表示使用系统默认设备。列表来自 PortAudio，"
-            "同一物理设备在不同后端下会出现多次"
-        )
+        self.device_combo.setToolTip(i18n.tr("dev_hint_device_scoped"))
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
         self.backend_combo = QComboBox()
@@ -593,7 +594,9 @@ class SettingsPanel(QWidget):
         card = Card("缓冲与解码", "延迟与 CPU 的折中", theme.PURPLE)
 
         self.buffer_spin = QSpinBox()
-        self.buffer_spin.setRange(10, 500)
+        # 下限 40 ms 与产品定稿一致（config 的 playback_buffer_ms 注释 +
+        # 引擎侧钳制都用这个值）：再深就只是变钝，再浅必然欠载爆音
+        self.buffer_spin.setRange(40, 500)
         self.buffer_spin.setSingleStep(10)
         self.buffer_spin.setSuffix(" ms")
         self.buffer_spin.setToolTip(
@@ -669,11 +672,25 @@ class SettingsPanel(QWidget):
         card.add_widget(self.recent_sort_check)
         return card
 
-    def set_output_devices(self, devices) -> None:
-        """刷新输出设备下拉（设备枚举在 ``PlayerBridge`` 里，本面板不 import player）。"""
+    def set_output_devices(self, devices, *, scoped: bool = False) -> None:
+        """刷新输出设备下拉（设备枚举在 ``PlayerBridge`` 里，本面板不 import player）。
+
+        Args:
+            devices: ``PlayerBridge.list_output_devices()`` 的字典列表。
+            scoped: ``True`` 表示列表已按当前后端过滤，显示纯设备名；后端前缀
+                （``MME · xxx``）在同一后端里是冗余的，反而让列表看起来翻倍。
+                ``False`` 保持旧行为（全量列表带前缀），兼容既有调用方/测试。
+        """
         current = self.device_combo.currentData()
         if current is None:
             current = getattr(self.settings, "playback_device", "") or ""
+        # 记下每台设备上报的声道数：下拉只存名字，但「这台设备只吃 N 声道」
+        # 这件事必须在选设备时就能提示（见 _update_device_hint）。
+        self._device_channels = {
+            str(entry.get("name") or ""): int(entry.get("channels") or 0)
+            for entry in (devices or [])
+            if isinstance(entry, dict) and entry.get("name")
+        }
         self._loading = True
         try:
             self.device_combo.clear()
@@ -684,12 +701,31 @@ class SettingsPanel(QWidget):
                 name = str(entry.get("name") or "")
                 if not name:
                     continue
-                label = str(entry.get("label") or name)
+                label = name if scoped else str(entry.get("label") or name)
                 self.device_combo.addItem(label, name)
             index = self.device_combo.findData(current)
             self.device_combo.setCurrentIndex(index if index >= 0 else 0)
+            self._update_device_hint()
         finally:
             self._loading = False
+
+    def _update_device_hint(self) -> None:
+        """设备 tooltip：WASAPI 下的多声道设备只吃原生声道数（v1.8 实测）。
+
+        例：本机「扬声器 (Strix 7.1)」在 WASAPI 上报 8 声道，2 声道共享/独占
+        一律开不了流；同一设备在 MME / DirectSound 下 2 声道完全正常。
+        这种设备选中的瞬间就该被提示，而不是等用户点播放后去读一整行
+        「在上述候选下都打不开」——那句话虽然准确，但出现得太晚了。
+        """
+        base = i18n.tr("dev_hint_device_scoped")
+        if self._current_backend_key() == "wasapi":
+            name = str(self.device_combo.currentData() or "")
+            channels = int(getattr(self, "_device_channels", {}).get(name, 0) or 0)
+            if channels > 2:
+                base = base + "\n\n" + i18n.tr_format(
+                    "dev_hint_multichannel", channels=channels, source=2
+                )
+        self.device_combo.setToolTip(base)
 
     def _current_backend_key(self) -> str:
         return str(self.backend_combo.currentData() or "mme")
@@ -698,6 +734,7 @@ class SettingsPanel(QWidget):
         """换设备：能力矩阵要跟着重探（严格项可能从可用变不可用，反之亦然）。"""
         if not self._loading:
             self._clear_sticky_notice()   # E11：用户换了设备，旧设备的降级说明不再适用
+        self._update_device_hint()
         # 用 isHidden() 而不是 isVisible()：面板未 show() 时（离屏测试、构造期）
         # isVisible() 恒为 False，会让能力刷新整段失效。
         if not self._loading and not self.capability_box.isHidden():
@@ -707,8 +744,13 @@ class SettingsPanel(QWidget):
     def _on_backend_changed(self, _index: int) -> None:
         key = self._current_backend_key()
         self.backend_hint.setText(i18n.tr(f"dev_hint_{key}"))
+        # 后端一变，「WASAPI 多声道设备吃不开 2 声道」这条提示的前提也变了
+        self._update_device_hint()
         if not self._loading:
             self._clear_sticky_notice()   # E11：用户换了后端，旧后端的降级说明不再适用
+            # 同一物理设备在每个 hostapi 下各占一条：后端一变，设备表必须跟着换。
+            # 主窗口是设备的唯一持有者，这里只发键，由它过滤后回填下拉。
+            self.outputDeviceRefreshRequested.emit(key)
             mode = self._current_output_mode()
             # 非 WASAPI 后端：独占/严格置灰，并退回共享
             self._apply_mode_constraints(mode)

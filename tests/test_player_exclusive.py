@@ -133,6 +133,33 @@ def refuse_exclusive_prepare(real_prepare, error_factory):
 class TestOutputModeConfig(unittest.TestCase):
     """T01：三参数矩阵、模式别名、实际值上报、严格+浮点前置拦截、错误码分岔。"""
 
+    def test_first_run_defaults_to_shared(self) -> None:
+        """首次启动默认共享：不让用户在还不懂独占代价时就被推上独占。
+
+        独占会绕开 Windows 混音器 —— 系统音量失效、其它程序没声音。
+        默认值必须是 shared，用户主动选了才用独占（v1.8.0 需求 4）。
+        """
+        settings = Settings()
+        self.assertEqual(settings.playback_output_mode, "shared")
+        self.assertFalse(settings.playback_exclusive)
+
+    def test_exclusive_notice_skipped_offscreen(self) -> None:
+        """离屏环境不得弹独占提醒（否则自动化用例会被模态框卡死）。"""
+        import os
+        from types import SimpleNamespace
+
+        from seqaudio.ui.main_window import MainWindow
+
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen":
+            self.skipTest("仅在离屏环境下验证跳过逻辑")
+        fake = SimpleNamespace(settings=Settings())
+        fake.settings.playback_output_mode = "exclusive"
+        MainWindow._maybe_announce_exclusive(fake, force=True)
+        self.assertFalse(
+            fake.settings.playback_exclusive_notice_shown,
+            "离屏时应在进入弹窗前返回，不写已读标记",
+        )
+
     def test_output_config_mode_fields(self) -> None:
         from seqaudio.player.output import OutputConfig
 
@@ -197,7 +224,14 @@ class TestOutputModeConfig(unittest.TestCase):
                 output.stop()
             return ""
 
-        self.assertEqual(guard("exclusive"), "", "宽松独占必须允许 float32")
+        # 这条断言的本意是「前置校验允许 float32」，但 guard() 走的是真实
+        # prepare → 会受当前默认设备能力影响（Windows 默认设备换成不支持
+        # 44.1k 独占的 8ch 设备时会被设备侧拒绝）。设备侧拒绝与"格式被拦"
+        # 是两回事：前者只说明这台机器此刻开不了流，应该 skip 而不是判回归。
+        message = guard("exclusive")
+        if "候选" in message or "打不开" in message or "采样率" in message:
+            self.skipTest(f"当前默认设备不支持独占开流，无法验证前置校验：{message}")
+        self.assertEqual(message, "", "宽松独占必须允许 float32")
         self.assertIn("整数", guard("exclusive_strict"),
                       "严格独占必须拦下 float32 并说明要整数")
 
@@ -1158,6 +1192,38 @@ class TestProbeCredibility(unittest.TestCase):
 # ---------------------------------------------------------------- 打包冒烟
 
 
+def _pick_smoke_device():
+    """挑一台**真能开 44100 独占流**的 WASAPI 设备。
+
+    冒烟固定走 WASAPI（唯一能判独占的后端），且独占档要求跑源采样率 44100。
+    本机默认输出可能是 8 声道环绕，WASAPI 双声道开流会被设备直接拒绝；
+    只挑到「能开共享」的设备也不够——那些设备往往不支持 44100 独占，
+    独占冒烟会悄悄跑成 48000。所以这里按**最终判据**挑：真实开一次
+    44100 独占流，成功才算候选。
+    """
+    from seqaudio.player.output import AudioOutput
+    from seqaudio.player.ringbuffer import PcmRingBuffer
+
+    try:
+        candidates = dev_mod.list_output_devices("wasapi")
+    except Exception:  # noqa: BLE001 - 枚举失败就当没有
+        return None
+    for item in candidates:
+        ring = PcmRingBuffer.from_seconds(0.2, 44100, 2, "float32")
+        output = AudioOutput(ring, device=item.index, backend="wasapi", mode="exclusive")
+        try:
+            output.prepare(44100, 2, mode="exclusive")
+            return item
+        except Exception:  # noqa: BLE001 - 这台不行，换下一台
+            continue
+        finally:
+            try:
+                output.stop()
+            except Exception:  # noqa: BLE001
+                pass
+    return None
+
+
 @unittest.skipUnless(PACKAGED_EXE.exists(), "没有便携版 exe（先跑 build.py）")
 class TestPackagedSmoke(unittest.TestCase):
     """独立验证 ⑦：打包 exe 三模式冒烟。"""
@@ -1168,6 +1234,10 @@ class TestPackagedSmoke(unittest.TestCase):
             raise unittest.SkipTest("ffmpeg 不可用，无法生成素材")
         cls.tmp = Path(tempfile.mkdtemp(prefix="seq17_pkg_"))
         cls.source = synth_flac(cls.tmp / "pkg44k.flac", seconds=8.0, rate=44100)
+        cls.device_info = _pick_smoke_device()
+        cls.device = cls.device_info.name if cls.device_info is not None else ""
+        if not cls.device:
+            raise unittest.SkipTest("本机没有支持 44100 独占的 WASAPI 设备")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -1176,13 +1246,16 @@ class TestPackagedSmoke(unittest.TestCase):
     def _run(self, mode: str) -> dict:
         report_path = Path(tempfile.gettempdir()) / "seqaudio_audio_smoke.json"
         report_path.unlink(missing_ok=True)
+        command = [str(PACKAGED_EXE), "--audio-smoke", str(self.source), f"--mode={mode}"]
+        if self.device:
+            command.append(f"--device={self.device}")
         proc = subprocess.run(
-            [str(PACKAGED_EXE), "--audio-smoke", str(self.source), f"--mode={mode}"],
+            command,
             capture_output=True, timeout=240,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         self.assertEqual(proc.returncode, 0,
-                         f"{mode} 冒烟退出码 {proc.returncode}："
+                         f"{mode} 冒烟退出码 {proc.returncode}（设备={self.device or '系统默认'}）："
                          f"{proc.stdout.decode('utf-8', 'replace')[:200]}")
         return json.loads(report_path.read_text(encoding="utf-8"))
 
@@ -1207,19 +1280,17 @@ class TestPackagedSmoke(unittest.TestCase):
         self.assertEqual(strict["underruns"], 0)
 
         # 严格是**设备特性**（本机 5 台 WASAPI 只有 Realtek 扬声器支持）。
-        # 系统默认设备不支持时，冒烟必须明确降级并留 note，而不是假装成功。
-        default_device = dev_mod.system_default_output_index()
-        supports_strict = (
-            default_device >= 0
-            and dev_mod.supports_rate(default_device, 44100, 2,
-                                      mode="exclusive_strict")
+        # 这里按**冒烟实际使用的设备**判断，不能用系统默认设备 —— 默认设备
+        # 与冒烟设备可能不是同一台，混着判会得出相反结论。
+        supports_strict = dev_mod.supports_rate(
+            self.device_info.index, 44100, 2, mode="exclusive_strict"
         )
         if supports_strict:
             self.assertEqual(strict["output_mode"], "exclusive_strict")
             self.assertEqual(strict["wording_level"], "L2")
         else:
             self.assertEqual(strict["output_mode"], "exclusive",
-                             "默认设备不支持严格时应降级为宽松独占")
+                             "该设备不支持严格时应降级为宽松独占")
             self.assertTrue(strict["mode_note"], "降级必须留原因")
 
 

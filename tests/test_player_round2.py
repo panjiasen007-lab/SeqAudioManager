@@ -196,14 +196,13 @@ class TestAbSwitch(unittest.TestCase):
             playback_dsp_bypass=False,
             playback_volume_mode="bypass",
             playback_eq_enabled=True,
-            playback_eq_gains=[0.0] * 10,
+            playback_eq_gains=[0.0] * 31,
         )
         sink: dict = {}
         engine = make_engine(settings, sink)
-        snapshot_a = [0.0] * 10
-        # EQ_BANDS_HZ = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
-        # 1 kHz 测试音要对准**下标 5**；下标 4 是 500 Hz（第一次写用例时踩过）
-        snapshot_b = [0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0]
+        snapshot_a = [0.0] * 31
+        # 1 kHz 测试音要对准 31 段表的下标 17（1/3 倍频程 20 Hz 起）
+        snapshot_b = [0.0] * 17 + [6.0] + [0.0] * 13
         try:
             engine.set_queue(PlayQueue([item_for(self.file, duration=3.0)]))
             engine.set_eq_gains(snapshot_a)

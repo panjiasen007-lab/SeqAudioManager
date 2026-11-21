@@ -471,13 +471,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         for device in report["devices"]:
             info = describe_capability(device)
             suffix = ""
-        if device["modes"].get("open_check"):
-            same_one, total_one, _ = consistency(device)
-            suffix = f"  探测可信 {same_one}/{total_one}"
-        print(f"dev{device['index']:02d} {device['name'][:44]:44s} "
+            if device["modes"].get("open_check"):
+                same_one, total_one, _ = consistency(device)
+                suffix = f"  探测可信 {same_one}/{total_one}"
+            print(f"dev{device['index']:02d} {device['name'][:44]:44s} "
                   f"{device['backend'][:18]:18s} {device['channels_probed']}ch  "
                   f"{info['hint']}{suffix}")
-        print()
+            print()
 
     if args.no_write:
         print(render_markdown(report))

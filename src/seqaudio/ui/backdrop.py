@@ -109,11 +109,11 @@ class BackdropWidget(QWidget):
     def _paint_base(painter, rect, width, height, palette) -> None:
         gradient = QLinearGradient(0, 0, width * 0.9, height * 1.15)
         gradient.setColorAt(
-            0.0, QColor(theme._mix(palette.base, palette.accent, 0.16))
+            0.0, QColor(theme._mix(palette.base, palette.accent, 0.10))
         )
         gradient.setColorAt(0.46, QColor(palette.base))
         gradient.setColorAt(
-            1.0, QColor(theme._mix(palette.base, palette.cyan, 0.07))
+            1.0, QColor(theme._mix(palette.base, palette.cyan, 0.05))
         )
         painter.fillRect(rect, gradient)
 
@@ -121,9 +121,9 @@ class BackdropWidget(QWidget):
     def _paint_glow(painter, width, height, palette) -> None:
         radius = max(width, height) * 0.72
         glow = QRadialGradient(width * 0.82, height * 0.06, radius)
-        alpha = 18 if palette.light else 42
+        alpha = 12 if palette.light else 28
         glow.setColorAt(0.0, _alpha(palette.accent, alpha))
-        glow.setColorAt(0.45, _alpha(palette.accent, max(4, alpha // 3)))
+        glow.setColorAt(0.45, _alpha(palette.accent, max(3, alpha // 3)))
         glow.setColorAt(1.0, _alpha(palette.accent, 0))
         painter.setPen(Qt.NoPen)
         painter.setBrush(glow)
@@ -140,7 +140,7 @@ class BackdropWidget(QWidget):
     def _paint_vignette(painter, rect, width, height, palette) -> None:
         radius = max(width, height) * 0.78
         vignette = QRadialGradient(width * 0.5, height * 0.42, radius)
-        edge = 42 if palette.light else 70
+        edge = 28 if palette.light else 48
         vignette.setColorAt(0.0, QColor(0, 0, 0, 0))
         vignette.setColorAt(0.62, QColor(0, 0, 0, 0))
         vignette.setColorAt(1.0, QColor(0, 0, 0, edge))
@@ -157,11 +157,11 @@ class BackdropWidget(QWidget):
     def _paint_stars(self, painter, width, height, palette) -> None:
         rng = self._rng("stars", width, height)
         painter.setPen(Qt.NoPen)
-        for _ in range(max(45, int(width * height / 16000))):
+        for _ in range(max(28, int(width * height / 24000))):
             x, y = rng.uniform(0, width), rng.uniform(0, height * 0.9)
-            radius = rng.uniform(0.6, 2.2)
+            radius = rng.uniform(0.6, 1.9)
             color = palette.accent if rng.random() < 0.65 else palette.cyan
-            painter.setBrush(_alpha(color, rng.randint(35, 150)))
+            painter.setBrush(_alpha(color, rng.randint(28, 110)))
             painter.drawEllipse(QPointF(x, y), radius, radius)
 
         for index in range(3):
@@ -170,8 +170,8 @@ class BackdropWidget(QWidget):
             radius = rng.uniform(width * 0.12, width * 0.28)
             nebula = QRadialGradient(cx, cy, radius)
             color = palette.purple if index % 2 else palette.accent
-            nebula.setColorAt(0.0, _alpha(color, 30))
-            nebula.setColorAt(0.5, _alpha(color, 12))
+            nebula.setColorAt(0.0, _alpha(color, 18))
+            nebula.setColorAt(0.5, _alpha(color, 8))
             nebula.setColorAt(1.0, _alpha(color, 0))
             painter.setBrush(nebula)
             painter.drawEllipse(QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
@@ -188,9 +188,9 @@ class BackdropWidget(QWidget):
         cx, cy = width * 0.80, height * 0.34
         radius = min(width, height) * 0.52
         painter.setBrush(Qt.NoBrush)
-        for index in range(18):
-            level = 0.20 + index * 0.045
-            painter.setPen(QPen(_alpha(palette.accent, 8 + index), 1))
+        for index in range(14):
+            level = 0.20 + index * 0.055
+            painter.setPen(QPen(_alpha(palette.accent, 6 + index), 1))
             painter.drawEllipse(QPointF(cx, cy), radius * level, radius * level)
 
         painter.setPen(QPen(_alpha(palette.cyan, 26), 2))
@@ -231,7 +231,7 @@ class BackdropWidget(QWidget):
             )
             painter.drawPath(path)
 
-        for _ in range(26):
+        for _ in range(16):
             x, y = rng.uniform(width * 0.05, width * 0.95), rng.uniform(0, height * 0.9)
             painter.save()
             painter.translate(x, y)
@@ -247,8 +247,8 @@ class BackdropWidget(QWidget):
         cx, cy = width * 0.80, height * 0.10
         radius = min(width, height) * 0.24
         sun = QRadialGradient(cx, cy, radius * 1.8)
-        sun.setColorAt(0.0, _alpha(palette.accent, 46))
-        sun.setColorAt(0.42, _alpha(palette.accent, 18))
+        sun.setColorAt(0.0, _alpha(palette.accent, 32))
+        sun.setColorAt(0.42, _alpha(palette.accent, 12))
         sun.setColorAt(1.0, _alpha(palette.accent, 0))
         painter.setPen(Qt.NoPen)
         painter.setBrush(sun)
@@ -257,8 +257,8 @@ class BackdropWidget(QWidget):
         )
 
         painter.setPen(QPen(_alpha(palette.cyan, 16), 2))
-        for index in range(16):
-            angle = index * math.pi / 8
+        for index in range(12):
+            angle = index * math.pi / 6
             painter.drawLine(
                 QPointF(cx + math.cos(angle) * radius, cy + math.sin(angle) * radius),
                 QPointF(
@@ -275,7 +275,7 @@ class BackdropWidget(QWidget):
 
     def _paint_leaves(self, painter, width, height, palette) -> None:
         rng = self._rng("leaves", width, height)
-        for _ in range(18):
+        for _ in range(12):
             x, y = rng.uniform(0, width), rng.uniform(0, height * 0.9)
             painter.save()
             painter.translate(x, y)
@@ -307,14 +307,14 @@ class BackdropWidget(QWidget):
     def _paint_snow(self, painter, width, height, palette) -> None:
         rng = self._rng("snow", width, height)
         painter.setPen(Qt.NoPen)
-        for _ in range(60):
+        for _ in range(36):
             x, y = rng.uniform(0, width), rng.uniform(0, height)
-            painter.setBrush(_alpha(palette.accent, rng.randint(20, 80)))
+            painter.setBrush(_alpha(palette.accent, rng.randint(16, 64)))
             radius = rng.uniform(0.8, 2.8)
             painter.drawEllipse(QPointF(x, y), radius, radius)
 
         painter.setPen(QPen(_alpha(palette.cyan, 26), 1.2))
-        for _ in range(14):
+        for _ in range(9):
             cx, cy = rng.uniform(0, width), rng.uniform(0, height * 0.85)
             radius = rng.uniform(6, 18)
             for arm in range(6):
@@ -341,7 +341,7 @@ class BackdropWidget(QWidget):
 
         rng = self._rng("waves", width, height)
         painter.setPen(Qt.NoPen)
-        for _ in range(45):
+        for _ in range(28):
             x = rng.uniform(0, width)
             y = rng.uniform(height * 0.72, height * 0.96)
             radius = rng.uniform(1, 3.5)
@@ -363,7 +363,7 @@ class BackdropWidget(QWidget):
 
         rng = self._rng("dusk", width, height)
         painter.setPen(Qt.NoPen)
-        for _ in range(38):
+        for _ in range(24):
             x, y = rng.uniform(0, width), rng.uniform(0, height * 0.5)
             radius = rng.uniform(0.5, 1.8)
             painter.setBrush(_alpha(palette.cyan, rng.randint(40, 120)))
@@ -402,14 +402,14 @@ class BackdropWidget(QWidget):
     def _paint_paper(self, painter, width, height, palette) -> None:
         rng = self._rng("paper", width, height)
         painter.setPen(Qt.NoPen)
-        for _ in range(int(width * height / 5200)):
+        for _ in range(int(width * height / 9000)):
             x, y = rng.uniform(0, width), rng.uniform(0, height)
             radius = rng.uniform(0.3, 1.1)
             painter.setBrush(_alpha(palette.fg_dim, rng.randint(6, 16)))
             painter.drawEllipse(QPointF(x, y), radius, radius)
 
         painter.setPen(QPen(_alpha(palette.accent, 10), 1))
-        for _ in range(26):
+        for _ in range(16):
             x, y = rng.uniform(0, width), rng.uniform(0, height)
             length = rng.uniform(20, 90)
             painter.drawLine(QPointF(x, y), QPointF(x + length, y + rng.uniform(-4, 4)))

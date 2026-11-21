@@ -247,7 +247,7 @@ class TestIntPipelineDspMatrix(unittest.TestCase):
         settings.playback_volume_mode = volume_mode
         settings.playback_volume_db = -6.0 if volume_mode == "software" else 0.0
         settings.playback_eq_enabled = eq_enabled
-        settings.playback_eq_gains = [0.0] * 10  # 全平直：不该改变幅度
+        settings.playback_eq_gains = [0.0] * 31  # 全平直：不该改变幅度
 
         sink: dict = {}
         engine = make_engine(settings, sink)
@@ -313,15 +313,15 @@ class TestIntPipelineDspMatrix(unittest.TestCase):
                                 problems.append(f"{name}: 欠载 {result['underruns']} 次")
 
                             ratio = result["rms"] / reference
-                            software_gain = (
-                                not dsp_bypass and volume_mode == "software"
-                            )
+                            # 软件音量是否改样本，只由 volume_mode 决定，与 dsp_bypass
+                            # 无关（引擎 set_volume 从不看 bypass）。v1.8 修的就是
+                            # "以为 bypass 会挡音量"这个错误模型：它让 int16 缓冲里
+                            # 做了浮点乘，回调抛异常后整场静音。
+                            # 本矩阵里 software 档固定 -6 dB（见 _play），必然改样本。
+                            software_gain = volume_mode == "software"
                             # ④ 「整数通路被 DSP 挤掉」必须在格式级说清原因，
                             #    否则用户以为自己在跑位完美路径。
-                            will_process = (
-                                not dsp_bypass
-                                and (volume_mode == "software" or eq_enabled)
-                            )
+                            will_process = software_gain or (not dsp_bypass and eq_enabled)
                             expect_downgrade = int_pipeline and will_process
                             detail = result["dtype"]
                             if expect_downgrade:
@@ -651,8 +651,20 @@ class TestConfig(unittest.TestCase):
                 self.assertEqual(getattr(settings, name), expected,
                                  f"{name} 默认值应为 {expected!r}")
 
+    #: 取值受限的播放字段：往返测试不能用「+1 / +_qa」这种无意义值，
+    #: 因为 ``Settings.from_dict`` 会把越界值折回合法值（v1.8 起有意为之：
+    #: 手改的配置文件必须收敛，否则会静音或爆音）。这里给每个字段一个
+    #: **合法但不同**的替身，测的仍是"存得下、读得回"。
+    _VALID_ALTERNATES = {
+        "playback_output_mode": "exclusive",
+        "playback_volume_mode": "software",
+        "playback_dsd_pcm_rate": 352800,
+        "playback_ramp_ms": 3,
+        "playback_mode": "shuffle",
+    }
+
     def test_roundtrip_all_playback_fields(self) -> None:
-        """31 个 playback_* + 3 个 library_* 全部改值后往返一致。"""
+        """全部 playback_* + 3 个 library_* 改值后往返一致。"""
         import dataclasses
 
         tmp = Path(tempfile.mkdtemp(prefix="seq_cfg_"))
@@ -666,7 +678,9 @@ class TestConfig(unittest.TestCase):
             ]
             for field in fields:
                 current = getattr(settings, field.name)
-                if isinstance(current, bool):
+                if field.name in self._VALID_ALTERNATES:
+                    setattr(settings, field.name, self._VALID_ALTERNATES[field.name])
+                elif isinstance(current, bool):
                     setattr(settings, field.name, not current)
                 elif isinstance(current, int):
                     setattr(settings, field.name, current + 1)
@@ -675,7 +689,16 @@ class TestConfig(unittest.TestCase):
                 elif isinstance(current, str):
                     setattr(settings, field.name, current + "_qa")
                 elif isinstance(current, list):
-                    setattr(settings, field.name, list(current) + [1.0])
+                    if field.name in Settings.EQ_GAIN_FIELDS:
+                        # EQ 曲线长度被段数锁死（v1.8 = 31 段）：改值而不是加长，
+                        # 否则读回时会被 from_dict 截断成 31（这是有意的归一化）
+                        setattr(
+                            settings,
+                            field.name,
+                            [float(index) for index in range(Settings.EQ_BAND_COUNT)],
+                        )
+                    else:
+                        setattr(settings, field.name, list(current) + [1.0])
             settings.save(target)
             loaded = Settings.load(target)
             for field in fields:

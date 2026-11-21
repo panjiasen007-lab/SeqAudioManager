@@ -157,12 +157,17 @@ def _selftest() -> int:
     return 0
 
 
-def _audio_smoke(src: str, mode: str = "") -> int:
+def _audio_smoke(src: str, mode: str = "", device: str = "") -> int:
     """`--audio-smoke <音频文件>`：真实播放 3 秒并落盘结果（发版冒烟用）。
 
     校验脚本查不到 PYZ 归档里的 sounddevice 模块，「DLL 漏带」的症状又是
     启动正常、一播才炸——所以发版前必须让打包后的 exe **真的出一次声**。
     输出 JSON 到临时目录，字段齐全与否直接判定发版放行与否。
+
+    ``--device=<名称>`` 可选：本机默认输出若是 8 声道环绕（如某些主板把
+    「扬声器 7.1」设为默认），WASAPI 双声道流会被设备直接拒绝，冒烟就会
+    报 ``play_accepted=false`` —— 那是设备选错了，不是包有问题。指定一台
+    支持立体声的设备即可把「包能否出声」和「默认设备能否开流」分开判断。
     """
     import json
     import tempfile
@@ -178,6 +183,9 @@ def _audio_smoke(src: str, mode: str = "") -> int:
         info = probe(Path(src), with_cue=False)
         settings = Settings()
         report["requested_mode"] = mode or settings.playback_output_mode
+        if device:
+            settings.playback_device = str(device)
+            report["requested_device"] = str(device)
         if mode:
             # 冒烟专用：强制 WASAPI + 指定模式，让"独占到底成没成"变成可判定的事实
             settings.playback_output_backend = "wasapi"
@@ -429,7 +437,12 @@ def main(argv: list[str] | None = None) -> int:
         for token in args:
             if token.startswith("--mode="):
                 mode = token.split("=", 1)[1].strip()
-        return _audio_smoke(target, mode=mode)
+        # 可选的 --device=<名称>（默认设备不支持 WASAPI 双声道时指定一台）
+        device = ""
+        for token in args:
+            if token.startswith("--device="):
+                device = token.split("=", 1)[1].strip()
+        return _audio_smoke(target, mode=mode, device=device)
     if "--selftest-file" in args:
         index = args.index("--selftest-file")
         target = args[index + 1] if index + 1 < len(args) else ""

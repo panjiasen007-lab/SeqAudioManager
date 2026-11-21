@@ -211,7 +211,7 @@ class TestIntPipelineMatrix(unittest.TestCase):
         settings.playback_volume_mode = volume_mode
         settings.playback_volume_db = volume_db
         settings.playback_eq_enabled = eq
-        settings.playback_eq_gains = [0.0] * 10  # 全平直：不该改变幅度
+        settings.playback_eq_gains = [0.0] * 31  # 全平直：不该改变幅度
 
         outputs: list[_MemoryOutput] = []
 
@@ -287,9 +287,14 @@ class TestIntPipelineMatrix(unittest.TestCase):
                 problems.append(f"{name}: 峰值 {result['peak']:.6f} —— 没声音（疑似静默失败）")
             if result["errors"]:
                 problems.append(f"{name}: DSP 钩子抛了 {result['errors']} 次异常")
-            if int_pipeline and "整数通路不可用" in result["note"] and not (
-                not dsp_bypass and (mode == "software" and db != 0 or eq)
-            ):
+            # 什么情况下整数通路**应该**被降级：只要有任意一级会改样本。
+            # 软件音量与 dsp_bypass 无关（引擎 set_volume 不看 bypass），
+            # 所以「直通 + 软件音量 -6 dB」也要降级 —— v1.8 之前这里判漏，
+            # 结果是 int16 缓冲里做浮点乘、回调抛异常、整场静音。
+            should_downgrade = (mode == "software" and db != 0) or (
+                not dsp_bypass and eq
+            )
+            if int_pipeline and "整数通路不可用" in result["note"] and not should_downgrade:
                 problems.append(f"{name}: 不该降级却降级了（{result['note']}）")
             if db == 0.0:
                 reference[(int_pipeline, dsp_bypass, mode, eq)] = result["peak"]
@@ -302,10 +307,13 @@ class TestIntPipelineMatrix(unittest.TestCase):
             base = reference.get((int_pipeline, dsp_bypass, mode, eq), 0.0)
             ratio = (result["peak"] / base) if base > 1e-9 else 0.0
             rows.append(f"{name}: peak={result['peak']:.4f} 相对 0dB={ratio:.3f}")
-            # 声明必须与事实一致：DSP 真的生效时才该看到约 0.501 的衰减
-            if not dsp_bypass:
+            # 声明必须与事实一致：软件音量（-6 dB）在任何 bypass 状态下都要真的
+            # 衰减到 ≈0.501；其余组合应当保持原幅度。
+            if mode == "software" and db != 0.0:
                 if abs(ratio - 0.5012) > 0.08:
-                    problems.append(f"{name}: 声称 -6 dB，实测幅度比 {ratio:.3f}（应≈0.501）")
+                    problems.append(
+                        f"{name}: 声称 -6 dB，实测幅度比 {ratio:.3f}（应≈0.501）"
+                    )
             elif abs(ratio - 1.0) > 0.05 and base > 1e-9:
                 problems.append(
                     f"{name}: 旁路模式下幅度不该被改（实测比 {ratio:.3f}，应≈1.000）"
@@ -448,7 +456,7 @@ class TestDsp(unittest.TestCase):
 
     def test_flat_eq_is_transparent(self) -> None:
         chain = self._chain(eq_enabled=True)
-        chain.set_eq_gains([0.0] * 10)
+        chain.set_eq_gains([0.0] * 31)
         rng = np.random.default_rng(11)
         buf = (rng.standard_normal((1024, 2)) * 0.2).astype(np.float32)
         original = buf.copy()
@@ -456,7 +464,7 @@ class TestDsp(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(buf - original))), 1e-4, "全平直 EQ 应近似不改")
 
     def test_eq_boost_and_stability(self) -> None:
-        eq = BiquadEq([0.0] * 10)
+        eq = BiquadEq([0.0] * 31)
         eq.prepare(44100, 2)
         eq.set_gains([0, 0, 0, 0, 12, 0, 0, 0, 0, 0])  # 1 kHz +12 dB
         eq.set_enabled(True)
@@ -470,10 +478,11 @@ class TestDsp(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(buf))), 10.0, "EQ 不应产生离谱的数值")
 
     def test_eq_coefficients_shape(self) -> None:
-        eq = BiquadEq([3.0] * 10)
+        eq = BiquadEq([3.0] * 31)
         eq.prepare(48000, 2)
         coefs = eq.coefficients()
-        self.assertEqual(len(coefs), 10)
+        # 31 段 → 31 组 biquad 系数（段数由 bands_hz 决定）
+        self.assertEqual(len(coefs), 31)
         for b0, b1, b2, a1, a2 in coefs:
             self.assertTrue(all(abs(v) < 10.0 for v in (b0, b1, b2, a1, a2)))
 
@@ -593,7 +602,7 @@ class TestSession(unittest.TestCase):
             output_device="扬声器",
             volume_db=-3.5,
             output_backend="mme",
-            eq_gains=[0.0] * 10,
+            eq_gains=[0.0] * 31,
             path=self.path,
         )
         self.assertTrue(ok)

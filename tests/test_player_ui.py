@@ -36,6 +36,7 @@ from seqaudio.core.config import Settings  # noqa: E402
 from seqaudio.ui.player_bar import (  # noqa: E402
     BAR_COLLAPSED_HEIGHT,
     BAR_HEIGHT,
+    MODE_GLYPH,
     MODE_ORDER,
     PlayerBar,
     format_mmss,
@@ -176,6 +177,42 @@ class PlayerBarTest(unittest.TestCase):
         """v1.6.1 用户反馈 4：播放态不再套 primary 大内边距（一片蓝看不清图标）。"""
         self.bar.set_state("PLAYING")
         self.assertEqual(self.bar.btn_play.objectName(), "playerPlay")
+
+    def test_play_state_swaps_icon_only(self) -> None:
+        """v1.8 用户需求 1：播放中只是图标变暂停 + 描边更亮，objectName 不变。"""
+        self.bar.set_state("PLAYING")
+        self.assertEqual(self.bar.btn_play.objectName(), "playerPlay")
+        self.assertEqual(self.bar.btn_play.text(), "❚❚")
+        self.assertEqual(self.bar.btn_play.icon_key, "pause")
+        self.assertTrue(self.bar.btn_play.is_emphasized())
+        self.bar.set_state("PAUSED")
+        self.assertEqual(self.bar.btn_play.objectName(), "playerPlay")
+        self.assertEqual(self.bar.btn_play.text(), "▶")
+        self.assertEqual(self.bar.btn_play.icon_key, "play")
+        self.assertFalse(self.bar.btn_play.is_emphasized())
+
+    def test_eq_button_replaces_collapse(self) -> None:
+        """v1.8 用户需求 5：移除「收起播放条」，最右侧改为 EQ 按钮。"""
+        self.assertFalse(
+            hasattr(self.bar, "btn_collapse"), "折叠按钮必须彻底移除"
+        )
+        self.assertTrue(hasattr(self.bar, "btn_eq"))
+        received: list[bool] = []
+        self.bar.eqRequested.connect(lambda: received.append(True))
+        self.bar.btn_eq.click()
+        self.assertEqual(received, [True])
+        self.assertIn("均衡器", self.bar.btn_eq.toolTip())
+
+    def test_mode_button_icon_follows_mode(self) -> None:
+        for mode, icon in (
+            ("sequential", "mode_seq"),
+            ("repeat_one", "mode_one"),
+            ("repeat_all", "mode_all"),
+            ("shuffle", "mode_shuffle"),
+        ):
+            self.bar.set_mode(mode)
+            self.assertEqual(self.bar.btn_mode.icon_key, icon)
+            self.assertEqual(self.bar.btn_mode.text(), MODE_GLYPH[mode])
 
     def test_progress_click_jumps(self) -> None:
         """v1.6.1 用户反馈：点击进度条任意位置直接跳转（原实现只翻页）。"""
@@ -441,7 +478,7 @@ class SignalsPanelTest(unittest.TestCase):
 
 
 class EqPanelTest(unittest.TestCase):
-    """EQ：滑杆防抖、预设、总开关。"""
+    """EQ：31 段、滑杆防抖、内置/自定义预设、总开关。"""
 
     def setUp(self) -> None:
         app()
@@ -450,35 +487,91 @@ class EqPanelTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.panel.deleteLater()
 
-    def test_has_ten_bands(self) -> None:
-        self.assertEqual(len(self.panel._sliders), 10)
-        self.assertEqual(self.panel.gains(), [0.0] * 10)
+    def test_has_thirtyone_bands(self) -> None:
+        self.assertEqual(len(self.panel._sliders), 31)
+        self.assertEqual(self.panel.gains(), [0.0] * 31)
         self.assertEqual(self.panel._sliders[0].minimum(), -120)
         self.assertEqual(self.panel._sliders[0].maximum(), 120)
+        self.assertEqual(self.panel._sliders[0].objectName(), "eqBand")
+
+    def test_band_points_match_player_constants(self) -> None:
+        """UI 复写的频点表必须与 DSP 侧逐项一致（架构 2.3 禁止 import）。"""
+        from seqaudio.player.constants import EQ_BANDS_HZ as DSP_BANDS
+        from seqaudio.ui.player_eq import EQ_BANDS_HZ as UI_BANDS
+
+        self.assertEqual(tuple(UI_BANDS), tuple(DSP_BANDS))
+        self.assertEqual(len(DSP_BANDS), 31)
+        self.assertEqual(DSP_BANDS[17], 1000, "1 kHz 必须是下标 17")
+
+    def test_builtin_presets_are_thirtyone_values(self) -> None:
+        from seqaudio.ui.player_eq import PRESET_LABELS, PRESETS
+
+        self.assertEqual(len(PRESET_LABELS), 8, "内置预设应为 8 个")
+        for key, values in PRESETS.items():
+            self.assertEqual(len(values), 31, f"预设 {key} 不是 31 段")
+            self.assertIn(key, PRESET_LABELS)
 
     def test_drag_is_debounced(self) -> None:
         received: list[list[float]] = []
         self.panel.gainsChanged.connect(received.append)
-        self.panel.set_enabled(True)
         # 拖动过程中连续改 3 个滑杆，只应收到最后一次（100 ms 静默后）
         self.panel._sliders[0].setValue(30)
         self.panel._sliders[1].setValue(-20)
-        self.panel._sliders[2].setValue(10)
+        self.panel._sliders[11].setValue(10)
         self.assertEqual(received, [])
         pump(220)
         self.assertEqual(len(received), 1, received)
         self.assertAlmostEqual(received[0][0], 3.0)
         self.assertAlmostEqual(received[0][1], -2.0)
+        self.assertAlmostEqual(received[0][11], 1.0)
 
     def test_preset_and_reset(self) -> None:
         received: list[list[float]] = []
         self.panel.gainsChanged.connect(received.append)
-        self.panel.set_enabled(True)
         self.panel.apply_preset("rock")
         self.assertTrue(received)
-        self.assertNotEqual(received[-1], [0.0] * 10)
+        self.assertNotEqual(received[-1], [0.0] * 31)
+        self.assertEqual(len(received[-1]), 31)
         self.panel.apply_preset("flat")
-        self.assertEqual(self.panel.gains(), [0.0] * 10)
+        self.assertEqual(self.panel.gains(), [0.0] * 31)
+
+    def test_dragging_marks_curve_as_custom(self) -> None:
+        self.panel.apply_preset("rock")
+        self.assertEqual(self.panel.preset_key(), "rock")
+        self.panel._sliders[0].setValue(-60)
+        self.assertEqual(self.panel.preset_key(), "custom", "改动后应切到「自定义」")
+
+    def test_custom_preset_save_and_delete(self) -> None:
+        saved: list[tuple[str, list[float]]] = []
+        deleted: list[str] = []
+        self.panel.customPresetSaved.connect(lambda name, gains: saved.append((name, gains)))
+        self.panel.customPresetDeleted.connect(deleted.append)
+
+        self.panel.set_gains([1.0] * 31)
+        self.assertTrue(self.panel.save_custom_preset("我的曲线"))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][0], "我的曲线")
+        self.assertEqual(len(saved[0][1]), 31)
+        self.assertIn("我的曲线", self.panel.custom_presets())
+        # 保存后应立刻选中该条目
+        self.assertEqual(self.panel.preset_key(), "我的曲线")
+
+        self.assertTrue(self.panel.delete_custom_preset("我的曲线"))
+        self.assertEqual(deleted, ["我的曲线"])
+        self.assertNotIn("我的曲线", self.panel.custom_presets())
+
+    def test_custom_preset_rejects_illegal_names(self) -> None:
+        self.assertFalse(self.panel.save_custom_preset(""), "空名必须拒绝")
+        self.assertFalse(self.panel.save_custom_preset("rock"), "内置名不可覆盖")
+        self.assertEqual(self.panel.custom_presets(), {})
+
+    def test_set_custom_presets_roundtrip(self) -> None:
+        self.panel.set_custom_presets({"甲": [2.0] * 31, "": [1.0] * 31})
+        presets = self.panel.custom_presets()
+        self.assertEqual(list(presets), ["甲"], "空名应被丢弃")
+        self.assertEqual(len(presets["甲"]), 31)
+        presets["甲"][0] = 9.0
+        self.assertEqual(self.panel.custom_presets()["甲"][0], 2.0, "返回的必须是副本")
 
     def test_enabled_signal(self) -> None:
         states: list[bool] = []
@@ -488,14 +581,37 @@ class EqPanelTest(unittest.TestCase):
         self.assertTrue(self.panel._sliders[0].isEnabled())
         self.panel.enable_check.setChecked(False)
         self.assertFalse(self.panel._sliders[0].isEnabled())
+        self.assertFalse(self.panel.save_button.isEnabled())
 
     def test_set_gains_is_silent(self) -> None:
         received: list[list[float]] = []
         self.panel.gainsChanged.connect(received.append)
-        self.panel.set_gains([1.0] * 10)
+        self.panel.set_gains([1.0] * 31)
         pump(180)
         self.assertEqual(received, [])
-        self.assertEqual(self.panel.gains(), [1.0] * 10)
+        self.assertEqual(self.panel.gains(), [1.0] * 31)
+
+    def test_curve_widget_tracks_gains(self) -> None:
+        self.panel.set_gains([6.0] * 31)
+        self.assertEqual(len(self.panel.curve._gains), 31)
+        self.assertAlmostEqual(self.panel.curve._gains[0], 6.0)
+
+    def test_format_band_labels(self) -> None:
+        from seqaudio.ui.player_eq import format_band
+
+        self.assertEqual(format_band(20), "20")
+        self.assertEqual(format_band(500), "500")
+        self.assertEqual(format_band(1000), "1k")
+        self.assertEqual(format_band(1250), "1.25k")
+        self.assertEqual(format_band(10000), "10k")
+
+    def test_legacy_ten_value_gains_are_padded(self) -> None:
+        """老配置只有 10/20 个值：加载后必须补零到 31 段而不是崩。"""
+        self.panel.set_gains([6.0] * 10)
+        gains = self.panel.gains()
+        self.assertEqual(len(gains), 31)
+        self.assertEqual(gains[:10], [6.0] * 10)
+        self.assertEqual(gains[10:], [0.0] * 21)
 
 
 class BridgeTest(unittest.TestCase):
@@ -616,7 +732,7 @@ class BridgeTest(unittest.TestCase):
             "output_device": "",
             "output_backend": "mme",
             "volume_db": -6.0,
-            "eq_gains": [0.0] * 10,
+            "eq_gains": [0.0] * 31,
         }
         import json
 
