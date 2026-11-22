@@ -59,6 +59,15 @@ SETUP_NAME = f"{PORTABLE_NAME}-Setup"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 
+#: 进包的 PortAudio 变体（win64 普通 + win64 ASIO）。
+#:
+#: v1.7 只带普通 DLL 并主动拒绝 ASIO 变体 —— 那时 ASIO 从没在任何机器上验过，
+#: 带进去等于"有选项但一开就炸"。v1.8.1 起 ASIO 是一等后端（真机验过起播、
+#: 独占与 DoP），且 ``SD_ENABLE_ASIO`` 决定进程 dlopen 哪一个：两个都在场，
+#: 用户切换后端才不用重装；缺了 ASIO 那个，进程就少一条后端（v1.8.1 起会
+#: 自动降级，不再整个没声）。
+PORTAUDIO_KEEP = ("libportaudio64bit.dll", "libportaudio64bit-asio.dll")
+
 README_TXT = """音序管家（SeqAudio Manager）· 便携绿色版
 ========================================
 
@@ -107,19 +116,33 @@ def _copy_tree(src: Path, dst: Path) -> None:
 # ---------------------------------------------------------------- PyInstaller
 
 
-def _portaudio_dll() -> str:
-    """定位 sounddevice 自带的 PortAudio x64 DLL（供 --add-binary 点名）。"""
+def _portaudio_dlls() -> list[str]:
+    """定位 sounddevice 自带的 PortAudio x64 DLL：普通 + ASIO 两个（供 --add-binary 点名）。
+
+    为什么两个都要（v1.8.1 立场变化）
+    --------------------------------
+    sounddevice 在 **import 的那一刻** 只 dlopen 其中一个：环境里存在
+    ``SD_ENABLE_ASIO`` 就加载 ``libportaudio64bit-asio.dll``，否则加载
+    ``libportaudio64bit.dll``。只带普通 DLL 而进程又置上了 ``SD_ENABLE_ASIO``
+    时，``dlopen`` 直接失败（实测 ``error 0x7e 找不到模块``），整个 PortAudio
+    随之不可用 —— 用户看到的是"程序能开、完全没声"，比"没有 ASIO 后端"严重
+    得多。所以 ASIO 变体在 v1.8.1 里是**一等后端**，必须进包。
+    """
+    found: list[str] = []
     try:
         import _sounddevice_data  # noqa: PLC0415 — 仅打包期需要
 
         base = Path(os.path.dirname(_sounddevice_data.__file__)) / "portaudio-binaries"
-        dll = base / "libportaudio64bit.dll"
-        if dll.exists():
-            return str(dll)
+        for name in PORTAUDIO_KEEP:
+            dll = base / name
+            if dll.exists():
+                found.append(str(dll))
     except ImportError:
         pass
-    # 开发环境没装 sounddevice 时给个占位路径，让 PyInstaller 报错信息更可读
-    return "_sounddevice_data/portaudio-binaries/libportaudio64bit.dll"
+    if found:
+        return found
+    # 开发环境没装 sounddevice 时给占位路径，让 PyInstaller 报错信息更可读
+    return [f"_sounddevice_data/portaudio-binaries/{name}" for name in PORTAUDIO_KEEP]
 
 
 def _pyinstaller_common(debug: bool) -> list[str]:
@@ -139,16 +162,88 @@ def _pyinstaller_common(debug: bool) -> list[str]:
         "--hiddenimport", "_sounddevice_data",
         "--hiddenimport", "cffi",
         "--hiddenimport", "pycparser",
-        "--add-binary", f"{_portaudio_dll()}{os.pathsep}_sounddevice_data/portaudio-binaries",
         "--exclude-module", "tkinter",
         "--exclude-module", "unittest",
         "--exclude-module", "pydoc",
     ]
+    # 两个 win64 变体都要点名：PyInstaller 的 sounddevice hook 未必把整个
+    # portaudio-binaries 目录带全，靠 --add-binary 显式要求才可靠（少一个就等于
+    # 少一条后端）。
+    for dll in _portaudio_dlls():
+        args += ["--add-binary", f"{dll}{os.pathsep}_sounddevice_data/portaudio-binaries"]
     if ICON.exists():
         args += ["--icon", str(ICON)]
         # 整目录带走：图标、字体、LICENSE 都在 assets 下
         args += ["--add-data", f"{ASSETS}{os.pathsep}assets"]
     return args
+
+
+def _prune_portaudio(app_dir: Path) -> list[str]:
+    """只保留 ``PORTAUDIO_KEEP`` 两个 win64 变体，并断言现场与预期一致。
+
+    PyInstaller 的 sounddevice hook 会把 ``_sounddevice_data`` 里 7 个平台的
+    PortAudio 二进制全当数据带进来（mac/.dylib、32bit、arm64，合计约 1.4 MB）；
+    我们只用得上两个 win64 变体，其余清掉。
+
+    v1.8.1 的断言改成"两个都在场"，理由见 ``PORTAUDIO_KEEP`` 的注释：
+    缺 ASIO 变体 → ASIO 后端永远点不亮；缺普通变体 → 一次 ``--no-asio``
+    或 ASIO 库加载失败就彻底没声。
+
+    Returns:
+        清理后目录里的文件名清单（供 build 日志回显）。
+
+    Raises:
+        SystemExit: 少了必需的 DLL，或残留了不该进包的二进制。
+    """
+    pa_dir = app_dir / "_internal" / "_sounddevice_data" / "portaudio-binaries"
+    if not pa_dir.is_dir():
+        # 连目录都没有 = 两个 DLL 都没进包，播放会在装完后才报错 —— 现在就说清楚
+        raise SystemExit(
+            f"没有找到 PortAudio 目录：{pa_dir}。"
+            "说明 --add-binary 没生效或 PyInstaller 布局变了；此时播放会在装完后"
+            "才报 PortAudio library not found。"
+        )
+    for junk in pa_dir.iterdir():
+        if junk.name in PORTAUDIO_KEEP:
+            continue
+        if junk.suffix.lower() in (".dll", ".dylib", ".so"):
+            junk.unlink()
+    return _verify_portaudio(pa_dir)
+
+
+def _verify_portaudio(pa_dir: Path) -> list[str]:
+    """校验 PortAudio 目录：``PORTAUDIO_KEEP`` 两个都在场，且没有多余变体。
+
+    单独成函数是为了**可测**：如果只看 ``_prune_portaudio()``，清理循环跑完
+    "残留"这一支永远不可能成立（自己刚删完），断言等于死代码。分开之后
+    "两个都在 + 还混进一个 arm64"这种现场可以直接构造进用例，
+    防止哪天有人把清理逻辑删了又没人发现。
+
+    Raises:
+        SystemExit: 少了必需 DLL，或残留了 32bit / arm64 / dylib / so。
+    """
+    leftovers = sorted(item.name for item in pa_dir.iterdir())
+    print(f"  · PortAudio 进包清单：{leftovers}")
+    missing = [name for name in PORTAUDIO_KEEP if name not in leftovers]
+    if missing:
+        raise SystemExit(
+            f"PortAudio DLL 没有打进包：{missing}。"
+            "缺普通变体 → 播放会在装完后才报 PortAudio library not found；"
+            "缺 ASIO 变体 → 设置里的 ASIO 后端永远点不亮。"
+            "请检查 _portaudio_dlls() 与 --add-binary。"
+        )
+    extra = [
+        name
+        for name in leftovers
+        if name not in PORTAUDIO_KEEP
+        and Path(name).suffix.lower() in (".dll", ".dylib", ".so")
+    ]
+    if extra:
+        raise SystemExit(
+            f"PortAudio 目录里残留了不该进包的二进制：{extra}。"
+            "请恢复 build_onedir() 的清理逻辑（只保留 PORTAUDIO_KEEP）。"
+        )
+    return leftovers
 
 
 def build_onedir(debug: bool = False) -> Path:
@@ -169,35 +264,8 @@ def build_onedir(debug: bool = False) -> Path:
     if not app_dir.exists():
         raise SystemExit(f"未找到预期产物：{app_dir}")
 
-    # PyInstaller 的 sounddevice hook 会把 _sounddevice_data 里 7 个平台的
-    # PortAudio 二进制全当数据带进来（mac/.dylib、32bit、arm64、ASIO 变体，
-    # 合计约 1.4 MB）；我们只用得上 win64 这一个，其余在此清掉。
-    pa_dir = app_dir / "_internal" / "_sounddevice_data" / "portaudio-binaries"
-    if pa_dir.is_dir():
-        for junk in pa_dir.iterdir():
-            if junk.name != "libportaudio64bit.dll" and junk.suffix.lower() in (
-                ".dll", ".dylib", ".so",
-            ):
-                junk.unlink()
-        # v1.7 T06：把"这一版只带 win64 非 ASIO DLL"这件事**断言**下来。
-        # 理由：ASIO 变体（libportaudio64bit-asio.dll）从没在任何机器上验过；
-        # 一旦有人"顺手取消清理"把它带进包，用户看到的就是"有 ASIO 选项但一开就炸"。
-        leftovers = sorted(item.name for item in pa_dir.iterdir())
-        print(f"  · PortAudio 进包清单：{leftovers}")
-        forbidden = [
-            name
-            for name in leftovers
-            if name.endswith(("-asio.dll", "32bit.dll", "arm64.dll", ".dylib", ".so"))
-        ]
-        if forbidden:
-            raise SystemExit(
-                "PortAudio 目录里出现了未验证的二进制："
-                f"{forbidden}。v1.7 明确不做 ASIO/DLL 替换，请恢复 build_onedir() 的清理逻辑。"
-            )
-        if "libportaudio64bit.dll" not in leftovers:
-            raise SystemExit(
-                "PortAudio DLL 没有打进包：播放功能会在装完后才报 PortAudio library not found"
-            )
+    # 只保留两个 win64 变体，并断言现场（见 _prune_portaudio）
+    _prune_portaudio(app_dir)
 
     # 便携版该有的说明文件
     _write_text(app_dir / "使用说明.txt", README_TXT)

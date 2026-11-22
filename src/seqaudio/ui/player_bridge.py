@@ -95,6 +95,8 @@ class PlayerBridge(QObject):
         self._resume_ms = 0
         #: 队列长度镜像：面板刷新时不必每次都问引擎要快照
         self._last_queue_len = 0
+        #: ASIO 可用性缓存（``backend_present`` + 设备表查询各一次，别每 3 s 查）
+        self._asio_cache: Optional[bool] = None
 
         self._relay.connect(self._deliver, Qt.QueuedConnection)
 
@@ -597,6 +599,110 @@ class PlayerBridge(QObject):
 
     def signal_snapshot(self) -> list[dict[str, Any]]:
         return list(self._safe("读取信号路径", lambda: self._engine.signal_path.snapshot(), []) or [])
+
+    def refresh_signal(self) -> None:
+        """请引擎按**当前**设置重算整条信号路径并推 ``EVENT_SIGNAL``。
+
+        为什么要有这个入口（P0-2 的根因）
+        ----------------------------------
+        引擎的 ``_refresh_signal()`` 只重算 gain/eq；source/decode/format 只在
+        ``_configure_signal()`` 里算一次。于是「改了位完美/整数通路/音量模式/
+        DSD 目标率」但不重开流时，format/decode 级显示的还是上一组参数。
+
+        轨 B 在 ``engine.py`` 提供 ``refresh_signal()``（重跑 ``_configure_signal``
+        并 emit）。这里用 ``getattr`` 探测：钩子还没落地时退回一次 ``poll_now()``
+        —— **T02 不阻塞于 T04**，而且两种路径下界面都会立刻拿到一份新快照，
+        不会出现"点了没反应"。
+        """
+        if self._shut_down:
+            return
+        hook = getattr(self._engine, "refresh_signal", None)
+        if callable(hook):
+            try:
+                hook()
+                # 钩子只 emit 信号；顺手取一次新快照，保证 last_snapshot 与
+                # 刚推出去的那条 EVENT_SIGNAL 同源（否则面板会慢一拍）。
+                self.poll_now()
+                return
+            except Exception:  # noqa: BLE001 - 刷新失败不许把界面带崩
+                log.exception("重算信号路径失败，退回一次普通轮询")
+        self.poll_now()
+
+    def dop_capability(self, channels: int = 2) -> tuple[bool, str]:
+        """此刻这台设备能不能直出 DoP：``(available, reason)``。
+
+        为什么必须有人在生产代码里调它（v1.8.1 收口发现的空转）
+        ------------------------------------------------------
+        ``settings_panel.set_dop_available()`` 早就写好了，但**没有任何调用者**：
+        复选框初始 ``setEnabled(False)`` 之后就再没人点亮过，发出去的版本里
+        DSD 开关是永久置灰的 —— T04 的用户价值（开关 + 可视）等于没上线。
+
+        探测在引擎侧（``engine.dop_capability``），与起播同源、零出声：不
+        ``start()``、不建 ring、不切 decoder，所以面板随时可以问；设备表异常时
+        它返回 ``(False, "无法获取输出设备")`` 而不抛（Qt 槽安全）。
+
+        Args:
+            channels: 猜的声道数（面板渲染时还没有文件头，默认立体声）。
+        """
+        if self._shut_down:
+            return False, "播放引擎已关闭"
+        probe = getattr(self._engine, "dop_capability", None)
+        if not callable(probe):
+            # 轨 B 的接口还没落地：按"不可用"处理（开关置灰 + 说明），不报错
+            return False, "当前版本不支持 DoP 直出"
+        try:
+            available, reason = probe(int(channels) or 2)
+        except Exception:  # noqa: BLE001 - 查询失败只影响一个开关
+            log.debug("查询 DoP 能力失败", exc_info=True)
+            return False, "DoP 能力查询失败"
+        return bool(available), str(reason or "")
+
+    def device_watch(self, backend: Optional[str] = None) -> list[dict[str, Any]]:
+        """给 ``DeviceWatcher`` 注入的枚举器：**只读**枚举，绝不开流。
+
+        Args:
+            backend: 后端键；``None`` / ``""`` 时按 ``settings`` 当前后端枚举。
+
+        为什么默认只看当前后端：全平台枚举会把同一台物理设备在 MME /
+        DirectSound / WASAPI / WDM-KS / ASIO 下各列一次（本机 20+ 条），
+        增删的差集里混满同名项，"设备表变了"这句话就失去了意义。
+        """
+        key = str(
+            backend
+            if backend
+            else (getattr(self.settings, "playback_output_backend", "") or "")
+        ).strip()
+        return self.list_output_devices(key or None)
+
+    def asio_present(self, refresh: bool = False) -> bool:
+        """当前环境是否**真的**能用 ASIO（构建里有 + 至少一台驱动）。
+
+        为什么不直接返回 ``backend_present("asio")``：
+        加载 ASIO 版 PortAudio 之后，hostapi 列表里**恒定**有 "ASIO"（哪怕一台
+        ASIO 驱动都没装）。只看 hostapi 会把下拉项点亮，展开却是空列表 ——
+        用户只会以为程序坏了。所以这里要求「hostapi 在 **且** 至少一台 ASIO
+        输出设备」，两条都满足才允许选择。
+
+        Args:
+            refresh: 忽略缓存重新查询（设备表变化后由热插拔轮询调用）。
+        """
+        if refresh or self._asio_cache is None:
+            present = False
+            try:
+                from ..player.devices import asio_usable_device, backend_present
+
+                # 两道门：① 构建里有 ASIO 且至少一台驱动（枚举层）；
+                # ② 至少一台设备**零出声探测可通过**（可用层）。驱动装了但被
+                # 其它程序独占/参数全不支持时，枚举照样列出设备——用户选上去
+                # 就是连环 -9999/-9985，所以下拉必须按"探测通过"点亮。
+                present = bool(backend_present("asio")) and (
+                    asio_usable_device() is not None
+                )
+            except Exception:  # noqa: BLE001 - 查询失败按"不可用"处理
+                log.debug("查询 ASIO 可用性失败", exc_info=True)
+                present = False
+            self._asio_cache = present
+        return bool(self._asio_cache)
 
     # ------------------------------------------------------------ 会话
 

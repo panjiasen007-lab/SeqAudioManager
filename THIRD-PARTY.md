@@ -66,6 +66,33 @@
 **软件不上传任何音频文件或个人信息**，联网仅发送歌名/歌手等检索关键词。
 断开网络后全部功能（除联网匹配与歌词下载）仍可正常使用。
 
+## PortAudio / ASIO 二进制（v1.8.1）
+
+本项目通过 `sounddevice`（BSD-2-Clause）调用 PortAudio 18/19 的预编译二进制，
+`sounddevice` 的 wheel 内自带两个 Windows x64 变体：
+
+| 文件 | 何时加载 | 说明 |
+|---|---|---|
+| `libportaudio64bit.dll` | 默认 | PortAudio 官方构建（WASAPI / DirectSound / MME / WDM-KS） |
+| `libportaudio64bit-asio.dll` | 环境变量 `SD_ENABLE_ASIO` 存在时 | 额外编入 ASIO hostapi 的同一 PortAudio 构建 |
+
+授权与分发立场：
+
+* 这两个 DLL 均来自 `sounddevice` 官方 wheel，**本项目中未做任何修改**，
+  仅以动态链接方式调用，不随软件分发 PortAudio 源码；安装包/便携包里
+  `libportaudio64bit.dll` 与 `libportaudio64bit-asio.dll` **两个都在场**
+  （由 `build.py` 的 `PORTAUDIO_KEEP` 断言保证），进程实际加载哪一个由
+  `SD_ENABLE_ASIO` 决定；
+* **本项目不编译 ASIO 变体**：`libportaudio64bit-asio.dll` 是 wheel 里现成的
+  二进制，我们既不重新编译、也不修改，更不随包附带任何 ASIO 头文件；
+* **不分发、不编译、不打包 Steinberg ASIO SDK**：ASIO 商标与 SDK 授权归
+  Steinberg Media Technologies GmbH，其专有许可与 GPL-3.0-or-later 不兼容。
+  本项目**不提供** ASIO SDK 的下载指引，也不包含任何 SDK 头文件或桩代码；
+* ASIO 能力完全取决于用户机器上**已安装的驱动**与 wheel 自带的那个二进制，
+  程序只做"有就用、没有就置灰并说明原因"，不静默降级；
+* 若将来确需自行编译带 ASIO 的 PortAudio，必须先取得法务结论后再动工，
+  并同步更新本文件。
+
 ## 参考实现（未复制代码）
 
 均衡器的**中心频率**采用音频行业通用的 1/3 倍频程标准频点表（IEC 61260 / ISO 266，20 Hz–20 kHz 共 31 段）。此前版本曾采用半倍频程 20 段频点表：

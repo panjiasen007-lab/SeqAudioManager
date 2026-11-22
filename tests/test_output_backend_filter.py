@@ -138,6 +138,29 @@ class TestPanelBackendRefresh(unittest.TestCase):
         self.assertTrue(any("WASAPI" in text for text in texts))
 
 
+class _FakeWindow:
+    """最小主窗口替身：混入被测方法，不构造整个 MainWindow。
+
+    v1.8.1 起 ``_on_output_device_refresh`` 还要顺带刷新 ASIO 可用性与状态栏
+    设备名，所以这里把那几个方法一并混入（断言内容不变，只是替身跟着长了两只手）。
+    """
+
+    _active_backend = MainWindow._active_backend
+    _on_output_device_refresh = MainWindow._on_output_device_refresh
+    _asio_present = MainWindow._asio_present
+    _refresh_asio_state = MainWindow._refresh_asio_state
+    _refresh_dop_state = MainWindow._refresh_dop_state
+    _current_source_channels = MainWindow._current_source_channels
+    _refresh_device_status = MainWindow._refresh_device_status
+
+    def __init__(self, settings, panel, bridge) -> None:
+        self.settings = settings
+        self.settings_panel = panel
+        self.player_bridge = bridge
+        # 状态栏在替身里不存在：_refresh_device_status 会安全跳过
+        self.device_label = None
+
+
 class TestMainWindowDeviceRefresh(unittest.TestCase):
     """只搭最小替身，不构造整个 MainWindow（离屏下反复构造会卡样式）。"""
 
@@ -155,11 +178,7 @@ class TestMainWindowDeviceRefresh(unittest.TestCase):
             list_output_devices=lambda backend=None: list(self.wasapi_entries)
             if backend == "wasapi" else []
         )
-        self.window = SimpleNamespace(
-            settings=self.settings,
-            settings_panel=self.panel,
-            player_bridge=self.bridge,
-        )
+        self.window = _FakeWindow(self.settings, self.panel, self.bridge)
 
     def tearDown(self) -> None:
         self.panel.deleteLater()

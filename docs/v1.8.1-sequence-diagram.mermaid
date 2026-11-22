@@ -1,0 +1,74 @@
+%% v1.8.1 增量时序图（v1.6 全量起播/切歌/seek/回退见 docs/sequence-diagram.mermaid）
+
+%% ① 起播 DoP 路径（P1-1）
+sequenceDiagram
+    autonumber
+    participant E as PlayerEngine
+    participant D as dsd.DsdSource
+    participant P as DopPacker
+    participant R as PcmRingBuffer
+    participant O as AudioOutput
+    participant S as SignalPath
+
+    E->>E: _build_spec(item) → spec.dop=True, dop_rate=dsd_rate//16
+    E->>E: plan_output(device, dop_rate) — ASIO 恒 EXCLUSIVE，不套三级降级
+    alt check_output_settings 通过（176.4k / 352.8k）
+        E->>D: DsdSource(spec, ring).start()
+        D->>D: probe() 读 DSD / fmt / data chunk；seek 按 block_bytes 对齐
+        D->>P: pack(dsd_bytes)
+        P-->>D: (frames, ch) int32 DoP 帧（0x05 第1帧 / 0xFA 第9帧，每16帧）
+        D->>R: write(block) — 与 ffmpeg 路径共用同一个环
+        E->>O: AudioOutput(dtype=int32, mode=EXCLUSIVE)
+        E->>S: _configure_signal(spec, device, rate)
+        Note over S: decode = "DSD64 → DoP64 @176.4 kHz"
+    else 载体率或设备不可用
+        E->>S: mark("decode", FALLBACK, "设备不支持 176400 Hz 载体，已回退 PCM")
+        E->>E: 回 ffmpeg 路径（playback_dsd_pcm_rate）
+    end
+    E->>E: _apply_dop_constraints() — EQ/gain/fade/crossfade/gapless 全 BYPASSED
+    E->>E: emit(EVENT_SIGNAL)（文本不变则不 emit）
+
+%% ② 设备热插拔刷新路径（P0-1）与信号路径刷新（P0-2）
+sequenceDiagram
+    autonumber
+    participant T as QTimer(3000ms)
+    participant MW as MainWindow
+    participant W as DeviceWatcher
+    participant BR as PlayerBridge
+    participant EN as PlayerEngine
+    participant SP as SettingsPanel
+
+    T->>MW: timeout → _poll_device_change()
+    MW->>BR: device_watch() → devices.list_output_devices(backend)
+    BR-->>W: list[DeviceInfo]
+    W-->>MW: DeviceChange(added, removed, default_changed)
+    alt change.changed
+        MW->>SP: set_output_devices(devices, scoped=True)
+        Note over SP: findData 保留当前选中；_device_channels 与 _update_device_hint 同步
+        MW->>BR: refresh_signal()
+        BR->>EN: getattr(engine, "refresh_signal", None) or poll_now()
+        EN->>EN: 重跑 _configure_signal(_spec, device, _rate)
+        EN-->>BR: emit(EVENT_SIGNAL)
+        BR-->>MW: signalPathChanged(payload)
+        MW->>MW: _refresh_signal_panel() — 先 poll_now() 再 update_from()
+    else changed == False
+        W-->>MW: 不刷 UI（避免每 3 s 重置下拉）
+    end
+    Note over MW,W: 拔出播放中设备：DeviceLostError → ≤2 s 转 stopped + 提示去重仅一次 + 回落系统默认
+
+%% ③ ASIO 引导（P0-3）
+sequenceDiagram
+    autonumber
+    participant RUN as run.py
+    participant APP as app.py
+    participant DEV as player.devices
+    participant SD as sounddevice
+
+    RUN->>RUN: _bootstrap_asio(argv) — 早于任何 seqaudio.* import
+    RUN->>RUN: os.environ.setdefault("SD_ENABLE_ASIO", "1")（--no-asio 则 pop）
+    RUN->>APP: import seqaudio.app
+    APP->>APP: _bootstrap_asio()（幂等，兜底嵌入式启动）
+    DEV->>SD: sounddevice() 首次调用：import 前再 setdefault（幂等）
+    SD-->>DEV: query_hostapis() 含 "ASIO"
+    DEV-->>DEV: backend_present("asio") == True
+    Note over DEV: 索引因 5 个 hostapi 并存而整体后移 → 设备一律按名字存

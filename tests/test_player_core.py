@@ -645,7 +645,8 @@ class TestFoundation(unittest.TestCase):
         library = [f.name for f in dataclasses.fields(Settings) if f.name.startswith("library_")]
         # 32（v1.6）+ 5（v1.7 独占）+ 1（v1.7.2 迷你条透明度）
         # + 1（v1.8 EQ 自定义预设 playback_eq_custom_presets）
-        self.assertEqual(len(playback), 39, f"playback_* 应为 39 个，实际 {len(playback)}")
+        # + 2（v1.8.1 DSD DoP 开关 playback_dsd_dop / ASIO 首次提示 playback_asio_note_seen）
+        self.assertEqual(len(playback), 41, f"playback_* 应为 41 个，实际 {len(playback)}")
         self.assertEqual(len(library), 3, f"library_* 应为 3 个，实际 {len(library)}")
         # 可变默认值必须是独立对象（否则两个实例会共享同一个 list）
         self.assertIsNot(Settings().playback_eq_gains, Settings().playback_eq_gains)
@@ -759,11 +760,11 @@ class TestFoundation(unittest.TestCase):
     def test_package_versions_agree(self) -> None:
         import seqaudio
 
-        self.assertEqual(seqaudio.__version__, "1.8.0")
+        self.assertEqual(seqaudio.__version__, "1.8.1")
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.8.0"', pyproject)
+        self.assertIn('version = "1.8.1"', pyproject)
         meta = (ROOT / "installer" / "_meta.py").read_text(encoding="utf-8")
-        self.assertIn('VERSION = "1.8.0"', meta)
+        self.assertIn('VERSION = "1.8.1"', meta)
 
     def test_t03_exports_resolve(self) -> None:
         """T03 落地后，包出口的惰性名字必须都能取到（且仍然不碰 Qt）。"""

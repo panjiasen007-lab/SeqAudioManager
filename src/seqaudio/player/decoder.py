@@ -87,6 +87,18 @@ class DecodeSpec:
     is_dsd: bool = False
     block_frames: int = BLOCK_FRAMES_DEFAULT
 
+    # ---- DoP（v1.8.1 P1-1）。三者都是「意图」，真正的裁决在引擎里 ----
+    #: 是否**打算**走 DoP64/128 直出。``True`` 只是用户/设置的意愿：
+    #: 载体率能不能开、模式是否独占、文件头是否合法，都要引擎探测后才知道，
+    #: 探测失败会把本字段改回 ``False``（见 ``PlayerEngine._resolve_dop``）。
+    dop: bool = False
+    #: DoP 载体率（DSD64→176400 / DSD128→352800 / DSD256→705600）。
+    #: ``0`` 表示「还不知道」（尚未读文件头），非 0 才有意义。
+    dop_rate: int = 0
+    #: 源 DSD 位率（2822400 / 5644800 / …）。信号路径文案与日志要用它算
+    #: 「DSD64」「DoP64」，不从载体率反推（反推会把 DSD128 写成 DoP64）。
+    dsd_rate: int = 0
+
     # ------------------------------------------------------------ 派生信息
 
     @property
@@ -118,6 +130,11 @@ class DecodeSpec:
         """``0`` 表示「到文件末尾」。"""
         return max(0.0, self.duration_ms / 1000.0)
 
+    @property
+    def dop_active(self) -> bool:
+        """是否**真的**在走 DoP（意图 + 载体率都已确定）。"""
+        return bool(self.dop and self.dop_rate > 0)
+
     # ------------------------------------------------------------ 构造
 
     @classmethod
@@ -147,6 +164,11 @@ class DecodeSpec:
 
         codec = _codec_from_info(info, path)
         is_dsd = bool(getattr(info, "dsd_rate", None)) or codec.startswith("dsd_")
+        # DSD 的位率与「是否想走 DoP」都只是**意图**：位率取源采样率
+        # （probe 对 DSD 把 2822400 这类位率填进 sample_rate），
+        # DoP 开关取 ``playback_dsd_dop``（缺字段按默认开，方便测试替身）。
+        dsd_rate = int(getattr(info, "sample_rate", 0) or 0) if is_dsd else 0
+        dop_intent = bool(is_dsd and getattr(settings, "playback_dsd_dop", True))
 
         channels = int(getattr(info, "channels", 0) or DEFAULT_CHANNELS)
         if channels <= 0:
@@ -171,6 +193,9 @@ class DecodeSpec:
             codec=codec,
             is_dsd=is_dsd,
             block_frames=block_frames,
+            dop=dop_intent,
+            dop_rate=0,
+            dsd_rate=dsd_rate,
         )
 
     @classmethod
@@ -204,6 +229,8 @@ class DecodeSpec:
         if not codec:
             codec = path.suffix.lstrip(".").lower()
         is_dsd = bool(getattr(item, "is_dsd", False)) or codec.startswith("dsd_")
+        dsd_rate = int(getattr(item, "sample_rate", 0) or 0) if is_dsd else 0
+        dop_intent = bool(is_dsd and getattr(settings, "playback_dsd_dop", True))
 
         channels = int(getattr(item, "channels", 0) or 0) or DEFAULT_CHANNELS
         if getattr(settings, "playback_downmix_stereo", False) and channels > 2:
@@ -232,6 +259,9 @@ class DecodeSpec:
             codec=codec,
             is_dsd=is_dsd,
             block_frames=block_frames,
+            dop=dop_intent,
+            dop_rate=0,
+            dsd_rate=dsd_rate,
         )
 
     # ------------------------------------------------------------ 展示 / 命令
@@ -250,7 +280,8 @@ class DecodeSpec:
             total = int(round(self.duration_ms / 1000.0))
             parts.append(f"{total // 60:02d}:{total % 60:02d}")
         if self.is_dsd and self.start_ms == 0:
-            parts.append("DSD→PCM")
+            # DoP 不是「转 PCM」，别在 source 级写 DSD→PCM 让人以为又过了一次转换
+            parts.append("DoP（DSD 位流直读）" if self.dop else "DSD→PCM")
         return " · ".join(parts)
 
     def build_args(self, ffmpeg: str) -> list[str]:

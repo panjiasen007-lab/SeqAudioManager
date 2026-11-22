@@ -14,10 +14,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .constants import (
+    BACKEND_ASIO,
     BACKEND_HOSTAPI_HINTS,
     SR_96K,
     SR_192K,
@@ -36,6 +38,17 @@ log = logging.getLogger(__name__)
 
 #: sounddevice 模块缓存（惰性导入：--audio-smoke 之外的大多数路径不需要它）
 _SD: Any = None
+
+#: ASIO 构建加载失败过（仅本进程内有效）。一旦为真就**永远**走普通构建：
+#: 反复重试一个明确加载不了的 DLL 只会把每次枚举都拖慢几十毫秒。
+_ASIO_LOAD_FAILED: bool = False
+
+#: 入口显式关闭 ASIO 时写入的标记（``run.py`` / ``app.py``）。为什么需要它：
+#: ``sounddevice()`` 会 ``setdefault("SD_ENABLE_ASIO", "1")`` 兜底，而 ``--no-asio``
+#: 只是把变量**删掉** —— 两者看起来一模一样，兜底会把用户的关闭动作悄悄推翻。
+_ASIO_DISABLED_FLAG = "SEQAUDIO_ASIO_DISABLED"
+#: 认作"真"的文本（与 run.py / app.py 保持同一份取值）
+_TRUE_TEXT = ("1", "true", "yes", "on")
 
 
 class DeviceError(RuntimeError):
@@ -62,17 +75,112 @@ class RateUnsupportedError(DeviceError):
         self.tried = tuple(tried)
 
 
+def asio_unavailable_reason() -> str:
+    """ASIO 不可用的原因键：``"load_failed"`` / ``"switched_off"`` / ``""``。
+
+    界面需要区分这两件事，因为用户能做的动作完全不同：
+
+    * ``load_failed``：包体缺 ``libportaudio64bit-asio.dll`` 或依赖缺失 →
+      换安装包 / 修包，重启没用；
+    * ``switched_off``：用户自己用 ``--no-asio`` 关的 → 去掉参数重启即可。
+
+    只说"ASIO 不可用"等于让用户去猜，两种原因两种修法，必须分开说。
+    """
+    if _ASIO_LOAD_FAILED:
+        return "load_failed"
+    if str(os.environ.get(_ASIO_DISABLED_FLAG, "")).strip().lower() in _TRUE_TEXT:
+        return "switched_off"
+    return ""
+
+
+def asio_switch_disabled() -> bool:
+    """本次运行是否**不该**尝试 ASIO 构建（用户关闭 或 上次加载失败）。"""
+    return bool(asio_unavailable_reason())
+
+
+def asio_usable_device(probe=None) -> Optional["DeviceInfo"]:
+    """找一台「零出声探测可通过」的 ASIO 设备；一台都没有返回 ``None``。
+
+    为什么只有"枚举到设备"还不够（v1.8.1 用户反馈）：ASIO 驱动装了 ≠ 能用——
+    驱动可能被其它程序独占、可能不支持任何当前参数，枚举照样把它列出来，
+    用户选上去就是连环 ``-9999/-9985``。这里对每台 ASIO 设备做
+    ``check_output_settings``（零出声、不开流、不打断播放），设备声明默认率
+    优先，44.1k/48k 兜底；**一台通过就返回那一台**，全失败返回 ``None``。
+    """
+    devices = list_output_devices("asio")
+    if not devices:
+        return None
+    check = probe or _check_rate
+    for device in devices:
+        base = int(device.rate or 0)
+        for rate in dict.fromkeys((base, 44100, 48000)):  # 去重保序
+            if rate <= 0:
+                continue
+            try:
+                if check(device, rate, 2, OutputMode.EXCLUSIVE):
+                    return device
+            except Exception:  # noqa: BLE001 - 单台探测异常换下一台
+                continue
+    return None
+
+
+def _import_sounddevice(enable_asio: bool):
+    """按需 import sounddevice（``enable_asio`` 决定 dlopen 哪个 DLL）。"""
+    if enable_asio:
+        os.environ.setdefault("SD_ENABLE_ASIO", "1")
+    else:
+        os.environ.pop("SD_ENABLE_ASIO", None)
+    import sounddevice as sd  # 局部导入：不拖慢 player 包的 import
+
+    return sd
+
+
 def sounddevice():
-    """惰性取 sounddevice 模块；缺失时抛 ``DeviceError``。"""
-    global _SD
+    """惰性取 sounddevice 模块；缺失时抛 ``DeviceError``。
+
+    ASIO 构建加载失败**不等于**没声卡
+    --------------------------------
+    v1.8.1 实测踩到的坑：便携版包体只带了 ``libportaudio64bit.dll``，没有
+    ``libportaudio64bit-asio.dll``。此时 ``SD_ENABLE_ASIO`` 一旦置上，sounddevice
+    在 import 阶段就 ``dlopen`` 失败（``error 0x7e 找不到模块``），整个 PortAudio
+    随之不可用 —— 表现是"程序能开、但完全放不出声"，比"没有 ASIO 后端"严重得多。
+    所以这里必须**降级重试**：先按 ASIO 建，失败就摘掉变量用普通构建再 import 一次；
+    只有两次都失败才报 ``DeviceError``。
+    """
+    global _SD, _ASIO_LOAD_FAILED
     if _SD is not None:
+        # 已经 dlopen 过：此时再改环境变量没有任何作用，只记一条 DEBUG 说明
+        # 「要改必须重启」——否则用户会以为在设置里改了什么就该立刻生效。
+        if "SD_ENABLE_ASIO" not in os.environ:
+            log.debug(
+                "ASIO 环境变量已缺省，但 PortAudio 已在本次进程中加载："
+                "改环境变量不会生效，需重启程序"
+            )
         return _SD
+    # 兜底：即使调用方没走 run.py / app.py，也在 import sounddevice 之前把
+    # ASIO 构建标记放进环境（sounddevice 只看这个键**是否存在**）。
+    # 但入口显式关过、或上次已加载失败，就绝不补回 —— 否则「关闭」与「降级」
+    # 都会在下一次枚举时被悄悄推翻。
+    want_asio = not asio_switch_disabled()
     try:
-        import sounddevice as sd  # 局部导入：不拖慢 player 包的 import
+        sd = _import_sounddevice(want_asio)
     except Exception as exc:  # noqa: BLE001 - 缺 DLL / 权限异常都汇成一句
-        raise DeviceError(f"无法加载 sounddevice/PortAudio：{exc}") from exc
+        if not want_asio:
+            raise DeviceError(f"无法加载 sounddevice/PortAudio：{exc}") from exc
+        log.warning(
+            "ASIO 版 PortAudio 加载失败（%s）。已自动改用普通构建：本次运行没有 "
+            "ASIO 后端，WASAPI/MME 不受影响。若是便携版，请确认安装包里带有 "
+            "libportaudio64bit-asio.dll",
+            exc,
+        )
+        _ASIO_LOAD_FAILED = True
+        try:
+            sd = _import_sounddevice(False)
+        except Exception as exc2:  # noqa: BLE001
+            raise DeviceError(f"无法加载 sounddevice/PortAudio：{exc2}") from exc2
     _SD = sd
     return _SD
+
 
 
 @dataclass(frozen=True)
@@ -323,6 +431,153 @@ def resolve_device(name: str, backend: str = "") -> DeviceInfo:
     return pick_default_device(devices)
 
 
+# ---------------------------------------------------------------- 设备热插拔（v1.8.1）
+
+
+@dataclass(frozen=True)
+class DeviceChange:
+    """两次设备枚举之间的差集（热插拔的判定结果）。"""
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    default_changed: bool = False
+
+    @property
+    def changed(self) -> bool:
+        """是否有任何变化（调用方据此决定要不要刷界面）。"""
+        return bool(self.added or self.removed or self.default_changed)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "added": list(self.added),
+            "removed": list(self.removed),
+            "default_changed": bool(self.default_changed),
+            "changed": self.changed,
+        }
+
+
+def _entry_name(entry: Any) -> str:
+    """从 ``DeviceInfo`` **或** 桥接层投影的字典里取设备名。"""
+    if isinstance(entry, DeviceInfo):
+        return entry.name
+    if isinstance(entry, dict):
+        return str(entry.get("name") or "")
+    return str(getattr(entry, "name", "") or "")
+
+
+def _entry_is_default(entry: Any) -> bool:
+    """从 ``DeviceInfo`` 或字典里取「是否系统默认设备」。"""
+    if isinstance(entry, DeviceInfo):
+        return bool(entry.is_default)
+    if isinstance(entry, dict):
+        return bool(entry.get("is_default", False))
+    return bool(getattr(entry, "is_default", False))
+
+
+def _enumerate_outputs(backend: str = "") -> list[DeviceInfo]:
+    """``DeviceWatcher`` 的默认枚举器：**纯只读**的设备表查询。"""
+    return list_output_devices(backend or None)
+
+
+class DeviceWatcher:
+    """设备表变化探测器（PRD P0-1：热插拔自动刷新）。
+
+    三条不可越过的边界
+    ------------------
+    1. **不 import Qt**：``player`` 层是纯 Python（架构 2.3），定时器由
+       ``main_window`` 持有的 ``QTimer`` 驱动，本类只负责"两次枚举做差"。
+    2. **只枚举、不试开**：探测只调 ``list_output_devices()``（内部就是
+       ``sd.query_devices()`` 的只读投影），绝不 ``start()`` 流、也不
+       ``check_output_settings()`` —— 每 3 s 真开一次流会打断正在播的音乐。
+    3. **比对键是设备名集合，不是索引**：启用 ASIO 后 5 个 hostapi 并存、
+       PortAudio 的全局索引整体后移；按索引比会得到"每次都变了"的假阳性，
+       于是每 3 s 刷一次界面（真的抖动）。名字也可能重复，但同名设备的
+       增删在用户视角就是同一台，frozenset 正好表达这个语义。
+
+    Args:
+        backend: 后端键（``wasapi`` / ``asio`` …）；空串表示不限后端。
+        enumerator: 注入的枚举器 ``(backend) -> list[DeviceInfo] | list[dict]``。
+            ``PlayerBridge.device_watch()`` 返回的是字典列表（ui 层不允许
+            import player），所以这里同时接受 ``DeviceInfo`` 与字典 —— 比在
+            UI 层再造一层类型投影更不容易出错，测试也能直接喂假数据。
+    """
+
+    def __init__(
+        self,
+        backend: str = "",
+        *,
+        enumerator: Optional[Callable[[str], list[Any]]] = None,
+    ) -> None:
+        self._backend = str(backend or "")
+        self._enumerate: Callable[[str], list[Any]] = enumerator or _enumerate_outputs
+        self._names: frozenset[str] = frozenset()
+        self._default = ""
+        self._primed = False
+
+    # ------------------------------------------------------------ 只读
+
+    def names(self) -> frozenset[str]:
+        """上一次轮询看到的设备名集合（基线）。"""
+        return self._names
+
+    def backend(self) -> str:
+        return self._backend
+
+    def primed(self) -> bool:
+        """是否已经建立过基线（尚未建立时第一次 ``poll_once`` 不报变化）。"""
+        return self._primed
+
+    # ------------------------------------------------------------ 轮询
+
+    def reset(self, backend: str = "") -> None:
+        """换后端/重建基线：下一次 ``poll_once()`` 只建立基线，不报变化。
+
+        为什么首次不报：换后端本身已经由 ``main_window`` 刷了一轮设备表，
+        这里再报一次只会触发一次多余的"设备表变化"日志与重复刷新。
+        """
+        self._backend = str(backend or "")
+        self._names = frozenset()
+        self._default = ""
+        self._primed = False
+
+    def poll_once(self) -> DeviceChange:
+        """枚举一次并与基线做差；返回变化（无变化时 ``changed`` 为 ``False``）。"""
+        try:
+            entries = list(self._enumerate(self._backend) or [])
+        except Exception as exc:  # noqa: BLE001 - 枚举失败不该把定时器打死
+            log.warning("设备表轮询失败，保留上次基线：%s", exc)
+            return DeviceChange()
+        names = frozenset(name for name in (_entry_name(e) for e in entries) if name)
+        default = ""
+        for entry in entries:
+            name = _entry_name(entry)
+            if name and _entry_is_default(entry):
+                default = name
+                break
+        if not self._primed:
+            self._names, self._default, self._primed = names, default, True
+            return DeviceChange()
+        added = tuple(sorted(names - self._names))
+        removed = tuple(sorted(self._names - names))
+        # 默认设备"变成空"（系统里没默认设备了）不算变化：那多半是枚举失败的
+        # 中间态，报出来会让状态栏闪一下又回去。
+        default_changed = bool(default) and default != self._default
+        self._names = names
+        if default:
+            self._default = default
+        change = DeviceChange(
+            added=added, removed=removed, default_changed=default_changed
+        )
+        if change.changed:
+            log.info(
+                "设备表变化：+%s -%s%s",
+                "/".join(added) or "无",
+                "/".join(removed) or "无",
+                " · 系统默认设备已变" if default_changed else "",
+            )
+        return change
+
+
 # ---------------------------------------------------------------- 独占能力（v1.7）
 
 #: 严格独占的样本格式白名单：**只有 int32**。
@@ -380,6 +635,9 @@ class OutputPlan:
     requested_mode: OutputMode = OutputMode.SHARED
     note: str = ""
     supported_rates: tuple[int, ...] = ()
+    #: 本次计划走的是 ASIO 驱动独占（v1.8.1）。ASIO **不参与**四级阶梯，
+    #: 这个标记让引擎/信号路径不必再靠"后端名猜测"来判断独占语义。
+    asio: bool = False
 
     @property
     def exclusive(self) -> bool:
@@ -403,6 +661,7 @@ class OutputPlan:
             "requested_mode": self.requested_mode.value,
             "note": self.note,
             "supported_rates": list(self.supported_rates),
+            "asio": bool(self.asio),
         }
 
 
@@ -687,8 +946,12 @@ def supports_rate(
     if ch <= 0:
         return False
     extra = extra_settings_for(mode_value, info)
-    if mode_value.is_exclusive and extra is None:
-        return False  # 非 WASAPI 设备没有独占
+    # ASIO 的"独占"是驱动天然行为，没有 WasapiSettings —— 不能因为 extra 为 None
+    # 就判死。v1.8.1 踩过这个坑：ASIO 分支把独占计划排出来了，探测层却先把每
+    # 一个候选率否掉，最终报「ASIO 只支持驱动声明的采样率」，把用户指去驱动面板
+    # 白折腾一圈。判据只能是"这台设备是不是 ASIO"，而不是"有没有 extra_settings"。
+    if mode_value.is_exclusive and extra is None and info.backend_key != BACKEND_ASIO:
+        return False  # 非 WASAPI / 非 ASIO 设备没有独占
     sd = sounddevice()
     dtypes = STRICT_DTYPES if mode_value.explicit_format else SD_OUTPUT_DTYPES
     for dtype in dtypes:
@@ -763,6 +1026,107 @@ def describe_no_option(
     return text
 
 
+#: ASIO 驱动实际声明的倍率阶梯（由高到低，仅用于**向下**回退）。
+#:
+#: 为什么不能复用 ``RATE_FALLBACK_FULL``：那条链只有 88.2k/96k/48k/44.1k，
+#: 缺了 705.6k / 352.8k / 176.4k —— 而这三个正是 DSD/DoP 的载体率。少了它们，
+#: 705.6k 一旦被驱动拒绝就直落 88.2k，等于把 352.8k 这级白白跳过（DSD 明明
+#: 还能按 352.8k 播，却先被重采样成 1/8）。ASIO 的唯一可退维度就是采样率，
+#: 所以这条链必须把驱动常用的倍率写全。
+ASIO_RATE_LADDER = (1411200, 705600, 352800, 176400, 96000, 88200, 48000, 44100, 32000)
+
+
+def _asio_candidate_rates(device: DeviceInfo, want_rate: int) -> tuple[int, ...]:
+    """ASIO 的回退候选：源率 → 驱动倍率阶梯（只向下）→ 设备默认率。
+
+    只收 ``<= want_rate`` 的候选：往上试 1.4112M 只会把缓冲区撑大、把 CPU 抬上去，
+    对"这次起播能不能出声"毫无帮助。
+    """
+    want = int(want_rate) if int(want_rate) > 0 else 0
+    trials: list[int] = []
+    if want > 0:
+        trials.append(want)
+    for rate in ASIO_RATE_LADDER:
+        if want <= 0 or int(rate) <= want:
+            trials.append(int(rate))
+    default_rate = int(getattr(device, "rate", 0) or 0)
+    if default_rate > 0 and (want <= 0 or default_rate <= want):
+        trials.append(default_rate)
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for rate in trials:
+        if rate in seen:
+            continue
+        seen.add(rate)
+        ordered.append(rate)
+    return tuple(ordered)
+
+
+def _plan_asio_output(
+    device: DeviceInfo,
+    want_rate: int,
+    channels: int,
+    requested_mode: OutputMode,
+    skipped: set[int],
+    check,
+) -> OutputPlan:
+    """ASIO 的单级计划：只按候选率降级，模式恒为 ``EXCLUSIVE``。
+
+    为什么不能套共享/独占四级阶梯（设计 §1.4）
+    ------------------------------------------
+    * ASIO 驱动天然独占 —— 一个驱动同一时刻只服务一个客户端，"退回共享"这个
+      动作对 ASIO 不存在（它的"共享"等于换一个后端）。所以既没有第 4 级，
+      也没有"严格 → 宽松"第 2 级（``WasapiSettings`` 对 ASIO 毫无意义，
+      ``extra_settings_for`` 已对非 WASAPI 返回 ``None``）；
+    * 唯一能退的维度是**采样率**，而 ASIO 驱动只接受它自己声明的采样率
+      （本机实测 44100/48000/88200/96000/176400/352800 可用，705600/1411200
+      被驱动直接拒绝）。全失败时必须 ``RateUnsupportedError`` 并写明原因，
+      绝不许静默换成共享或别的后端。
+
+    Args:
+        skipped: 本次起播里已经失败过的层级（1/3）。ASIO 只有这两级，两级都
+            失败就抛错，避免在同一组参数上原地重试。
+    """
+    # 「严格独占」是 WASAPI 四级阶梯里的概念；ASIO 只有一条独占通路，
+    # 没有"严格 → 宽松"这一级（本函数 docstring 的边界）。把 STRICT 原样
+    # 带进 requested_mode 会让 OutputPlan.mode_fallback 判成"模式降级"，
+    # 引擎进而对一条本来开得出来的流报「独占无法按原参数打开」—— 界面
+    # 就在对用户说谎。按"请求即独占"归一：ASIO 达成的就是 EXCLUSIVE 本身。
+    if requested_mode is OutputMode.EXCLUSIVE_STRICT:
+        requested_mode = OutputMode.EXCLUSIVE
+    candidates = _asio_candidate_rates(device, want_rate)
+    for rate in candidates:
+        if not check(device, rate, channels, OutputMode.EXCLUSIVE):
+            continue
+        fallback = int(rate) != int(want_rate)
+        level = 3 if fallback else 1
+        if level in skipped:
+            continue
+        notes: list[str] = []
+        if not requested_mode.is_exclusive:
+            notes.append("ASIO 驱动没有共享模式，已按驱动独占打开")
+        if fallback:
+            notes.append(f"ASIO 驱动不接受 {want_rate} Hz，改用驱动声明的 {rate} Hz")
+        return OutputPlan(
+            int(rate),
+            OutputMode.EXCLUSIVE,
+            level,
+            fallback,
+            int(want_rate),
+            requested_mode,
+            "；".join(notes),
+            (int(rate),),
+            True,
+        )
+    raise RateUnsupportedError(
+        f"设备 {device.label} 在 ASIO 下打不开任何候选采样率（"
+        + "/".join(str(rate) for rate in candidates)
+        + " Hz）：ASIO 只支持驱动声明的采样率。请在驱动控制面板里启用需要的"
+        "采样率后重试，或改用 WASAPI / MME 后端。",
+        tried=candidates,
+    )
+
+
 def plan_output(
     device: DeviceInfo | None,
     want: int,
@@ -804,6 +1168,12 @@ def plan_output(
     want_rate = int(want) if int(want) > 0 else int(device.rate or SR_44K)
     candidates = candidate_rates(device, want_rate, extended=extended)
     skipped = {int(level) for level in (skip_levels or ())}
+
+    # ---- ASIO：提前返回单级计划（见 _plan_asio_output 的长注释）----
+    # 判据用设备自己的 hostapi，而不是 settings 里的后端键：settings 可能还写着
+    # "wasapi"（用户刚换设备没重存），真正决定开流语义的是**这台设备**。
+    if device.backend_key == BACKEND_ASIO:
+        return _plan_asio_output(device, want_rate, ch, requested_mode, skipped, check)
 
     plans: list[OutputPlan] = []
 
@@ -922,6 +1292,10 @@ def backend_present(key: str) -> bool:
     hints = BACKEND_HOSTAPI_HINTS.get(str(key or "").strip().lower(), ())
     if not hints:
         return False
+    if str(key or "").strip().lower() == BACKEND_ASIO and _ASIO_LOAD_FAILED:
+        # ASIO 构建没加载成功：普通构建里永远不会有 ASIO hostapi，
+        # 直接给结论，不必再枚举一次。
+        return False
     for name in _hostapi_names():
         lowered = name.lower()
         if any(hint in lowered for hint in hints):
@@ -958,8 +1332,10 @@ def backend_available(
     mode_value = normalize_output_mode(mode)
     probe_rate = int(rate) if int(rate) > 0 else (info.rate or SR_44K)
     extra = extra_settings_for(mode_value, info)
-    if mode_value.is_exclusive and extra is None:
-        return False, "该后端/设备不支持独占（仅 WASAPI 支持）", 0
+    # 同 supports_rate：ASIO 的独占不需要 extra_settings，别在这里把「测试此设备」
+    # 按钮弄成永远失败（用户看到的是"设备不支持独占"，而事实相反）。
+    if mode_value.is_exclusive and extra is None and info.backend_key != BACKEND_ASIO:
+        return False, "该后端/设备不支持独占（仅 WASAPI / ASIO 支持）", 0
     silence = np.zeros((max(1, int(probe_rate * min(1.0, duration_sec))), int(channels)),
                        dtype=dtype)
     try:
@@ -1067,8 +1443,9 @@ def probe_supported_rates(
 
 def reimport_sounddevice() -> None:
     """测试用：清掉模块缓存，模拟「重新加载 PortAudio」。"""
-    global _SD
+    global _SD, _ASIO_LOAD_FAILED
     _SD = None
+    _ASIO_LOAD_FAILED = False
 
 
 __all__ = [
@@ -1078,7 +1455,11 @@ __all__ = [
     "DeviceLostError",
     "RateUnsupportedError",
     "DeviceInfo",
+    "DeviceChange",
+    "DeviceWatcher",
     "sounddevice",
+    "asio_unavailable_reason",
+    "asio_switch_disabled",
     "backend_key_for_hostapi",
     "resolve_backend",
     "backend_default_output_index",

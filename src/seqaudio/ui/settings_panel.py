@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -42,6 +44,12 @@ class SettingsPanel(QWidget):
     appearancePreviewChanged = Signal(str, str, float)  # 字体/字号预览（id, id, scale）
     # 后端变了 → 请求主窗口重新枚举设备（设备表由 PlayerBridge 持有，面板不碰 player）
     outputDeviceRefreshRequested = Signal(str)
+    # 需要重新问一次「这台设备能不能直出 DoP」→ 请求主窗口去问引擎。
+    # 为什么是信号而不是面板自己问：DoP 能力要走引擎的独占总线判定与
+    # check_output_settings 探测，面板不该 import 引擎（UI 层拿到 player 对象
+    # 就会有人顺手开流）。主窗口接住信号 → bridge.dop_capability() → 回填
+    # set_dop_available()，与 outputDeviceRefreshRequested 同一套分工。
+    dopCapabilityRefreshRequested = Signal()
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -109,8 +117,38 @@ class SettingsPanel(QWidget):
         root.addWidget(self.tabs, 1)
         root.addWidget(self._build_save_bar())
 
+        self._install_wheel_guard()
         self.load_from(settings)
         self._set_dirty(False)
+
+    # ------------------------------------------------------------ 滚轮路由（v1.8.1 用户反馈）
+
+    def _install_wheel_guard(self) -> None:
+        """把「滚轮改参数」拦下来，转给**外层**滚动区的垂直滚动条。
+
+        用户反馈：在参数页滚滚轮，"滚着滚着鼠标移动到里面的参数位置时，里面
+        的参数也跟着滚动了"。Qt 的默认行为确实如此——QComboBox / QSpinBox /
+        QDoubleSpinBox 在有滚轮悬停时会**直接改值**，QSlider 会**直接改音量/
+        缓冲**，QTableWidget 会自己滚自己的行。这些都不是用户想要的：滚轮在
+        这个面板里只该做一件事——滚外层那条滚动条。
+
+        实现是一个事件过滤器：拦下这几类控件的 Wheel 事件（拦下即"消费"，
+        控件本身的滚轮行为不会发生），按滚轮方向去拨**所属 QScrollArea** 的
+        垂直滚动条。控件照常可以点开下拉、拖动滑块、键盘步进——只是不再
+        被"路过"的滚轮误改。
+        """
+        if getattr(self, "_wheel_guard", None) is None:
+            self._wheel_guard = _WheelGuard(self)
+
+        targets: list[QWidget] = []
+        for cls in (QComboBox, QAbstractSpinBox, QSlider, QTableWidget):
+            targets.extend(self.findChildren(cls))
+        seen: set[int] = set()
+        for widget in targets:
+            if widget is None or id(widget) in seen:
+                continue
+            seen.add(id(widget))
+            widget.installEventFilter(self._wheel_guard)
 
     # ------------------------------------------------------------ 卡片构建
 
@@ -466,6 +504,14 @@ class SettingsPanel(QWidget):
         self.backend_hint.setObjectName("hint")
         self.backend_hint.setWordWrap(True)
 
+        # ASIO 专用说明行：选中 ASIO 时**取代**三档模式单选（见 _apply_asio_state）。
+        # 为什么不直接禁用三档：「禁用」与「不存在」对用户是两件事——ASIO 驱动
+        # 只有独占这一种语义，摆三个灰按钮只会让人以为缺了功能。
+        self.asio_note = QLabel(i18n.tr("dev_asio_mode_note"))
+        self.asio_note.setObjectName("hint")
+        self.asio_note.setWordWrap(True)
+        self.asio_note.setVisible(False)
+
         # ---- 输出模式：三选一（v1.7）----
         # 为什么不是一个复选框：独占有两档，严格档要求整数通路、DSP 全旁路，
         # 与"开了独占就能用"是两件事（见 docs/1.7-独占输出设计.md §4.1）。
@@ -581,6 +627,7 @@ class SettingsPanel(QWidget):
             ]
         )
         card.add_widget(self.backend_hint)
+        card.add_widget(self.asio_note)
         card.add_widget(self.mode_row)
         card.add_widget(self.exclusive_check)
         card.add_widget(self.exclusive_hint)
@@ -624,6 +671,15 @@ class SettingsPanel(QWidget):
         self.int_pipeline_hint.setObjectName("hint")
         self.int_pipeline_hint.setWordWrap(True)
 
+        # ---- DSD 直出（DoP，v1.8.1）----
+        # 直出能力取决于「载体率能不能真开出来」，只有引擎侧探测知道，所以默认
+        # 置灰并写明会回退 PCM：引擎确认可用后由 ``set_dop_available(True)`` 点亮。
+        # 一个"勾了没效果"的开关比没有开关更糟（用户会以为程序坏了）。
+        self.dop_check = QCheckBox(i18n.tr("dev_dop_switch"))
+        self.dop_check.setToolTip(i18n.tr("dev_dop_fallback"))
+        self.dop_check.setEnabled(False)
+        self.dop_check.toggled.connect(self._notify)
+
         card.add_form(
             [
                 ("缓冲大小", self.buffer_spin),
@@ -632,6 +688,7 @@ class SettingsPanel(QWidget):
         )
         card.add_widget(self.int_pipeline_check)
         card.add_widget(self.int_pipeline_hint)
+        card.add_widget(self.dop_check)
         return card
 
     def _build_playback_card(self) -> Card:
@@ -739,6 +796,8 @@ class SettingsPanel(QWidget):
         # isVisible() 恒为 False，会让能力刷新整段失效。
         if not self._loading and not self.capability_box.isHidden():
             self._refresh_capability()
+        # 换了设备 → DoP 载体能力可能整个反转（8 声道环绕通常打不开 176.4k）
+        self.dopCapabilityRefreshRequested.emit()
         self._notify()
 
     def _on_backend_changed(self, _index: int) -> None:
@@ -752,13 +811,21 @@ class SettingsPanel(QWidget):
             # 主窗口是设备的唯一持有者，这里只发键，由它过滤后回填下拉。
             self.outputDeviceRefreshRequested.emit(key)
             mode = self._current_output_mode()
-            # 非 WASAPI 后端：独占/严格置灰，并退回共享
-            self._apply_mode_constraints(mode)
-            if key != "wasapi" and mode.is_exclusive:
-                self._set_output_mode(OutputMode.SHARED)
-                self.capability_box.setVisible(False)
-            elif not self.capability_box.isHidden():
-                self._refresh_capability()
+            # ASIO：驱动独占，三档模式没有意义 → 隐藏单选框、换一行说明。
+            # 必须与「非 WASAPI 就退回共享」分开处理：ASIO 不是"不支持独占"，
+            # 它天生就是独占，退回共享才是错的。
+            if key == "asio":
+                self._apply_asio_state()
+            else:
+                self._apply_mode_constraints(mode)
+                if key != "wasapi" and mode.is_exclusive:
+                    self._set_output_mode(OutputMode.SHARED)
+                    self.capability_box.setVisible(False)
+                elif not self.capability_box.isHidden():
+                    self._refresh_capability()
+                self._apply_asio_state()
+            # 换后端 → 共享/独占语义变了，DoP 可用性跟着变（共享必然不可直出）
+            self.dopCapabilityRefreshRequested.emit()
         self._notify()
 
     # ------------------------------------------------------------ 输出模式（v1.7）
@@ -824,6 +891,78 @@ class SettingsPanel(QWidget):
             return
         self._sticky_notice = ""
         self.capability_hint.setText(self._last_base_hint)
+
+    # ------------------------------------------------------------ ASIO / DoP（v1.8.1）
+
+    def _apply_asio_state(self) -> None:
+        """按当前后端切换「三档模式」与「ASIO 说明行」的可见性。
+
+        ASIO 驱动只有独占一种语义：摆三个单选按钮（其中两个永远灰着）会让用户
+        以为功能缺失，所以整行隐藏、改一行说明；同时把模式钉在「独占」——
+        否则 settings 里会留下 "shared"，信号路径又得解释一次"为什么 ASIO
+        却写着共享"，而那正是最没必要的解释。
+        """
+        asio = self._current_backend_key() == "asio"
+        self.mode_row.setVisible(not asio)
+        self.asio_note.setVisible(asio)
+        if asio:
+            self._set_output_mode(OutputMode.EXCLUSIVE)
+            self.capability_box.setVisible(False)
+            self.exclusive_hint.setVisible(False)
+        else:
+            self.exclusive_hint.setVisible(self._current_output_mode().is_exclusive)
+
+    def set_asio_state(self, enabled: bool, reason: str = "") -> None:
+        """ASIO 项可用性（PortAudio 有 ASIO 构建 **且** 至少一台 ASIO 驱动）。
+
+        不可用时置灰**并写明原因**（``dev_asio_unavailable``：SD_ENABLE_ASIO
+        没生效）。这不是把功能藏起来：用户唯一能做的动作就是"重启程序让环境
+        变量生效"，把那句话说出来才算给了下一步。
+
+        Args:
+            reason: 不可用的具体原因（``dev_asio_switched_off`` /
+                ``dev_asio_load_failed``）。两种原因的修法完全不同 ——
+                "自己用 --no-asio 关的"只要去掉参数重启，"包体缺 DLL"换多少
+                次重启都没用，所以不能合并成一句笼统的"不可用"。
+        """
+        index = self.backend_combo.findData("asio")
+        if index < 0:
+            return
+        model_item = self.backend_combo.model().item(index)
+        if model_item is not None:
+            model_item.setEnabled(bool(enabled))
+        if enabled:
+            self.backend_combo.setItemData(
+                index, i18n.tr("dev_hint_asio"), Qt.ToolTipRole
+            )
+            return
+        reason_text = str(reason or "").strip() or i18n.tr("dev_asio_unavailable")
+        self.backend_combo.setItemData(
+            index,
+            f"{reason_text}\n{i18n.tr('dev_hint_asio')}",
+            Qt.ToolTipRole,
+        )
+        if self._current_backend_key() == "asio":
+            # 已选 ASIO 但当前环境用不了：退回 MME（默认后端）。
+            # 顺序有讲究 —— setCurrentIndex 会触发 _on_backend_changed 把提示
+            # 改写成 dev_hint_mme，所以那句原因必须**之后**再写。
+            self.backend_combo.setCurrentIndex(
+                max(0, self.backend_combo.findData("mme"))
+            )
+            self.backend_hint.setText(reason_text)
+
+    def set_dop_available(self, available: bool, reason: str = "") -> None:
+        """DoP 直出开关的可用性（载体率探测结果由引擎侧给出）。
+
+        ``available=False`` 时复选框置灰并写明"会回退 PCM" —— 宁可先说明，
+        也不给一个「勾了没效果」的开关（那等于骗用户去点）。
+        """
+        self.dop_check.setEnabled(bool(available))
+        tip = i18n.tr("dev_dop_switch")
+        if available:
+            self.dop_check.setToolTip(tip)
+            return
+        self.dop_check.setToolTip(f"{tip}\n{reason or i18n.tr('dev_dop_fallback')}")
 
     def _apply_mode_constraints(self, mode: OutputMode) -> None:
         """严格模式的强制项：整数通路必勾且锁定；后端不支持时置灰独占。"""
@@ -1182,6 +1321,9 @@ class SettingsPanel(QWidget):
             self.release_on_pause_check.setChecked(
                 bool(getattr(settings, "playback_release_on_pause", True))
             )
+            # ASIO 下三档模式整行隐藏（说明行取代它）；这里只处理可见性，
+            # 不擅自改写用户存的模式（后端是 ASIO 时才钉独占，见 _apply_asio_state）
+            self._apply_asio_state()
             # 载入时**不**擅自改动用户存的模式（哪怕后端是 MME）：只把不可用的
             # 选项置灰。真正"会失败的模式"（严格的设备不支持）在能力探测后处理；
             # 用户主动切换后端时才会退回共享（见 _on_backend_changed）。
@@ -1219,6 +1361,7 @@ class SettingsPanel(QWidget):
             self.int_pipeline_check.setChecked(
                 bool(getattr(settings, "playback_int_pipeline", False))
             )
+            self.dop_check.setChecked(bool(getattr(settings, "playback_dsd_dop", True)))
             self.restore_session_check.setChecked(
                 bool(getattr(settings, "playback_restore_session", True))
             )
@@ -1228,6 +1371,9 @@ class SettingsPanel(QWidget):
             )
         finally:
             self._loading = False
+        # 载入后必须问一次 DoP 能力：dop_check 初始是 setEnabled(False)，
+        # 没人点亮就等于开关永远灰着（v1.8.1 曾整版如此）。
+        self.dopCapabilityRefreshRequested.emit()
 
     def apply_to(self, settings: Settings) -> Settings:
         # ConflictMode / LyricsMode 是 str 枚举，经 Qt userData 往返后退化为字符串
@@ -1299,9 +1445,44 @@ class SettingsPanel(QWidget):
             self.dsd_rate_combo.currentData() or 176400
         )
         settings.playback_int_pipeline = self.int_pipeline_check.isChecked()
+        settings.playback_dsd_dop = self.dop_check.isChecked()
         settings.playback_restore_session = self.restore_session_check.isChecked()
 
         # ---- 曲库 ----
         settings.library_autoload = self.autoload_check.isChecked()
         settings.library_recent_sort = self.recent_sort_check.isChecked()
         return settings
+
+
+class _WheelGuard(QObject):
+    """滚轮 → 外层滚动条 的事件过滤器（安装见 ``SettingsPanel._install_wheel_guard``）。
+
+    拦下 QComboBox / QAbstractSpinBox / QSlider / QTableWidget 的 Wheel 事件，
+    按滚轮方向去拨**所属 QScrollArea** 的垂直滚动条。控件照常可以点开下拉、
+    拖动滑块、键盘步进——只是不再被"路过"的滚轮误改值。
+    """
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
+        from PySide6.QtCore import QEvent
+
+        if event.type() == QEvent.Type.Wheel:
+            area = self._scroll_area_for(obj)
+            if area is not None:
+                bar = area.verticalScrollBar()
+                delta = event.angleDelta().y()
+                if delta:
+                    # 一格滚轮（120）走 1/8 页高，最少 24 px：跟浏览器/列表的
+                    # 手感接近，也不会一格翻过整页
+                    step = max(24, bar.pageStep() // 8)
+                    bar.setValue(bar.value() - int(delta / 120) * step)
+                return True
+        return False
+
+    @staticmethod
+    def _scroll_area_for(widget):
+        parent = widget.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parentWidget()
+        return None

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from .constants import STAGE_I18N_KEYS, STAGE_KEYS, StageStatus
+from .dsd import dsd_label_for, dop_label_for, format_rate_khz
 
 log = logging.getLogger(__name__)
 
@@ -42,8 +43,31 @@ TEXT_OUTPUT_LOOSE = "WASAPI · 独占"
 TEXT_OUTPUT_SHARED = "WASAPI · 共享（系统混音器）"
 TEXT_OUTPUT_REFUSED = "WASAPI · 共享（该设备不支持独占）"
 TEXT_OUTPUT_ASIO_MISSING = "ASIO · 不可用（当前 PortAudio 构建不含 ASIO）"
+#: ASIO 真的开流成功时的 output 级文案（PRD P0-3③ 定稿措辞）。
+#: ASIO 驱动天然独占，不再分「宽松/严格」两档。
+TEXT_OUTPUT_ASIO = "ASIO · 驱动独占"
+#: device 级的延迟项。**非** ASIO 后端保持 v1.8 的写法不变（既有断言依赖它）。
+TEXT_LATENCY = "延迟 {ms:.0f} ms"
+#: ASIO：``stream.latency`` 只是 PortAudio 的驱动缓冲周期，**不是**端到端延迟。
+#: 把它叫「延迟」会让人以为整链路只有 40 ms，所以按后端分叉、改称「驱动缓冲」。
+TEXT_ASIO_BUFFER_MEASURED = "驱动缓冲 {ms:.0f} ms（实测）"
+#: 驱动没上报 ``stream.latency`` 时用的是估算值，必须写明是估算。
+TEXT_ASIO_BUFFER_ESTIMATED = "驱动缓冲 {ms:.0f} ms（估算，驱动未上报）"
 #: 整数通路被 DSP 挤掉时的说明（面板必须说清楚为什么「位完美」没生效）
 TEXT_INT_PIPELINE_UNAVAILABLE = "整数通路不可用（DSP 已启用，改用浮点）"
+
+# ---- DoP（v1.8.1 P1-1）----
+#: DoP 直出：``DSD64 → DoP64 @176.4 kHz``。只陈述「怎么装的」，不承诺音质
+TEXT_DOP_DECODE = "{dsd} → {dop} @{rate}"
+#: 回退 PCM：``DSD256 → PCM 176.4 kHz（设备不支持 705.6 kHz 载体）``
+TEXT_DOP_FALLBACK = "{dsd} → PCM {rate}（{note}）"
+#: DSD 转 PCM（没有 DoP 意图时的老写法）
+TEXT_DSD_TO_PCM = "{dsd} → PCM {rate}"
+#: DoP 期间音量/EQ/淡变被旁路的**显式**说明（不能静默）
+TEXT_DOP_GAIN_BYPASSED = "0 dB 旁路（DoP 期间软件音量不可用，音量由驱动控制）"
+TEXT_DOP_EQ_BYPASSED = "旁路（DoP 期间强制关闭）"
+TEXT_DOP_FADE_BYPASSED = "无（DoP 不支持淡变/交叉淡变）"
+TEXT_DOP_RESAMPLE = "未重采样 · 声道直通（DoP 载体 = DSD 位率 ÷ 16）"
 #: 绝不允许出现的说法
 FORBIDDEN_CLAIMS = ("bit-perfect", "bit perfect", "位完美", "逐样本一致", "比特完美")
 
@@ -53,6 +77,9 @@ BACKEND_LABELS = {
     "mme": "MME",
     "directsound": "DirectSound",
     "wdmks": "WDM-KS",
+    # ASIO 没有「共享/独占」两档：驱动本身就是独占。这里给的是兜底显示名，
+    # 真正开流成功时走下面的 ``TEXT_OUTPUT_ASIO`` 分支。
+    "asio": TEXT_OUTPUT_ASIO,
 }
 
 #: 各级的中文标签（界面切语言时用 STAGE_I18N_KEYS 覆盖，此处只做日志/兜底）
@@ -91,6 +118,39 @@ def assert_wording(text: str) -> str:
         log.warning("信号路径文案声称「直通 DAC」：%s", value)
         return TEXT_NO_SOFTWARE_CHANGE
     return value
+
+
+def latency_text(backend_key: str, latency_ms: float, latency_source: str = "") -> str:
+    """device 级「延迟」项的文案（按后端分叉，空串表示不写这项）。
+
+    ``stream.latency`` 的语义随后端不同：WASAPI/MME/DirectSound 下它至少还沾点
+    「这条路多长」的意思；ASIO 下它就是 **驱动自己的缓冲周期**（而且实测
+    PortAudio 会把过大的 ``latency`` 请求值原样回显），跟端到端延迟不是一个量。
+    所以 ASIO 改称「驱动缓冲」并写明实测/估算，其它后端保持 v1.8 的原文案 ——
+    那些措辞已经被既有断言锁住，不该为了统一而漂移。
+
+    Args:
+        backend_key: 小写后端键（``"asio"`` / ``"wasapi"`` / …）。
+        latency_ms: 输出层给出的毫秒数；``<= 0`` 视为「没有数据」。
+        latency_source: ``"measured"`` / ``"estimated"``；空串按实测处理。
+
+    Returns:
+        可直接拼进 device 级的短句；无数据时返回空串。
+    """
+    try:
+        value = float(latency_ms or 0.0)
+    except (TypeError, ValueError):
+        return ""
+    if not value > 0:
+        return ""
+    text = (
+        TEXT_ASIO_BUFFER_ESTIMATED
+        if str(latency_source or "").strip().lower() == "estimated"
+        else TEXT_ASIO_BUFFER_MEASURED
+    )
+    if str(backend_key or "").strip().lower() != "asio":
+        return TEXT_LATENCY.format(ms=value)
+    return text.format(ms=value)
 
 
 @dataclass
@@ -202,6 +262,7 @@ class SignalPath:
         device: str = "",
         exclusive: bool = False,
         latency_ms: float = 0.0,
+        latency_source: str = "",
         device_dtype: str = "",
         int_pipeline: bool = False,
         format_note: str = "",
@@ -212,19 +273,61 @@ class SignalPath:
         mode_note: str = "",
         exclusive_refused: bool = False,
         exclusive_fallback: bool = False,
+        dsd_rate: int = 0,
+        dop: bool = False,
+        dop_rate: int = 0,
+        dop_note: str = "",
     ) -> "SignalPath":
-        """按真实链路重建 9 级描述（引擎开流成功后调用一次）。"""
+        """按真实链路重建 9 级描述（引擎开流成功后调用一次）。
+
+        DoP 相关参数（v1.8.1）：
+
+        * ``dsd_rate``：源 DSD 位率（2822400 / 5644800 …），用来写「DSD64」；
+          刻意**不**从载体率反推 —— 反推会把 DSD128 写成 DoP64。
+        * ``dop`` + ``dop_rate``：真的在走 DoP 直出。
+        * ``dop_note``：**回退原因**。非空即表示「本来要 DoP、设备不给」，
+          decode 级会被标成 ``FALLBACK`` 并把原因写进同一行 —— 不许静默降级。
+        * ``latency_source``：``"measured"`` / ``"estimated"``（由输出层的
+          ``AudioOutput.latency_source`` 给）。只在 ASIO 下改变措辞：驱动没上报
+          ``stream.latency`` 时必须写「估算」，否则就是把估数当实测卖。
+        """
         want = int(rate_want or 0)
         actual = int(rate_actual or 0)
         fell_back = bool(want and actual and want != actual)
+        dsd_value = int(dsd_rate or 0)
+        dop_value = int(dop_rate or 0)
+        if not dsd_value and dop_value:
+            # 兜底：DoP 载体率 × 16 = DSD 位率（引擎正常会给 dsd_rate，
+            # 这里保证「载体率有、位率缺」时仍能写出 DSD64/DoP64 而不是问号）
+            dsd_value = dop_value * 16
+        dop_on = bool(dop and dsd_value and dop_value)
+        note = str(dop_note or "")
 
         stages: list[SignalStage] = []
         stages.append(SignalStage("source", detail=source or "—"))
 
         decode_detail = " · ".join(part for part in (decoder_version, codec) if part) or "—"
-        if is_dsd and actual:
+        decode_status = StageStatus.PASSTHROUGH
+        if dop_on:
+            # 「DSD64 → DoP64 @176.4 kHz」：只写通路，不写任何音质结论
+            decode_detail = TEXT_DOP_DECODE.format(
+                dsd=dsd_label_for(dsd_value),
+                dop=dop_label_for(dsd_value),
+                rate=format_rate_khz(dop_value),
+            )
+        elif is_dsd and dsd_value and note:
+            # **真回退**才换措辞并标 FALLBACK：写清「本来该是哪一档、退到了多少、
+            # 为什么」（PRD P1-1②/P1-2②）。没有回退时保持 v1.8 的老写法
+            # 「… · DSD→176400 Hz」—— 一次只改该改的那一处，别的面板文案不漂移。
+            decode_detail = TEXT_DSD_TO_PCM.format(
+                dsd=dsd_label_for(dsd_value),
+                rate=format_rate_khz(actual or sample_rate),
+            )
+            decode_detail = f"{decode_detail}（{note}）"
+            decode_status = StageStatus.FALLBACK
+        elif is_dsd and actual:
             decode_detail = f"{decode_detail} · DSD→{actual} Hz"
-        stages.append(SignalStage("decode", detail=decode_detail))
+        stages.append(SignalStage("decode", detail=decode_detail, status=decode_status))
 
         format_detail = " · ".join(
             part
@@ -245,7 +348,13 @@ class SignalPath:
             )
         )
 
-        if gain_active and abs(gain_db) > 1e-9:
+        if dop_on:
+            # DoP 期间任何软件增益都会破坏位流：必须显式说"被关掉了"，
+            # 而不是给一句笼统的「0 dB 旁路」让用户以为他自己设的
+            stages.append(
+                SignalStage("gain", detail=TEXT_DOP_GAIN_BYPASSED, status=StageStatus.BYPASSED)
+            )
+        elif gain_active and abs(gain_db) > 1e-9:
             stages.append(
                 SignalStage("gain", detail=f"{gain_db:+.1f} dB 浮点乘法", status=StageStatus.CHANGED)
             )
@@ -254,7 +363,11 @@ class SignalPath:
                 SignalStage("gain", detail="0 dB 旁路（无软件增益）", status=StageStatus.BYPASSED)
             )
 
-        if eq_enabled and eq_active:
+        if dop_on:
+            stages.append(
+                SignalStage("eq", detail=TEXT_DOP_EQ_BYPASSED, status=StageStatus.BYPASSED)
+            )
+        elif eq_enabled and eq_active:
             stages.append(
                 SignalStage("eq", detail=f"{eq_bands} 段 · 峰值 ±12 dB", status=StageStatus.CHANGED)
             )
@@ -263,31 +376,38 @@ class SignalPath:
         else:
             stages.append(SignalStage("eq", detail="旁路", status=StageStatus.BYPASSED))
 
-        fade_parts: list[str] = []
-        if crossfade_sec > 0:
-            fade_parts.append(f"交叉淡变 {crossfade_sec:.1f} s")
-        if ramp_ms > 0:
-            fade_parts.append(f"切歌斜坡 {int(ramp_ms)} ms")
-        if gapless:
-            fade_parts.append("同规格无缝")
-        stages.append(
-            SignalStage(
-                "fade",
-                detail=" · ".join(fade_parts) or "无",
-                status=StageStatus.CHANGED if crossfade_sec > 0 else (
-                    StageStatus.PASSTHROUGH if fade_parts else StageStatus.BYPASSED
-                ),
+        if dop_on:
+            stages.append(
+                SignalStage("fade", detail=TEXT_DOP_FADE_BYPASSED, status=StageStatus.BYPASSED)
             )
-        )
+        else:
+            fade_parts: list[str] = []
+            if crossfade_sec > 0:
+                fade_parts.append(f"交叉淡变 {crossfade_sec:.1f} s")
+            if ramp_ms > 0:
+                fade_parts.append(f"切歌斜坡 {int(ramp_ms)} ms")
+            if gapless:
+                fade_parts.append("同规格无缝")
+            stages.append(
+                SignalStage(
+                    "fade",
+                    detail=" · ".join(fade_parts) or "无",
+                    status=StageStatus.CHANGED if crossfade_sec > 0 else (
+                        StageStatus.PASSTHROUGH if fade_parts else StageStatus.BYPASSED
+                    ),
+                )
+            )
 
         resample_parts: list[str] = []
         resample_status = StageStatus.PASSTHROUGH
-        if fell_back:
+        if fell_back and not dop_on:
             resample_parts.append(TEXT_FALLBACK_RATE.format(src=want, dst=actual))
             resample_status = StageStatus.FALLBACK
         if downmix_from and channels and downmix_from > channels:
             resample_parts.append(f"下混 {downmix_from}→{channels}")
             resample_status = StageStatus.CHANGED
+        if dop_on and not resample_parts:
+            resample_parts.append(TEXT_DOP_RESAMPLE)
         stages.append(
             SignalStage(
                 "resample",
@@ -304,6 +424,12 @@ class SignalPath:
         if backend_key == "asio" and not actual_exclusive:
             output_status = StageStatus.ERROR
             output_detail = TEXT_OUTPUT_ASIO_MISSING
+        elif backend_key == "asio":
+            # ASIO 驱动天然独占：不要套用 WASAPI 的「宽松/严格」两档措辞
+            output_detail = " · ".join(part for part in (TEXT_OUTPUT_ASIO, device) if part)
+            output_status = (
+                StageStatus.FALLBACK if exclusive_fallback else StageStatus.PASSTHROUGH
+            )
         elif actual_exclusive:
             head = TEXT_OUTPUT_STRICT if label == "strict" else TEXT_OUTPUT_LOOSE
             output_detail = " · ".join(part for part in (head, device) if part)
@@ -350,7 +476,7 @@ class SignalPath:
                 rate_text,
                 f"{channels} ch" if channels else "",
                 device_dtype,
-                f"延迟 {latency_ms:.0f} ms" if latency_ms else "",
+                latency_text(backend_key, latency_ms, latency_source),
             )
             if part
         ) or "—"
@@ -374,6 +500,11 @@ class SignalPath:
             "effective_bit_depth": int(effective_bit_depth or 0),
             "mode_note": str(mode_note or ""),
             "exclusive_fallback": bool(exclusive_fallback),
+            "dop": dop_on,
+            "dsd_rate": dsd_value,
+            "dop_rate": dop_value,
+            "dop_note": note,
+            "latency_source": str(latency_source or ""),
         }
         return self
 
@@ -530,6 +661,18 @@ __all__ = [
     "TEXT_OUTPUT_SHARED",
     "TEXT_OUTPUT_REFUSED",
     "TEXT_OUTPUT_ASIO_MISSING",
+    "TEXT_OUTPUT_ASIO",
+    "TEXT_LATENCY",
+    "TEXT_ASIO_BUFFER_MEASURED",
+    "TEXT_ASIO_BUFFER_ESTIMATED",
+    "TEXT_DOP_DECODE",
+    "TEXT_DOP_FALLBACK",
+    "TEXT_DSD_TO_PCM",
+    "TEXT_DOP_GAIN_BYPASSED",
+    "TEXT_DOP_EQ_BYPASSED",
+    "TEXT_DOP_FADE_BYPASSED",
+    "TEXT_DOP_RESAMPLE",
     "BACKEND_LABELS",
     "assert_wording",
+    "latency_text",
 ]

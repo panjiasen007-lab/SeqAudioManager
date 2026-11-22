@@ -43,6 +43,23 @@ RATE_FALLBACK_FULL = (SR_88K2, SR_96K, SR_48K, SR_44K)
 DSD_PCM_RATE_DEFAULT = SR_176K4
 DSD_PCM_RATE_CHOICES = (SR_88K2, SR_176K4, SR_352K8)
 
+# ---------------------------------------------------------------- DSD / DoP（v1.8.1）
+#
+# DoP 的载体率是「DSD 率 ÷ 16」：一个 24 bit PCM 样本里塞 8 bit DSD 数据 +
+# 8 bit 标记，16 个样本组成一个 DoP 帧周期。这三个数是 DSF/DFF 规范里的固定
+# 对应关系，不是可调参数 —— 所以写成常量而不是"根据设备算"。
+DSD_RATES = (2822400, 5644800, 11289600)
+DOP_RATE_OF = {2822400: 176400, 5644800: 352800, 11289600: 705600}
+#: DoP 标记字节：**逐样本**在 0x05/0xFA 之间交替（DoP 1.1 原文 "alternate with
+#: each sample"；第 1/9 帧 8+8 分组的旧说法是错的，实现见 player/dsd.py）。
+DOP_MARKER = (0x05, 0xFA)
+DOP_FRAMES_PER_CYCLE = 16
+#: DoP 通路的解码块帧数（载体系）。1024 帧 @176.4k 只有 5.8 ms，预填 2 块才
+#: 11.6 ms——起播后任何一个 >12 ms 的停顿（GC/磁盘/界面忙）都会打空环形缓冲，
+#: 听感就是「偶尔卡一下」。提到 16384 帧（@176.4k ≈ 93 ms，@352.8k ≈ 46 ms），
+#: 预填 2 块 ≈ 186 ms，读线程每轮的 Python 开销也摊薄 16 倍。
+DOP_BLOCK_FRAMES = 16384
+
 # ---------------------------------------------------------------- 缓冲与节奏
 
 #: 回调块帧数默认值（44.1k 下约 23 ms）
@@ -67,6 +84,11 @@ UNDERRUN_BURST_WINDOW_SEC = 2.0
 
 #: 界面位置轮询周期（ms）
 POSITION_POLL_MS = 100
+
+#: 设备热插拔轮询周期（ms）。3 s 是「省 CPU」与「跟手」的折中（PRD §6-3）：
+#: 更短的间隔只会让 `sd.query_devices()` 白白多跑几次，而**正在播放时被拔**的
+#: ≤2 s 响应由 ``DeviceLostError`` 兜底负责，不靠轮询抢时间。
+DEVICE_WATCH_MS = 3000
 
 #: 命令队列容量（架构文档 5.2：非阻塞 put，满即丢弃）
 COMMAND_QUEUE_MAXSIZE = 32
@@ -109,9 +131,10 @@ BACKEND_WASAPI = "wasapi"
 BACKEND_DIRECTSOUND = "directsound"
 BACKEND_MME = "mme"
 BACKEND_WDMKS = "wdmks"
-#: ASIO：v1.7 只做「能力可见 + 明确不可用」（设计 §5）。
-#: 官方 sounddevice wheel 的 PortAudio 构建**不含** ASIO，所以本机 backend_present("asio")
-#: 恒为 False；用户若自己换了带 ASIO 的 DLL，这段代码也能识别并正常工作。
+#: ASIO：v1.8.1 起可选可播，前提是 `SD_ENABLE_ASIO` 在 import sounddevice **之前**
+#: 就已在环境里，且同目录有 `libportaudio64bit-asio.dll`（官方 wheel 自带）。
+#: 官方默认构建不含 ASIO，所以本机 ``backend_present("asio")`` 是否为真完全取决于
+#: 那个环境变量的时机 —— 这也是为什么 ``run.py``/``app.py`` 顶部就要设它。
 BACKEND_ASIO = "asio"
 
 BACKEND_KEYS = (
@@ -364,6 +387,8 @@ __all__ = [
     "SR_44K", "SR_48K", "SR_88K2", "SR_96K", "SR_176K4", "SR_192K", "SR_352K8",
     "SUPPORTED_RATES", "RATE_FALLBACK_CHAIN", "RATE_FALLBACK_FULL",
     "DSD_PCM_RATE_DEFAULT", "DSD_PCM_RATE_CHOICES",
+    "DSD_RATES", "DOP_RATE_OF", "DOP_MARKER", "DOP_FRAMES_PER_CYCLE",
+    "DEVICE_WATCH_MS",
     "BLOCK_FRAMES_DEFAULT", "BUFFER_MS_DEFAULT", "BUFFER_MS_MIN", "BUFFER_MS_MAX",
     "PREFILL_BLOCKS", "RING_SECONDS", "FEED_STALL_SLEEP_SEC", "DECODE_STALL_TIMEOUT_SEC",
     "UNDERRUN_BURST_COUNT", "UNDERRUN_BURST_WINDOW_SEC", "POSITION_POLL_MS",

@@ -38,6 +38,30 @@ def _clamp_float(value: Any, low: float, high: float, fallback: float) -> float:
     return max(low, min(high, number))
 
 
+#: 文本形式的「真」/「假」（配置文件会被手改、也会被别的工具重写）
+_TRUE_TEXT = ("1", "true", "yes", "on")
+_FALSE_TEXT = ("0", "false", "no", "off", "")
+
+
+def _clamp_bool(value: Any, fallback: bool) -> bool:
+    """布尔钳制：认得 ``"false"`` / ``"0"`` 这类文本，而不是一律当真值。
+
+    为什么不用 ``bool(value)``：``bool("false") is True``。配置文件被手改或由
+    别的工具重写时，用户明明写了「关」，程序却按「开」行为 —— 这种「关了没关」
+    比崩溃更难排查。认不出的类型回落到默认值。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE_TEXT:
+        return True
+    if text in _FALSE_TEXT:
+        return False
+    return fallback
+
+
 @dataclass
 class Settings:
     # ---- 免责声明 ----
@@ -156,6 +180,15 @@ class Settings:
     playback_device: str = ""                      # 设备名，空 = 系统默认
     playback_follow_source_rate: bool = True       # 采样率跟随
     playback_dsd_pcm_rate: int = 176400            # DSD→PCM 目标率（88.2k/176.4k/352.8k）
+    # ---- DSD DoP 直出（v1.8.1）----
+    #: 允许 .dsf/.dff 位流直读并用 DoP 直出（DSD64→176.4k、DSD128→352.8k）。
+    #: 载体率打不开时**回退** PCM（ffmpeg + ``playback_dsd_pcm_rate``），并在
+    #: 信号路径 `decode` 级标 FALLBACK —— 默认开，因为「能直出就直出」是本版承诺。
+    playback_dsd_dop: bool = True
+    #: ASIO 首次可用的一次性提示是否已展示（PRD：首次检测到 ASIO **不自动切换**
+    #: 后端，只提示一次；切换权始终留给用户）。与 ``playback_exclusive_notice_shown``
+    #: 同一套路，旧配置没有该键时走默认值 False（即提示还没出现过）。
+    playback_asio_note_seen: bool = False
     playback_bit_perfect: bool = False             # 位完美模式（强制率/位深=源 + 0 dB + 空 DSP）
     playback_volume_mode: str = "bypass"           # bypass（固定 0 dB）/ software（浮点音量）
     playback_volume_db: float = 0.0                # 软件音量 dB，-60 视为静音
@@ -295,6 +328,10 @@ class Settings:
             "sequential", "shuffle", "repeat_one", "repeat_all"
         ):
             self.playback_mode = "sequential"
+        # v1.8.1 的两个新字段：都是开关语义，但它们决定的是**音频链路走哪条**
+        # （DoP 直出 vs 回退 PCM），手改配置写成 "false" 时不能被当成真值。
+        self.playback_dsd_dop = _clamp_bool(self.playback_dsd_dop, True)
+        self.playback_asio_note_seen = _clamp_bool(self.playback_asio_note_seen, False)
         # 采样率跟随与位完美都关掉时，重采样目标就是输出设备的率（由设备决定），
         # 这里没有可钳制的字段；列出了是为了说明"为什么别的字段没写在这里"。
 

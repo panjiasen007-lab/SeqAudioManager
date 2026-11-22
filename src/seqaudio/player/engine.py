@@ -36,9 +36,15 @@ from typing import Any, Callable, Optional, Sequence
 
 from ..core.config import Settings
 from . import devices as devices_mod
+from . import dsd as dsd_mod
 from .constants import (
+    BACKEND_ASIO,
     BACKEND_WASAPI,
     BLOCK_FRAMES_DEFAULT,
+    DEFAULT_CHANNELS,
+    DEFAULT_SAMPLE_FMT,
+    DOP_BLOCK_FRAMES,
+    DSD_PCM_RATE_DEFAULT,
     EVENT_ERROR,
     EVENT_GAP,
     EVENT_POSITION,
@@ -64,10 +70,16 @@ from .devices import (
     NoOutputDeviceError,
     RateUnsupportedError,
 )
+from .dsd import DsdDecodeError, DsdFormat, DsdSource
 from .output import AudioOutput
 from .queue import PlayQueue, QueueItem
 from .ringbuffer import PcmRingBuffer
-from .signal_path import TEXT_INT_PIPELINE_UNAVAILABLE, SignalPath
+from .signal_path import (
+    TEXT_DOP_EQ_BYPASSED,
+    TEXT_DOP_GAIN_BYPASSED,
+    TEXT_INT_PIPELINE_UNAVAILABLE,
+    SignalPath,
+)
 
 log = logging.getLogger(__name__)
 
@@ -239,6 +251,19 @@ class PlayerEngine:
         self._underrun_seen = 0        # 当前这条流的欠载数（回调自增）
         self._underrun_base = 0        # 已拆掉的流累计欠载数
         self._closed = False
+
+        # ---- DoP（v1.8.1 P1-1）----
+        #: 本次会话是否真的在走 DoP（音量/EQ 因此被强制旁路）
+        self._dop_active = False
+        #: 最近一次 DoP 回退的原因（写进 decode 级，不许静默降级）
+        self._dop_note = ""
+        #: 注入的载体率探测 ``(device, rate, channels, mode) -> bool``；
+        #: 生产走 ``sd.check_output_settings``（零出声），测试注入假函数不碰声卡
+        self._dop_probe: Optional[Callable[..., bool]] = None
+        #: 注入的 DSD 文件头解析函数（测试用，默认 ``dsd.probe_dsd``）
+        self._dsd_prober: Optional[Callable[[Path], DsdFormat]] = None
+        #: 上一次推给界面的信号路径指纹（同文本不重复 emit，防闪烁）
+        self._last_signal_key: str = ""
 
         self._output_factory = output_factory
         self._decoder_factory = decoder_factory
@@ -457,11 +482,13 @@ class PlayerEngine:
         self._channels = 0
         self._eof_pending = False
         self._released_on_pause = False
+        self._dop_active = False
+        self._dop_note = ""
         self._signal = SignalPath.blank()
         self._set_state(PlayerState.IDLE)
         self._emit(EVENT_TRACK, None)
         self._emit(EVENT_POSITION, 0)
-        self._emit(EVENT_SIGNAL, self._signal.to_dict())
+        self._emit_signal_if_changed()
         return True
 
     def seek(self, ms: int) -> bool:
@@ -506,13 +533,25 @@ class PlayerEngine:
         return result
 
     def set_volume(self, db: float) -> float:
-        """设置软件音量（dB）。本期只有 ``volume_mode="software"`` 才真的改样本。"""
+        """设置软件音量（dB）。本期只有 ``volume_mode="software"`` 才真的改样本。
+
+        DoP 期间恒返回 0 dB：位流上做一次浮点乘法就会把数据位和标记位一起改坏，
+        「调得动但坏了声音」比「调不动」糟得多。界面据此把滑块置灰
+        （``dev_dop_volume_note``），这里必须与界面一致，不能只靠界面拦。
+        """
         value = max(-60.0, min(12.0, float(db)))
+        if self._dop_active:
+            log.info(
+                "DoP 期间软件音量不可用（位流由 DAC 解码），请求的 %.1f dB 不应用", value
+            )
+            value = 0.0
         if self._strict_locked:
             log.info("严格独占下软件音量被锁定为 0 dB（否则「未加软件增益」不成立）")
             value = 0.0
         self._volume_db = value
-        if str(getattr(self.settings, "playback_volume_mode", "bypass")) == "software":
+        if self._dop_active:
+            self._dsp.set_gain_db(0.0)
+        elif str(getattr(self.settings, "playback_volume_mode", "bypass")) == "software":
             self._dsp.set_gain_db(value)
         elif abs(value) > 1e-9:
             log.debug("音量模式为旁路，%.1f dB 只记录不应用（输出层与 DSP 均 0 dB）", value)
@@ -532,6 +571,9 @@ class PlayerEngine:
           一保存就变回满音量」。
         * 直通也不关切歌斜坡。斜坡防爆音，是播放卫生措施，不是调音。
         """
+        if self._dop_active and not on:
+            log.info("DoP 期间全局直通不可关闭（位流不能被 EQ/调音碰）")
+            on = True
         if on:
             self._dsp.set_eq_enabled(False)
             if str(getattr(self.settings, "playback_volume_mode", "bypass")) == "software":
@@ -543,6 +585,9 @@ class PlayerEngine:
         self._refresh_signal()
 
     def set_eq_enabled(self, enabled: bool) -> None:
+        if self._dop_active and enabled:
+            log.info("DoP 期间 EQ 被强制旁路（位流不能被滤波器碰）")
+            enabled = False
         if self._strict_locked and enabled:
             log.info("严格独占下 EQ 被强制旁路（否则「未加软件增益」不成立）")
             enabled = False
@@ -721,6 +766,7 @@ class PlayerEngine:
             "fallback": bool(self._fallback),
             "busy": bool(self._busy),
             "error": self._error,
+            "dsd": self._dsd_state(),
             "eq_gains": self._dsp.eq.gains,
             "dsp": self._dsp.snapshot(),
         }
@@ -791,8 +837,13 @@ class PlayerEngine:
         """由设置解析出**本次**输出模式（含严格模式的可行性校验）。
 
         ``playback_exclusive`` 是 v1.6 的布尔旧值，只做镜像：真正的语义在
-        ``playback_output_mode``。若后端不是 WASAPI，独占没有意义 → 返回 SHARED
-        （并记日志，不抛错，T01 ⑤）。
+        ``playback_output_mode``。若后端既不是 WASAPI 也不是 ASIO，独占没有
+        意义 → 返回 SHARED（并记日志，不抛错，T01 ⑤）。
+
+        **ASIO 必须放行**：ASIO 的「独占」是驱动天然行为（PortAudio 视角根本
+        没有「共享 ASIO」这一说），不是 WASAPI 专属。早先这里只认 WASAPI，
+        ASIO 会被判成「不支持独占」并打一句与实际行为自相矛盾的日志 ——
+        ``output.open()`` 对 ASIO 恒按 EXCLUSIVE 开流并如实上报。
         """
         mode = normalize_output_mode(
             getattr(self.settings, "playback_output_mode", "shared")
@@ -810,7 +861,7 @@ class PlayerEngine:
             if device is not None
             else str(getattr(self.settings, "playback_output_backend", "") or "")
         )
-        if backend and backend != BACKEND_WASAPI:
+        if backend and backend not in (BACKEND_WASAPI, BACKEND_ASIO):
             # 同一 (后端, 请求模式) 只提示一次：这是查询函数，snapshot() 每秒调多次，
             # 每次都 log 会把运行日志刷成同一句话（用户截图反馈）。
             notice_key = (str(backend), mode.value)
@@ -862,6 +913,263 @@ class PlayerEngine:
         self._dsp.set_eq_enabled(False)
         return spec
 
+    # ------------------------------------------------------------ DoP（v1.8.1 P1-1）
+
+    def _resolve_dop(
+        self, spec: DecodeSpec, device: Optional[DeviceInfo]
+    ) -> DecodeSpec:
+        """把「DoP 意图」裁决成「真的走 DoP」或「回退 PCM」，并留下原因。
+
+        四道闸，任何一道不过都退回 ffmpeg PCM（``playback_dsd_pcm_rate``），
+        且 ``self._dop_note`` 会写明是哪一道：
+
+        1. **文件头要合法**：位流瞎猜出来的结果是「噪声」，解析失败就回退；
+        2. **不做下混**：多声道 DSD 开下混时必须逐样本运算，DoP 是位流搬运，
+           没有「混一半」这种状态；
+        3. **要独占**：共享模式必然经过系统混音器（WASAPI 共享会重采样），
+           位流会被改掉 —— 与其说「正在 DoP」，不如老实回退；
+        4. **载体率真能开**：``sd.check_output_settings`` 零出声探测（int32）。
+
+        通过四道闸才把 ``spec`` 改成 DoP 形态：载体率 = DSD 率 ÷ 16、样本格式
+        固定 ``s32``（24 bit 字装在 int32 容器里）。
+        """
+        self._dop_note = ""
+        self._dop_active = False
+        path = Path(spec.path)
+        prober = self._dsd_prober or dsd_mod.probe_dsd
+        try:
+            fmt = prober(path)
+        except DsdDecodeError as exc:
+            self._dop_note = f"位流无法解析：{exc}"
+            log.warning("DSD 位流解析失败，回退 PCM：%s（%s）", path.name, exc)
+            return self._dop_to_pcm(spec)
+
+        if fmt.channels > 2 and bool(
+            getattr(self.settings, "playback_downmix_stereo", False)
+        ):
+            self._dop_note = "多声道 DSD 需要下混，DoP 不做下混"
+            log.info("%s：%s", self._dop_note, path.name)
+            return self._dop_to_pcm(spec)
+
+        carrier = int(fmt.dop_rate)
+        if carrier <= 0:
+            self._dop_note = "无法从 DSD 位率推导 DoP 载体率"
+            return self._dop_to_pcm(spec)
+
+        mode = self._output_mode()
+        backend = device.backend_key if device is not None else ""
+        # 共享模式必然过系统混音器（WASAPI 共享会重采样），DoP 位流会被改掉。
+        # ASIO 单独放行是为了「防重复判定」：``_output_mode()`` 现在已对 ASIO
+        # 返回 EXCLUSIVE（ASIO 的独占是驱动天然行为），但这里用的是**传入的
+        # device** 而非 ``_resolve_device()``，两者在极端情况下可能不同名 ——
+        # 只要设备自己认得出是 ASIO，就不该因为一次模式查询把 DoP 关掉。
+        if not mode.is_exclusive and backend != BACKEND_ASIO:
+            # v1.8.1 用户拍板：非独占输出**自动关闭 DSD 直读**，且不再强制升到
+            # 176.4k——共享输出必然过系统混音器，48k 混音的 WASAPI 共享会直接
+            # 拒掉 176.4k（-9997），部分 MME 驱动（S/PDIF）甚至会连环报
+            # -9999/-9985 开流失败。共享模式把 DSD 当普通文件解码到自然 PCM 率
+            # （DSD 率 ÷ 64），交给共享阶梯去挑设备真正支持的率。
+            self._dop_note = "共享模式，DSD 直读关闭（独占或 ASIO 下可用 DoP）"
+            log.info("%s：%s", self._dop_note, path.name)
+            return self._dop_to_pcm_shared(spec)
+
+        if not self._dop_carrier_available(fmt, device, mode):
+            self._dop_note = f"设备不支持 {dsd_mod.format_rate_khz(carrier)} 载体"
+            log.warning("载体率 %d Hz 不可用，DSD 回退 PCM", carrier)
+            return self._dop_to_pcm(spec)
+
+        log.info("DSD%d → DoP @%d Hz（%d ch）", fmt.dsd_multiple, carrier, fmt.channels)
+        return replace(
+            spec,
+            dop=True,
+            dop_rate=carrier,
+            dsd_rate=int(fmt.dsd_rate),
+            sample_rate=carrier,
+            sample_fmt="s32",          # DoP 固定 24 bit 字装在 int32 容器里
+            channels=int(fmt.channels),
+            block_frames=DOP_BLOCK_FRAMES,   # 1024 帧 @176.4k 只有 5.8 ms，太碎
+        )
+
+    def _dop_carrier_available(
+        self, fmt: DsdFormat, device: Optional[DeviceInfo], mode: OutputMode
+    ) -> bool:
+        """载体率能不能开（``check_output_settings`` 零出声，绝不 ``start()``）。"""
+        return self._probe_carrier(
+            int(fmt.dop_rate), max(1, int(fmt.channels)), device, mode
+        )
+
+    def _probe_carrier(
+        self,
+        rate: int,
+        channels: int,
+        device: Optional[DeviceInfo],
+        mode: OutputMode,
+    ) -> bool:
+        """``int32`` 容器 + 目标载体率的零出声探测（绝不 ``start()`` 开流）。
+
+        刻意**不**复用 ``devices.supports_rate``：那个函数依次试
+        int16/int32/float32，任一 dtype 通过就返回 ``True``；而 DoP 只可能走
+        int32 容器。用它等于给自己一个假阳性，然后在真开流时炸掉 —— 这里只问
+        int32 与「实际要用的 extra_settings」。
+        """
+        rate = int(rate)
+        channels = max(1, int(channels))
+        if rate <= 0:
+            return False
+        probe = self._dop_probe
+        if probe is not None:
+            try:
+                return bool(probe(device, rate, channels, mode))
+            except Exception as exc:  # noqa: BLE001 - 注入的探测函数不该拖垮起播
+                log.warning("DoP 载体率探测失败：%s", exc)
+                return False
+        if device is None:
+            return False
+        try:
+            sd = devices_mod.sounddevice()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("PortAudio 不可用，无法探测 DoP 载体率：%s", exc)
+            return False
+        extra = devices_mod.extra_settings_for(mode, device)
+        try:
+            sd.check_output_settings(
+                device=device.index,
+                samplerate=rate,
+                channels=channels,
+                dtype="int32",
+                extra_settings=extra,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 - 设备拒绝就是拒绝，原因记 INFO
+            log.info("DoP 载体率 %d Hz 探测未通过：%s", rate, exc)
+            return False
+
+    def dop_capability(self, channels: int = 2) -> tuple[bool, str]:
+        """此刻这台设备能不能直出 DoP（供设置面板点亮/置灰 DSD 开关）。
+
+        返回 ``(available, reason)``：``available=True`` 时 ``reason`` 为空；
+        ``False`` 时 ``reason`` 是一句能直接贴到界面上的原因 —— 宁可先说明
+        「会回退 PCM」，也不给一个「勾了没效果」的开关。
+
+        探测范围与实际起播**完全同源**（同一套独占总线判定 + 同一份
+        ``check_output_settings(int32)``），并且是零出声的：不 ``start()``、
+        不建 ring、不切 decoder，所以面板随时可以调。
+
+        ``channels`` 只能按面板猜（默认 2 声道立体声）：真正的 DSD 声道数在
+        文件头里，面板渲染时还没有文件。多声道 DSD 若设备只吃立体声，开播时
+        第 4 道闸会照常回退并写明原因 —— 那是**如实回退**，不是这里撒谎。
+
+        ``channels <= 0``（停止状态下面板拿到的 ``snapshot["channels"]`` 就是
+        0）按立体声处理：拿 0/1 声道去探测会被绝大多数设备拒绝，于是把「还没
+        开始播」误报成「这台设备不支持 DoP」，开关就永远点不亮。
+        """
+        try:
+            channels = int(channels or 0)
+        except (TypeError, ValueError):
+            channels = 0
+        if channels <= 0:
+            channels = DEFAULT_CHANNELS
+        dsd_rates = tuple(
+            int(rate) for rate in dsd_mod.DSD_RATES if int(rate) > 0
+        )
+        if not dsd_rates:
+            return False, "未知 DSD 位率，无法推导 DoP 载体率"
+        try:
+            # ``_output_mode()`` 内部自己会调 ``_resolve_device()``，所以这两步
+            # 必须包在同一个 try 里：设备表/PortAudio 此刻不可用是**正常状态**
+            # （面板在启动阶段就会问），不能让它抛到 Qt 槽里。
+            mode = self._output_mode()
+            device = self._resolve_device()
+        except Exception as exc:  # noqa: BLE001 - 面板查询不该因设备表异常炸掉
+            log.warning("DoP 能力查询失败：%s", exc)
+            return False, "无法获取输出设备"
+        backend = device.backend_key if device is not None else ""
+        if not mode.is_exclusive and backend != BACKEND_ASIO:
+            return False, "DoP 需要独占输出（共享模式会被系统混音器重采样）"
+        if device is None:
+            return False, "没有可用的输出设备"
+        # 从高档往低档试：设备能跑的最高的那档才算「本机 DoP 能力」
+        for dsd_rate in sorted(dsd_rates, reverse=True):
+            carrier = dsd_mod.dop_rate_for(dsd_rate)
+            if carrier <= 0:
+                continue
+            if self._probe_carrier(carrier, channels, device, mode):
+                return True, ""
+        lowest = dsd_mod.format_rate_khz(dsd_mod.dop_rate_for(min(dsd_rates)))
+        return False, f"设备打不开 {lowest} 载体（DoP 需要 ≥{lowest}）"
+
+    def _dop_to_pcm(self, spec: DecodeSpec) -> DecodeSpec:
+        """退回 ffmpeg PCM 路径（沿用 ``playback_dsd_pcm_rate``）。
+
+        刻意**不**清 ``self._dop_note``：它正是信号路径 decode 级要写的那句
+        「为什么没走 DoP」。清掉它等于把回退变成静默降级。
+        """
+        pcm_rate = int(
+            getattr(self.settings, "playback_dsd_pcm_rate", DSD_PCM_RATE_DEFAULT)
+            or DSD_PCM_RATE_DEFAULT
+        )
+        if pcm_rate <= 0:
+            pcm_rate = DSD_PCM_RATE_DEFAULT
+        self._dop_active = False
+        return replace(
+            spec,
+            dop=False,
+            dop_rate=0,
+            sample_rate=pcm_rate,
+            sample_fmt=DEFAULT_SAMPLE_FMT,
+            is_dsd=True,
+        )
+
+    def _dop_to_pcm_shared(self, spec: DecodeSpec) -> DecodeSpec:
+        """共享模式下把 DSD 当**普通文件**解码（非独占自动关闭 DSD 直读）。
+
+        与 :meth:`_dop_to_pcm`（独占语境下的回退，保持 176.4k）刻意不同：
+        共享输出必然经过系统混音器，强制 176.4k 在 48k 混音的 WASAPI 共享上
+        直接被拒（``-9997``），部分 MME/S/PDIF 驱动更是连环报 ``-9999/-9985``
+        开流失败——用户看到的「一直报错」。这里解码到 DSD 率 ÷ 64 的自然
+        PCM 率（DSD64→44.1k、DSD128→88.2k），采样率阶梯自会挑设备真正
+        支持的档位。
+        """
+        dsd_rate = int(getattr(spec, "dsd_rate", 0) or 0)
+        natural = dsd_rate // 64 if dsd_rate > 0 else 0
+        rate = natural if natural > 0 else DSD_PCM_RATE_DEFAULT
+        self._dop_active = False
+        return replace(
+            spec,
+            dop=False,
+            dop_rate=0,
+            sample_rate=rate,
+            sample_fmt=DEFAULT_SAMPLE_FMT,
+            is_dsd=True,
+        )
+
+    def _apply_dop_constraints(self, spec: DecodeSpec) -> DecodeSpec:
+        """DoP 的连带约束：EQ / 软件音量 / 淡变 / 交叉淡变 / 无缝全部关掉。
+
+        这不是产品口味，是**物理前提**：DoP 帧里装的是 DSD 位流，任何浮点乘法
+        都会同时改坏数据位与标记位。所以 DoP 期间用户设的音量/EQ 不再生效，
+        面板必须写出来（``signal_path.TEXT_DOP_*``），不许静默。
+        """
+        if not bool(getattr(spec, "dop", False)):
+            self._dop_active = False
+            return spec
+        self._dop_active = True
+        self._force_dsp_bypass_for_dop()
+        if float(getattr(self.settings, "playback_crossfade_sec", 0.0) or 0.0) > 0.0:
+            log.info("DoP 与交叉淡变互斥，本次按无交叉淡变播放")
+        if bool(getattr(self.settings, "playback_gapless", False)):
+            log.info("DoP 与无缝续写互斥（无缝要叠混），本次不启用")
+        return spec
+
+    def _force_dsp_bypass_for_dop(self) -> None:
+        """把 DSP 压到「不改一个样本」：音量 0 dB、EQ 关闭。
+
+        ``_start_item_once`` 里的 ``_apply_settings_to_dsp()`` 会按设置把音量/EQ
+        重新打开，所以这一句**必须**在它之后再执行一次（见那里的注释）。
+        """
+        self._dsp.set_gain_db(0.0)
+        self._dsp.set_eq_enabled(False)
+
     def _build_spec(
         self,
         item: QueueItem,
@@ -871,6 +1179,9 @@ class PlayerEngine:
     ) -> DecodeSpec:
         """按队列项 + 偏移构造解码参数（含采样率/声道/样本格式的最终裁决）。"""
         spec = DecodeSpec.from_item(item, self.settings, start_ms=offset_ms)
+        # 回退理由跟着**这一次** spec 走：上一曲的「705.6 kHz 不可用」绝不能被
+        # 下一曲（尤其是非 DSD 的那首）继承，否则 decode 级会一直标 FALLBACK。
+        self._dop_note = ""
         settings = self.settings
         # 整数通路与软件处理互斥：判据统一在 dsp.int_pipeline_allowed()，
         # 解码器已经据此选过样本格式；这里只是把「用户要整数、实际给了浮点」
@@ -898,6 +1209,11 @@ class PlayerEngine:
             spec = replace(spec, sample_fmt="f32")
             self._int_downgraded = True
         device = self._resolve_device()
+        # DoP 必须在**计划之前**裁决：载体率（176.4k/352.8k）与 PCM 回退率
+        # （playback_dsd_pcm_rate）是两条不同的路，计划一旦按错率算出来，
+        # 后面只能开到错的率上，DoP 就成了「错速播放」。
+        if spec.dop:
+            spec = self._resolve_dop(spec, device)
         want = int(spec.sample_rate)
         if not bool(getattr(settings, "playback_follow_source_rate", True)) and not spec.is_dsd:
             device_rate = device.rate if device is not None else 0
@@ -941,9 +1257,20 @@ class PlayerEngine:
             self._signal.bump("resample_events", 1)
         if not plan.mode.is_exclusive and mode.is_exclusive:
             log.info("独占不可用，本次按共享模式播放：%s", plan.note)
+        if spec.dop and int(plan.rate) != int(spec.dop_rate):
+            # 计划把载体率降掉了 → DoP 不可能成立（在错的载体率上送 DoP 位流
+            # 等于噪声）。必须回退 PCM，并把「为什么」留给信号路径。
+            carrier = int(spec.dop_rate)
+            self._dop_note = (
+                f"载体率 {dsd_mod.format_rate_khz(carrier)} 不可用"
+                f"（设备给出 {dsd_mod.format_rate_khz(plan.rate)}）"
+            )
+            log.warning("载体率 %d Hz 不可用，DSD 回退 PCM", carrier)
+            spec = self._dop_to_pcm(spec)
         spec = replace(spec, sample_rate=int(plan.rate))
         # 关键：解码器按**设备真实率**出 PCM，重采样交给 ffmpeg（避免变调）
-        return self._apply_strict_constraints(spec)
+        spec = self._apply_strict_constraints(spec)
+        return self._apply_dop_constraints(spec)
 
     def _dsp_will_process(self) -> bool:
         """这次起播 DSP 是否真的会改样本（= 整数通路是否可行，取反）。"""
@@ -1014,9 +1341,23 @@ class PlayerEngine:
             return None
 
     def _make_decoder(self, spec: DecodeSpec, ring: PcmRingBuffer) -> Any:
+        """按 spec 造解码器：DoP 走内置位流直读，其余走 ffmpeg 子进程。
+
+        ``DsdSource`` 与 ``FfmpegDecoder`` 同构，所以这里只是换一个类：
+        ``_teardown_playback`` / ``_wait_prefill`` / 续播判定全都不需要分支。
+        注入的 ``decoder_factory`` 优先 —— 测试用它绕开真实解码。
+        """
         if self._decoder_factory is not None:
             return self._decoder_factory(
                 spec, ring, on_error=self._on_decode_error, on_eof=self._on_decode_eof
+            )
+        if bool(getattr(spec, "dop", False)):
+            return DsdSource(
+                spec,
+                ring=ring,
+                on_error=self._on_decode_error,
+                on_eof=self._on_decode_eof,
+                prober=self._dsd_prober,
             )
         return FfmpegDecoder(
             spec, ring=ring, on_error=self._on_decode_error, on_eof=self._on_decode_eof
@@ -1028,6 +1369,24 @@ class PlayerEngine:
             return self._output_factory(ring, device, hook)
         settings = self.settings
         mode = self._plan.mode if self._plan is not None else self._output_mode()
+        backend_key = str(
+            (device.backend_key if device is not None else "")
+            or getattr(settings, "playback_output_backend", "")
+            or ""
+        ).lower()
+        extra: dict[str, Any] = {}
+        if backend_key != BACKEND_ASIO:
+            # 「缓冲深度」真正接到 PortAudio：这是 latency 建议值（秒），
+            # PortAudio 会取本设备最接近的可用深度。以前这个设置只存不用，
+            # 用户调了毫无效果。40 ms 是产品定稿的下限（再浅必然欠载）。
+            #
+            # **ASIO 不传**：``output.py`` 本来就会丢掉它（ASIO 会把过大的
+            # 请求值原样回显，实测见 ``AudioOutput.latency_ms`` 的注释），
+            # 但上层传一个注定被丢的参数属于职责不清 —— 谁该忽略、为什么，
+            # 只留在真正懂 ASIO 的那一层。
+            extra["latency"] = (
+                max(40, int(getattr(settings, "playback_buffer_ms", 80) or 80)) / 1000.0
+            )
         return AudioOutput(
             ring,
             device=device.index if device is not None else "",
@@ -1036,10 +1395,7 @@ class PlayerEngine:
             mode=mode,
             blocksize=self._block_frames,
             hook=hook,
-            # 「缓冲深度」真正接到 PortAudio：这是 latency 建议值（秒），
-            # PortAudio 会取本设备最接近的可用深度。以前这个设置只存不用，
-            # 用户调了毫无效果。40 ms 是产品定稿的下限（再浅必然欠载）。
-            latency=max(40, int(getattr(settings, "playback_buffer_ms", 80) or 80)) / 1000.0,
+            **extra,
         )
 
     def _hook(self, outdata: Any, filled: int) -> None:
@@ -1124,7 +1480,7 @@ class PlayerEngine:
         self._teardown_playback()
         try:
             spec = self._build_spec(item, offset_ms, skip_levels=skip_levels)
-        except (PlayerError, DecodeError) as exc:
+        except (PlayerError, DecodeError, DsdDecodeError) as exc:
             self._fail(str(exc))
             return _Attempt(False)
 
@@ -1216,7 +1572,7 @@ class PlayerEngine:
         try:
             decoder = self._make_decoder(spec, ring)
             decoder.start()
-        except (DecodeError, OSError) as exc:
+        except (DecodeError, DsdDecodeError, OSError) as exc:
             self._discard_output(output)
             self._fail(f"无法解码：{exc}")
             return _Attempt(False)
@@ -1245,8 +1601,14 @@ class PlayerEngine:
         # DSP 必须在 begin() **之前**准备好：回调一启动就会调用它
         self._dsp.prepare(self._rate, self._channels, self._block_frames)
         self._apply_settings_to_dsp()
+        if self._dop_active:
+            # 上面那一步按设置把音量/EQ 打开了 —— DoP 期间必须再压回去，
+            # 否则「信号路径说旁路、实际在乘增益」就是面板说谎（反之亦然）
+            self._force_dsp_bypass_for_dop()
         self._dsp.reset_state()
-        self._dsp.arm_fade_in()
+        if not self._dop_active:
+            # DoP 不做淡入：位流上叠斜坡等于改数据位
+            self._dsp.arm_fade_in()
 
         try:
             if hasattr(output, "begin"):
@@ -1266,7 +1628,7 @@ class PlayerEngine:
         self._output = output
         self._configure_signal(spec, device, actual_rate)
         self._set_state(PlayerState.PLAYING)
-        self._emit(EVENT_SIGNAL, self._signal.to_dict())
+        self._emit_signal_if_changed()
         self._emit(EVENT_POSITION, self.position_ms())
         log.info(
             "开始播放：%s（%d Hz %d ch，偏移 %d ms%s）",
@@ -1420,7 +1782,7 @@ class PlayerEngine:
             self._set_state(PlayerState.IDLE)
             self._emit(EVENT_TRACK, None)
             self._emit(EVENT_POSITION, 0)
-            self._emit(EVENT_SIGNAL, self._signal.to_dict())
+            self._emit_signal_if_changed()
             return
         self._switch_to(item)
 
@@ -1449,26 +1811,38 @@ class PlayerEngine:
             "exclusive_strict": "strict",
         }.get(actual_mode, "shared")
         plan = self._plan
+        dop = bool(getattr(spec, "dop", False))
         self._signal.configure(
             source=spec.to_display(),
             codec=spec.codec,
-            decoder_version="ffmpeg",
+            # DoP 全程没有 ffmpeg 子进程：这一点必须在 decode 级如实写出来
+            decoder_version="内置位流" if dop else "ffmpeg",
             sample_fmt=spec.sample_fmt,
             channels=self._channels,
             sample_rate=self._rate,
             is_dsd=spec.is_dsd,
             gain_db=float(dsp.get("gain_db", 0.0)),
-            gain_active=bool(dsp.get("gain_active", False)),
-            eq_enabled=bool(dsp.get("eq_enabled", False)),
-            eq_active=bool(dsp.get("eq_active", False)),
+            gain_active=bool(dsp.get("gain_active", False)) and not dop,
+            eq_enabled=bool(dsp.get("eq_enabled", False)) and not dop,
+            eq_active=bool(dsp.get("eq_active", False)) and not dop,
             eq_bands=len(dsp.get("eq_gains", []) or []),
-            ramp_ms=int(getattr(settings, "playback_ramp_ms", 5) or 5),
-            crossfade_sec=float(getattr(settings, "playback_crossfade_sec", 0.0) or 0.0),
-            gapless=bool(getattr(settings, "playback_gapless", True)),
+            ramp_ms=0 if dop else int(getattr(settings, "playback_ramp_ms", 5) or 5),
+            # DoP 与交叉淡变/无缝互斥：这里传 0/False，让面板写「不支持」而非「已关闭」
+            crossfade_sec=(
+                0.0 if dop else float(getattr(settings, "playback_crossfade_sec", 0.0) or 0.0)
+            ),
+            gapless=False if dop else bool(getattr(settings, "playback_gapless", True)),
             rate_want=int(self._want_rate or spec.sample_rate),
             rate_actual=int(actual_rate),
             downmix_from=0,
-            backend=str(getattr(settings, "playback_output_backend", "") or ""),
+            # 后端名优先取**实际**后端（输出快照 → 设备 hostapi → 设置）：
+            # 设置里存的是「用户想要的」，设备上是「真正在跑的」。DoP 期间
+            # 这两者尤其不能混——面板说 WASAPI 独占、实际跑 ASIO 就是说谎。
+            backend=str(
+                output_snapshot.get("backend", "")
+                or (device.backend_key if device is not None else "")
+                or str(getattr(settings, "playback_output_backend", "") or "")
+            ),
             device=output_snapshot.get("device", "") or (device.name if device else ""),
             exclusive=actual_exclusive,
             exclusive_actual=actual_exclusive,
@@ -1491,12 +1865,20 @@ class PlayerEngine:
                 )
             ),
             latency_ms=float(output_snapshot.get("latency_ms", 0.0) or 0.0),
+            # ASIO 下「延迟」得改称「驱动缓冲」并区分实测/估算 —— 由
+            # ``signal_path.latency_text`` 按后端分叉，这里只把事实传下去。
+            latency_source=str(output_snapshot.get("latency_source", "") or ""),
             device_dtype=str(output_snapshot.get("dtype", "") or ""),
             int_pipeline=spec.sample_fmt in ("s16", "s24", "s32"),
             format_note=(
                 TEXT_INT_PIPELINE_UNAVAILABLE if self._int_downgraded else ""
             ),
             effective_bit_depth=int(getattr(self._item, "bit_depth", 0) or 0),
+            # ---- DoP（v1.8.1）----
+            dsd_rate=int(getattr(spec, "dsd_rate", 0) or 0),
+            dop=dop,
+            dop_rate=int(getattr(spec, "dop_rate", 0) or 0),
+            dop_note="" if dop else str(self._dop_note or ""),
         )
         # 回退时 counters 里补一笔（引擎在 _build_spec 里已 bump，这里不重复加）
         self._sync_counters(output_snapshot)
@@ -1504,6 +1886,15 @@ class PlayerEngine:
     def _refresh_signal(self) -> None:
         """音量/EQ 变化后局部刷新信号路径（不重开流）。"""
         dsp = self._dsp.snapshot()
+        if self._dop_active:
+            # DoP 期间 gain/eq 恒为旁路，且原因固定（位流不能被乘法碰）。
+            # 这里若套用通用文案「0 dB 旁路（无软件增益）」，用户会以为
+            # 是他自己设成 0 dB 的 —— 必须保留 DoP 说明。
+            self._signal.mark("eq", StageStatus.BYPASSED, TEXT_DOP_EQ_BYPASSED)
+            self._signal.mark("gain", StageStatus.BYPASSED, TEXT_DOP_GAIN_BYPASSED)
+            self._signal.counters.gain_db = 0.0
+            self._emit_signal_if_changed()
+            return
         if bool(dsp.get("eq_enabled")):
             bands = len(dsp.get("eq_gains", []) or [])
             eq_active = bool(dsp.get("eq_active"))
@@ -1519,7 +1910,79 @@ class PlayerEngine:
         else:
             self._signal.mark("gain", StageStatus.BYPASSED, "0 dB 旁路（无软件增益）")
         self._signal.counters.gain_db = float(dsp.get("gain_db", 0.0))
-        self._emit(EVENT_SIGNAL, self._signal.to_dict())
+        self._emit_signal_if_changed()
+
+    def refresh_signal(self) -> None:
+        """按当前 spec/plan/output **整条重算**信号路径，并推 ``EVENT_SIGNAL``。
+
+        给界面用的公开钩子（v1.8.1 P0-2）：``_configure_signal()`` 只读不写，
+        可以安全重跑。为什么要它而不是让界面自己 ``poll_now()``：format /
+        decode / resample 三级只在开流时算一次，改 ``playback_bit_perfect``、
+        ``playback_volume_mode``、``playback_dsd_pcm_rate`` 这类设置**不重开流**，
+        面板就会停留在旧文案上 —— 那正是「面板说谎」这一类 bug。
+
+        没有正在播放的会话时只把当前（空白/上一次）快照再推一次，绝不抛异常：
+        这个方法是界面回调里调的，抛出去会变成一次莫名其妙的崩溃。
+        """
+        spec = self._spec
+        try:
+            if spec is not None:
+                self._configure_signal(spec, self._resolve_device(), int(self._rate))
+        except Exception:  # noqa: BLE001 - 界面钩子不能把异常抛进事件循环
+            log.exception("刷新信号路径失败（保留上一次结果）")
+        # 显式刷新一律回话（force）：界面按了「刷新」就该拿到一次 EVENT_SIGNAL
+        self._emit_signal_if_changed(force=True)
+
+    def _emit_signal_if_changed(self, force: bool = False) -> None:
+        """文本没变就不推 ``EVENT_SIGNAL``（防闪烁，设计 §1.1-4）。
+
+        指纹只取 9 级的「key + detail + status」与总述：计数器（欠载数、丢弃
+        帧数）每秒都在动，把它们算进指纹等于没有去重。计数器由 ``snapshot()``
+        随界面轮询带走，不需要额外事件。
+
+        Args:
+            force: 显式请求（``refresh_signal()``）时绕过去重 —— 「我按了刷新
+                却什么都没发生」比多推一次更让人困惑。自动路径（起播/停播/
+                音量变化）保持去重。
+        """
+        payload = self._signal.to_dict()
+        stages = payload.get("stages") or []
+        key = "|".join(
+            f"{item.get('key')}:{item.get('detail')}:{item.get('status')}" for item in stages
+        )
+        key = f"{key}|{payload.get('summary', '')}"
+        if not force and key == self._last_signal_key:
+            return
+        self._last_signal_key = key
+        self._emit(EVENT_SIGNAL, payload)
+
+    def _dsd_state(self) -> dict[str, Any]:
+        """DSD / DoP 状态投影（状态栏徽标用，PRD P1-2）。
+
+        刻意不新增状态源：``active`` / ``fallback`` / 标签全部从当前 ``spec`` 与
+        ``_dop_note`` 推出来，界面因此不可能显示成与信号路径不同的两套说法。
+        """
+        spec = self._spec
+        empty = {
+            "active": False,
+            "fallback": False,
+            "dsd_label": "",
+            "dop_label": "",
+            "dop_rate": 0,
+            "note": "",
+        }
+        if spec is None or not bool(getattr(spec, "is_dsd", False)):
+            return empty
+        dop = bool(getattr(spec, "dop", False))
+        dsd_rate = int(getattr(spec, "dsd_rate", 0) or 0)
+        return {
+            "active": dop,
+            "fallback": bool(self._dop_note),
+            "dsd_label": dsd_mod.dsd_label_for(dsd_rate) if dsd_rate else "DSD",
+            "dop_label": dsd_mod.dop_label_for(dsd_rate) if dop else "",
+            "dop_rate": int(getattr(spec, "dop_rate", 0) or 0),
+            "note": str(self._dop_note or ""),
+        }
 
     def _sync_counters(self, output_snapshot: dict[str, Any]) -> None:
         """把输出/解码侧的计数搬进信号路径（快照与轮询都会调）。"""
@@ -1555,7 +2018,7 @@ class PlayerEngine:
         self._signal.mark("output", StageStatus.ERROR, self._error)
         self._set_state(PlayerState.ERROR)
         self._emit(EVENT_ERROR, self._error)
-        self._emit(EVENT_SIGNAL, self._signal.to_dict())
+        self._emit_signal_if_changed()
 
 
 def snapshot_json(engine: PlayerEngine) -> str:

@@ -32,6 +32,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from .constants import (
+    BACKEND_ASIO,
     BACKEND_WASAPI,
     BLOCK_FRAMES_DEFAULT,
     DB_FLOOR_MUTE,
@@ -319,14 +320,28 @@ class AudioOutput:
             return resolve_device(raw, self._backend)
         return resolve_device("", self._backend)
 
+    def _is_asio(self) -> bool:
+        """当前这条流是否走 ASIO hostapi。
+
+        判据是**设备自己的 hostapi**，不是 ``settings.playback_output_backend``：
+        用户可能刚换了设备还没保存设置，真正决定开流语义的是设备。
+        """
+        info = self._device_info
+        if info is not None:
+            return info.backend_key == BACKEND_ASIO
+        return str(self._backend or "").strip().lower() == BACKEND_ASIO
+
     def _extra_settings_for(self, mode: OutputMode) -> Any:
         """模式 → ``sd.WasapiSettings``（唯一构造点，设计 §4.2）。
 
-        返回 ``None`` 表示「共享」或「设备不是 WASAPI」：
+        返回 ``None`` 表示「共享」/「设备不是 WASAPI」/「设备是 ASIO」：
 
         * 共享：不带 ``extra_settings``；
         * 宽松独占：``exclusive=True, auto_convert=False, explicit_sample_format=False``；
-        * 严格独占：同上但 ``explicit_sample_format=True``（**只接受整数格式**）。
+        * 严格独占：同上但 ``explicit_sample_format=True``（**只接受整数格式**）；
+        * ASIO：它本身就是驱动独占，``WasapiSettings`` 对它毫无意义（传了只会被
+          驱动当成非法参数），所以不构造 —— 但"独占"是事实，``mode_actual``
+          照样上报 ``EXCLUSIVE``（见 ``open()``）。
 
         ``auto_convert`` 恒为 False：本项目从不借助系统做格式转换，共享模式的
         重采样由 ffmpeg 完成并写进信号路径，转成什么样用户查得到。
@@ -334,6 +349,10 @@ class AudioOutput:
         if not mode.is_exclusive:
             return None
         device_backend = self._device_info.backend_key if self._device_info else ""
+        if device_backend == BACKEND_ASIO:
+            self._mode_actual = OutputMode.EXCLUSIVE
+            self._exclusive_actual = True
+            return None
         if device_backend != BACKEND_WASAPI:
             # 非 WASAPI 后端没有独占概念：如实降级为共享，不抛错（T01 ⑤）
             log.info(
@@ -528,7 +547,12 @@ class AudioOutput:
             "device": index,
             "callback": self._audio_callback,
         }
-        if cfg.latency:
+        if cfg.latency and not self._is_asio():
+            # ASIO **不传** latency 提示（实测见 latency_ms() 的注释）：
+            # PortAudio 的 ASIO 后端把超大的请求值原样回显（请求 0.2 s → 报 0.2028 s），
+            # 小幅请求则被夹到驱动最小缓冲（请求 0.04/0.005 → 都报 0.0635 s）。
+            # 传了它，信号路径那句「延迟 N ms」至少有 1/3 场合是我们自己的请求值，
+            # 属于"用输入证明输出"；ASIO 的缓冲本来就由驱动控制面板决定。
             kwargs["latency"] = cfg.latency
         if extra_settings is not None:
             kwargs["extra_settings"] = extra_settings
@@ -549,9 +573,19 @@ class AudioOutput:
 
         self._stream = stream
         self._config = replace(cfg, device=str(index), mode=requested_mode)
-        # 实际值：只有真的把独占参数交给了 PortAudio 且开流成功才算独占
-        self._mode_actual = requested_mode if extra_settings is not None else OutputMode.SHARED
-        self._exclusive_actual = self._mode_actual.is_exclusive
+        # 实际值：只有真的把独占参数交给了 PortAudio 且开流成功才算独占。
+        # ASIO 是例外：驱动本身就是独占设备（没有共享模式），即使不传
+        # WasapiSettings，实际语义也是「驱动独占」—— 按共享上报就成了谎报。
+        if self._is_asio():
+            self._mode_actual = OutputMode.EXCLUSIVE
+            self._exclusive_actual = True
+            if not requested_mode.is_exclusive and not self._mode_downgrade_note:
+                self._mode_downgrade_note = "ASIO 驱动没有共享模式，已按驱动独占打开"
+        else:
+            self._mode_actual = (
+                requested_mode if extra_settings is not None else OutputMode.SHARED
+            )
+            self._exclusive_actual = self._mode_actual.is_exclusive
         if requested_mode.is_exclusive and not self._exclusive_actual and not self._mode_downgrade_note:
             self._mode_downgrade_note = "设备/后端未接受独占参数"
         self._error_text = ""
@@ -691,7 +725,43 @@ class AudioOutput:
     # ------------------------------------------------------------ 读数
 
     def latency_ms(self) -> float:
-        """当前流上报的输出延迟（毫秒）。"""
+        """当前流上报的输出延迟（毫秒）：**实测优先**，取不到才退回估算。
+
+        为什么非要强调"实测"（v1.8.1 实测复盘，TempoTec ASIO 驱动，44100 Hz）
+        ------------------------------------------------------------------
+        * PortAudio 的 ASIO 后端会把**过大的**请求值原样回显：``latency=0.2`` →
+          报 0.20285 s（≈ 请求值），而小幅请求会被夹到驱动最小缓冲
+          （``0.04`` / ``0.005`` → 都报 0.0635 s）。也就是说 ``stream.latency``
+          不是独立测量值，它混着"我们请求了什么"。所以 open() **不给 ASIO 传**
+          latency 提示，让这个数只反映驱动自己的缓冲（实测 0.040~0.064 s 之间
+          随驱动缓冲浮动，请求 ``low``/``high`` 时 0.11~0.135 s）。
+        * 结论：``stream.latency`` 是这套 API 能给的最接近实测的值，就拿它当实测；
+          但它只覆盖"驱动缓冲周期"，不含硬件/驱动内部流水线，界面不该承诺
+          "总链路延迟"。取不到时退回按块数估算，并标注 ``estimated`` —— 报 0 会
+          让信号路径那一格空着，用户以为没有延迟；报个假实测更糟。
+
+        Returns:
+            毫秒；没有打开的流时返回 0.0（还没开流就没有"当前延迟"这回事）。
+        """
+        if self._stream is None:
+            return 0.0
+        measured = self._measured_latency_ms()
+        if measured > 0:
+            return measured
+        return self._estimated_latency_ms()
+
+    def latency_source(self) -> str:
+        """``"measured"`` / ``"estimated"`` / ``""``（未开流）。
+
+        界面/信号路径据此决定要不要写"（估算）"：把估算值当实测值展示，和
+        谎报采样率是同一类错误。
+        """
+        if self._stream is None:
+            return ""
+        return "measured" if self._measured_latency_ms() > 0 else "estimated"
+
+    def _measured_latency_ms(self) -> float:
+        """``stream.latency`` 换算成毫秒（取输出侧）；取不到返回 0.0。"""
         stream = self._stream
         if stream is None:
             return 0.0
@@ -700,11 +770,21 @@ class AudioOutput:
         except Exception:  # noqa: BLE001
             return 0.0
         if isinstance(value, (tuple, list)):
+            # PortAudio 约定 ``(input, output)``：播放器只关心输出侧
             value = value[-1] if value else 0.0
         try:
             return float(value) * 1000.0
         except (TypeError, ValueError):
             return 0.0
+
+    def _estimated_latency_ms(self) -> float:
+        """实测不可用时的估算：一块回调 + 一块缓冲（保守但不离谱）。"""
+        cfg = self._config
+        rate = int(cfg.samplerate) if cfg else 0
+        block = int(cfg.blocksize) if cfg else 0
+        if rate <= 0 or block <= 0:
+            return 0.0
+        return block * 2 * 1000.0 / rate
 
     def device_format(self) -> dict[str, Any]:
         """设备侧上报格式（信号路径第 9 级用）。"""
@@ -714,8 +794,11 @@ class AudioOutput:
             "channels": int(cfg.channels) if cfg else 0,
             "dtype": str(cfg.dtype) if cfg else str(self.ring.dtype),
             "latency_ms": round(self.latency_ms(), 1),
+            "latency_source": self.latency_source(),
             "device": self._device_info.label if self._device_info else "",
             "backend": str(cfg.backend) if cfg else self._backend,
+            # ASIO 驱动独占：信号路径据此写「ASIO · 驱动独占」而不是「WASAPI · 独占」
+            "asio": bool(self._is_asio()),
             # 只报**实际**值：请求了独占但降级共享时这里必须是 False
             "exclusive": bool(self._exclusive_actual),
             "mode": self._mode_actual.value,
@@ -745,6 +828,7 @@ class AudioOutput:
             "device": self._device_info.label if self._device_info else "",
             "device_index": self._device_info.index if self._device_info else -1,
             "backend": str(cfg.backend) if cfg else self._backend,
+            "asio": bool(self._is_asio()),
             # 只报**实际**值：请求了独占但降级共享时这里必须是 False
             "exclusive": bool(self._exclusive_actual),
             "mode": self._mode_actual.value,
@@ -755,6 +839,7 @@ class AudioOutput:
             "mode_note": self._mode_downgrade_note,
             "blocksize": int(cfg.blocksize) if cfg else self._blocksize,
             "latency_ms": round(self.latency_ms(), 1),
+            "latency_source": self.latency_source(),
             "underruns": int(self._underruns),
             "frames_out": int(self._frames_out),
             "pa_flags": int(self._pa_flags),

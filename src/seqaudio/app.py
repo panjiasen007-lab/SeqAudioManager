@@ -3,9 +3,63 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import traceback
 from pathlib import Path
+
+#: 关闭 ASIO 的命令行开关（与 ``run.py`` 保持同一份语义）
+_ASIO_OFF_FLAGS = ("--no-asio", "--no_asio")
+#: ``SEQAUDIO_NO_ASIO`` 认这些值
+_ASIO_OFF_TEXT = ("1", "true", "yes", "on")
+
+
+def _asio_disabled(argv) -> bool:
+    """命令行或环境变量是否要求关闭 ASIO（``argv`` 为 ``None`` 时读 ``sys.argv``）。"""
+    args = sys.argv if argv is None else list(argv)
+    for token in args:
+        if str(token).strip().lower() in _ASIO_OFF_FLAGS:
+            return True
+    return str(os.environ.get("SEQAUDIO_NO_ASIO", "")).strip().lower() in _ASIO_OFF_TEXT
+
+
+def _bootstrap_asio(argv=None) -> bool:
+    """在 import sounddevice 之前决定启用哪个 PortAudio 构建（幂等）。
+
+    为什么必须在这里做
+    ------------------
+    sounddevice 在 **import 的瞬间** 就 dlopen 了某一个 PortAudio 二进制：
+    环境里存在 ``SD_ENABLE_ASIO`` → ``libportaudio64bit-asio.dll``，否则 →
+    ``libportaudio64bit.dll``。所以这一步必须早于本模块下面任何会一路 import 到
+    sounddevice 的 ``from .`` 语句；``run.py`` 已经先做过一次（那是唯一真正
+    赶得上的地方），这里再调一次是给「别人 import seqaudio.app」的路径兜底，
+    幂等且无害。
+
+    为什么不放 settings
+    -------------------
+    ``Settings.load()`` 要 import 一串模块并读磁盘，远晚于这个硬时限；而且
+    配置里的开关只能"下次启动生效"，用户会以为当场就关了 —— 半生效等于说谎。
+    所以开关只有命令行 ``--no-asio`` / 环境变量 ``SEQAUDIO_NO_ASIO``。
+
+    Returns:
+        是否要求 ASIO 构建。
+    """
+    log_ = logging.getLogger(__name__)
+    if _asio_disabled(argv):
+        # 必须删除而不是写 0：sounddevice 判的是 ``'SD_ENABLE_ASIO' in os.environ``
+        os.environ.pop("SD_ENABLE_ASIO", None)
+        # 再立一个标记：``devices.sounddevice()`` 的兜底会把缺省的变量补回来，
+        # 而"用户关了"与"没人设过"在它眼里完全一样 —— 标记是两者唯一的区别。
+        os.environ["SEQAUDIO_ASIO_DISABLED"] = "1"
+        log_.debug("已按 --no-asio / SEQAUDIO_NO_ASIO 关闭 ASIO 构建")
+        return False
+    os.environ.pop("SEQAUDIO_ASIO_DISABLED", None)
+    os.environ.setdefault("SD_ENABLE_ASIO", "1")
+    return True
+
+
+#: 模块导入即生效（必须早于下面所有 `from .` 语句，见 ``_bootstrap_asio``）
+_bootstrap_asio()
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon

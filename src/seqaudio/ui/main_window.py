@@ -119,6 +119,39 @@ AUDIO_FILE_FILTER = (
 )
 
 
+def _asio_reason_text() -> str:
+    """ASIO 不可用的**可行动原因**文案（可用时返回空串）。
+
+    为什么"灰掉"还不够、非要说原因（设计 R2 措辞）：四种情况四种修法 ——
+    用户自己 ``--no-asio`` 关的 → 去掉参数重启；包体缺
+    ``libportaudio64bit-asio.dll`` → 重启一百次也没用，得换安装包；
+    构建本身没有 ASIO → 只能等新版；驱动装了但**探测不通过**（被其它程序
+    独占 / 参数全不支持）→ 关掉占用它的程序或重启声卡驱动。
+
+    写成模块级函数而不是方法：若干界面用例用最小替身混入 ``MainWindow`` 的
+    个别方法，能力查询不该逼它们再造一个属性。
+    """
+    try:
+        from ..player import devices as dev_mod  # 局部导入：只在这里需要
+
+        reason = dev_mod.asio_unavailable_reason()
+    except Exception:  # noqa: BLE001 - 原因查询失败不该影响界面
+        log.debug("查询 ASIO 不可用原因失败", exc_info=True)
+        return ""
+    if reason == "switched_off":
+        return i18n.tr("dev_asio_switched_off")
+    if reason == "load_failed":
+        return i18n.tr("dev_asio_load_failed")
+    if reason == "" and dev_mod.backend_present("asio"):
+        # 构建与开关都没问题、还是不可用 → 就是"枚举得到但探测不通过"这一种了
+        try:
+            if dev_mod.asio_usable_device() is None:
+                return i18n.tr("dev_asio_probe_failed")
+        except Exception:  # noqa: BLE001 - 探测失败本身就用探测失败文案
+            return i18n.tr("dev_asio_probe_failed")
+    return ""
+
+
 def initial_window_height(available_height: int, platform_name: str) -> int:
     """默认启动高度：1080p 屏尽量给到 10 行，小屏不超出可用区域。
 
@@ -241,6 +274,11 @@ class MainWindow(QMainWindow):
         self.settings_panel.outputDeviceRefreshRequested.connect(
             self._on_output_device_refresh
         )
+        # 面板载入/换后端/换设备时都会发这个信号：DoP 能力只能由引擎回答，
+        # 面板不碰 player。接不上也只是开关灰着（不会崩），所以无需判空。
+        self.settings_panel.dopCapabilityRefreshRequested.connect(
+            self._refresh_dop_state
+        )
 
         self.inspector = InspectorPanel()
         self.inspector.editRequested.connect(self.edit_selected)
@@ -293,6 +331,17 @@ class MainWindow(QMainWindow):
         self.mode_label = QLabel("")
         self.mode_label.setObjectName("hint")
         status.addPermanentWidget(self.mode_label)
+        # v1.8.1：状态栏常驻「当前输出设备」，与设置面板下拉、信号路径 device 级
+        # 共用同一份事实（PRD P0-1 ①「三处一致且无残留项」）。
+        self.device_label = QLabel("")
+        self.device_label.setObjectName("hint")
+        status.addPermanentWidget(self.device_label)
+        # v1.8.1 P1-2：状态栏常驻 DSD 徽标（DoP 直出 = DSD；回退 PCM = DSD→PCM）。
+        # 数据源与信号路径同源（engine 快照的 dsd 投影），不会出现两套说法。
+        self.dsd_label = QLabel("")
+        self.dsd_label.setObjectName("hint")
+        self.dsd_label.setVisible(False)
+        status.addPermanentWidget(self.dsd_label)
 
         self._setup_player()
 
@@ -373,6 +422,11 @@ class MainWindow(QMainWindow):
         self._restore_playback_session()
         self._attach_player_extras()
         self.player_bridge.start()
+        # 热插拔轮询与 ASIO 可用性都在桥接层就绪之后：两者都要问设备表
+        self._setup_device_watch()
+        self._refresh_asio_state()
+        self._refresh_dop_state()
+        self._refresh_device_status()
 
     def _restore_playback_session(self) -> None:
         """启动恢复：只回填队列与位置，**不起播**（不打扰用户）。"""
@@ -423,11 +477,68 @@ class MainWindow(QMainWindow):
         self._refresh_signal_panel()
 
     def _refresh_signal_panel(self) -> None:
-        """信号路径面板跟随引擎最新快照刷新（设置变化/切歌/音量等共用）。"""
+        """信号路径面板跟随引擎最新快照刷新（设置变化/切歌/音量/热插拔共用）。
+
+        **必须先 ``poll_now()`` 再 ``update_from()``**（设计 §1.1 采纳方案 a）。
+        根因：``last_snapshot()`` 是上一次 100 ms 轮询的产物。切歌/换设备那一刻
+        「新的 source/decode」还没轮到下一拍轮询，直接读旧快照会让面板继续显示
+        上一曲的源与解码器 —— 面板说谎比不刷新更糟（R2「所见为真」）。
+
+        成本可以忽略：``poll_now()`` 就是 ``engine.poll()``，纯内存的计数器同步
+        加一次 ``to_dict()``（< 1 ms），而 GUI 线程本来每 100 ms 就在跑同一条路径。
+        好处是一行改动覆盖全部 11 个触发点（三个引擎事件 + 6 处设置回调）。
+        """
         bridge = getattr(self, "player_bridge", None)
         if bridge is None:
             return
-        self.player_signals.update_from(bridge.last_snapshot() or None)
+        snapshot = bridge.poll_now() or None
+        self.player_signals.update_from(snapshot)
+        self._update_dsd_ui(snapshot)
+
+    def _update_dsd_ui(self, snapshot) -> None:
+        """DSD 徽标 + 音量滑块（PRD P1-1③ / P1-2）。
+
+        数据源是引擎快照里的 ``dsd`` 投影（``engine._dsd_state``），与信号路径
+        **同源同拍** —— 界面因此不可能出现「徽标说 DoP、信号链说回退」的两套
+        说法。DoP 期间音量由驱动控制，滑块必须禁用并说明原因，否则用户看到的
+        就是「能拖、拖了没效果」（R2「所见为真」的反面）。
+        """
+        dsd = dict((snapshot or {}).get("dsd") or {})
+        dop_active = bool(dsd.get("active"))
+        # ---- 状态栏徽标：DoP 直出显 DSD，回退显 DSD→PCM，非 DSD 隐藏
+        label = getattr(self, "dsd_label", None)
+        if label is not None:
+            if dop_active:
+                key = "status_badge_dsd_pcm" if bool(dsd.get("fallback")) else "status_badge_dsd"
+                label.setText(i18n.tr(key))
+                tip_parts = []
+                dop_label = str(dsd.get("dop_label") or "")
+                rate = int(dsd.get("dop_rate") or 0)
+                if dop_label and rate:
+                    tip_parts.append(f"{dop_label} · {rate / 1000:.1f} kHz")
+                note = str(dsd.get("note") or "")
+                if note:
+                    tip_parts.append(note)
+                label.setToolTip("；".join(tip_parts))
+                label.setVisible(True)
+            else:
+                label.setVisible(False)
+                label.setToolTip("")
+        # ---- 音量滑块：主播放条与迷你条同一份事实
+        for owner, attr, normal_tip in (
+            (self, "player_bar", lambda: i18n.tr_text("音量")),
+            (self, "mini_player", lambda: i18n.tr("ui_mini_volume")),
+        ):
+            slider = getattr(getattr(owner, attr, None), "volume_slider", None)
+            if slider is None:
+                continue
+            if dop_active:
+                slider.setEnabled(False)
+                slider.setToolTip(i18n.tr("dev_dop_volume_note"))
+            elif not slider.isEnabled():
+                # 只在"我们禁用过"的恢复路径里改回常规提示，别打扰正常态
+                slider.setEnabled(True)
+                slider.setToolTip(normal_tip())
 
     def _on_player_track(self, track) -> None:
         data = track if isinstance(track, dict) else None
@@ -441,9 +552,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "mini_player", None) is not None:
             self.mini_player.update_lyrics()
         self._sync_playing_row(data)
-        # 切歌后声道/采样率/EQ 状态可能整体变化，信号路径必须跟着刷（反馈 2）
+        # 切歌后声道/采样率/EQ 状态可能整体变化，信号路径必须跟着刷（反馈 2）。
+        # 这里的 ``poll_now()`` 已经收进 ``_refresh_signal_panel()`` 内部，
+        # 不再重复调用（同一拍里 poll 两次纯属浪费）。
         self._refresh_signal_panel()
-        self.player_bridge.poll_now()
+        self._refresh_dop_state()   # 声道数可能变了：DoP 开关要跟着重算
+        self._refresh_device_status()
 
     def _on_player_position(self, position: int) -> None:
         snapshot = self.player_bridge.last_snapshot()
@@ -468,6 +582,25 @@ class MainWindow(QMainWindow):
         if text:
             self._append_log("ERROR", text)
             self.status_hint.setText(text)
+            if self._is_device_lost_text(text):
+                # 拔出正在播放的设备：≤2 s 转 stopped 由引擎侧完成，这里只负责
+                # 「提示一次 + 回落系统默认」（PRD P0-1 ②，不自动续播）。
+                self._on_device_lost()
+
+    @staticmethod
+    def _is_device_lost_text(message: str) -> bool:
+        """错误文本是否表示「输出设备消失」。
+
+        为什么靠文本判定：引擎把 ``DeviceLostError`` 的文案原样放进 EVENT_ERROR，
+        桥接层只转发字符串（ui 层不 import player 的异常类）。这里匹配的是
+        ``map_portaudio_error`` / ``engine.poll`` 里那几句**固定措辞**，
+        改那几句时必须同步改这里。
+        """
+        text = str(message or "")
+        return any(
+            token in text
+            for token in ("输出设备已断开", "设备已断开", "可能被拔出", "已被拔出")
+        )
 
     def _on_player_signal(self, _payload) -> None:
         self._refresh_signal_panel()
@@ -483,6 +616,237 @@ class MainWindow(QMainWindow):
     def _on_player_gap(self, gap_ms: float) -> None:
         """切歌/续播间隙（T05 会在这里做缝隙回填提示，本期只记 DEBUG）。"""
         log.debug("播放间隙 %.1f ms", float(gap_ms or 0.0))
+
+    # ------------------------------------------------------------ 设备热插拔 / ASIO（v1.8.1）
+
+    def _active_backend(self) -> str:
+        """当前输出后端键（空串表示不指定）。"""
+        return str(getattr(self.settings, "playback_output_backend", "") or "")
+
+    def _setup_device_watch(self) -> None:
+        """起一个 3 s 的设备表轮询（PRD P0-1，设计 §1.3）。
+
+        三条责任边界：
+
+        * 轮询只负责「面板/信号路径/状态栏与设备表一致」，**不重开流** ——
+          播放中重开流就是一次可听见的断音，热插拔轮询没资格制造它；
+        * 「正在播放时被拔」的 ≤2 s 响应由 ``DeviceLostError`` 兜底
+          （见 ``_on_player_error``），轮询补的是「设备回来了」这一半；
+        * 比对键是**设备名集合**，不是 PortAudio 索引（启用 ASIO 后索引整体后移，
+          按索引比会每次都判定"全变了"）。
+        """
+        # 局部导入：player 层的类型只在这一处用得到。模块级 import 会把
+        # main_window 的依赖图一路扩到整个 player 包（架构 2.3 单向依赖）。
+        from ..player.constants import DEVICE_WATCH_MS
+        from ..player.devices import DeviceWatcher
+
+        if not isinstance(getattr(self, "_device_lost_notified", None), set):
+            self._device_lost_notified = set()
+        self._device_watcher = DeviceWatcher(
+            self._active_backend(), enumerator=self.player_bridge.device_watch
+        )
+        timer = QTimer(self)
+        timer.setInterval(int(DEVICE_WATCH_MS))
+        timer.setTimerType(Qt.CoarseTimer)
+        timer.timeout.connect(self._poll_device_change)
+        self._device_watch_timer = timer
+        timer.start()
+
+    def _poll_device_change(self) -> None:
+        """定时器槽：设备表有变化时原地刷新下拉/信号路径/状态栏。
+
+        选中设备消失时下拉自然落到第 0 项「系统默认设备」，但
+        ``settings.playback_device`` **保留旧值**（PRD P0-1 ③）：用户把 USB 解码器
+        插回来就能接着用，不必重新选一遍；真正开流时 ``resolve_device`` 会把
+        找不到的名字退回默认设备，不会失败。
+        """
+        watcher = getattr(self, "_device_watcher", None)
+        bridge = getattr(self, "player_bridge", None)
+        if watcher is None or bridge is None:
+            return
+        try:
+            change = watcher.poll_once()
+        except Exception:  # noqa: BLE001 - 定时器槽抛异常会打断整个轮询
+            log.exception("设备表轮询失败")
+            return
+        if not change.changed:
+            return
+        # 设备回来了：允许它下次被拔出时重新提示一次（去重只压「同一次拔出」）
+        for name in change.added:
+            self._device_lost_notified.discard(name)
+        backend = self._active_backend()
+        self.settings_panel.set_output_devices(
+            bridge.list_output_devices(backend), scoped=True
+        )
+        self._asio_present(refresh=True)
+        self._refresh_asio_state()
+        # 引擎侧按新的设备表重算信号路径，再让面板立刻取新快照
+        bridge.refresh_signal()
+        self._refresh_signal_panel()
+        self._refresh_dop_state()
+        self._refresh_device_status()
+        self._append_log(
+            "INFO",
+            f"设备表已变化：新增 {len(change.added)} 台 / 移除 {len(change.removed)} 台"
+            + ("（系统默认设备已切换）" if change.default_changed else ""),
+        )
+
+    def _on_device_lost(self, device_name: str = "") -> None:
+        """拔出正在播放的设备：提示一次 → 回落系统默认（PRD P0-1 ②）。
+
+        刻意**不**自动续播：用户的耳机被拔了，程序擅自换到扬声器继续放歌，
+        在办公室或客厅都是事故。这里只做三件事 —— 提示去重、下拉与状态栏回落
+        到系统默认设备、日志写清楚原因。
+
+        ``settings.playback_device`` **保留旧值**（PRD P0-1 ③ / 设计 §1.1）：
+        拔掉往往只是几秒钟的事（换个口、插回去）。清空它等于把用户的选择
+        一起丢掉，插回来还得重新选一遍；保留则驱动一回来「按名字定位」自然
+        就命中了，用户什么都没做就恢复了。真正决定这一拍用哪台设备的是
+        **引擎解析结果**（找不到名字 → 系统默认），不是这条配置。
+        """
+        bridge = getattr(self, "player_bridge", None)
+        name = str(device_name or getattr(self.settings, "playback_device", "") or "").strip()
+        notified = getattr(self, "_device_lost_notified", None)
+        if not isinstance(notified, set):
+            notified = self._device_lost_notified = set()
+        if name in notified:
+            return
+        notified.add(name)
+        text = i18n.tr("dev_lost_notice")
+        self.status_hint.setText(text)
+        self._append_log("WARNING", text)
+        if bridge is not None:
+            # 三处一起改：下拉回落默认、信号路径重算、状态栏写新设备名
+            self.settings_panel.set_output_devices(
+                bridge.list_output_devices(self._active_backend()), scoped=True
+            )
+            # 「设备已断开」但枚举里还挂着它（驱动崩溃/流被接管）时，下拉的
+            # findData 会把它重新选中 —— 那里显示的会是"一个已经没声的设备"。
+            # 所以显式落回第 0 项；blockSignals 避免把用户没做过的修改标成"未保存"。
+            combo = getattr(self.settings_panel, "device_combo", None)
+            if combo is not None and str(combo.currentData() or "") == name:
+                blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(blocked)
+            self._refresh_signal_panel()
+        self._refresh_dop_state()   # 拔掉的若是 DoP 唯一出路，开关要立刻灰掉
+        self._refresh_device_status()
+        log.warning("设备 %s 已断开，回落系统默认输出", name or "(未指定)")
+
+    def _refresh_dop_state(self) -> None:
+        """把「这台设备现在能不能直出 DoP」推给设置面板的 DSD 开关。
+
+        为什么必须有这个调用者（v1.8.1 收口发现的空转）
+        ----------------------------------------------
+        ``settings_panel`` 里的 ``dop_check`` 初始就是 ``setEnabled(False)``，而
+        ``set_dop_available()`` 在接上这条线之前**没有任何生产调用者** —— 也就是
+        说发出去的版本里 DSD 开关永远灰着，T04 的「可开关 + 可观察」等于没上线。
+
+        探测在引擎侧（``dop_capability``），与起播同源、零出声；串行调用也只是
+        一次 ``check_output_settings``（本机 < 5 ms），只在离散事件（启动、换后端、
+        设备表变化、断开、保存设置、切歌）里问，不进任何轮询循环。
+
+        声道数按**当前源**猜：面板渲染时没有文件头，但引擎快照里有真实声道数；
+        多声道 DSD 若设备只吃立体声，真正的回退发生在起播的第 4 道闸并写明原因，
+        这里只负责把「大概率能/不能」如实反映出来。
+        """
+        bridge = getattr(self, "player_bridge", None)
+        panel = getattr(self, "settings_panel", None)
+        if bridge is None or panel is None:
+            return
+        probe = getattr(bridge, "dop_capability", None)
+        setter = getattr(panel, "set_dop_available", None)
+        if not callable(probe) or not callable(setter):
+            return
+        channels = self._current_source_channels()
+        if bool(getattr(self.settings, "playback_downmix_stereo", False)):
+            channels = 2
+        available, reason = probe(channels or 2)
+        setter(bool(available), str(reason or ""))
+
+    def _current_source_channels(self) -> int:
+        """当前源的声道数（问 DoP 能力用）；取不到返回 0。
+
+        ``last_snapshot()`` 是桥接层缓存的上一次轮询结果（< 100 ms），问一个
+        能力提示够用，不必为了它再 ``poll_now()`` 一次；桥接替身没有这个方法时
+        再退回 ``poll_now()``，最后才落到 0（由调用方按立体声处理）。
+        """
+        bridge = getattr(self, "player_bridge", None)
+        for name in ("last_snapshot", "poll_now"):
+            reader = getattr(bridge, name, None)
+            if not callable(reader):
+                continue
+            try:
+                value = int((reader() or {}).get("channels") or 0)
+            except Exception:  # noqa: BLE001 - 读不到就试下一个来源
+                value = 0
+            if value > 0:
+                return value
+        return 0
+
+    def _refresh_device_status(self) -> None:
+        """状态栏常驻一行「当前输出设备」，与下拉/信号路径保持同一份事实。
+
+        取的是**下拉当前项**而不是 ``settings.playback_device``：设备被拔掉时
+        下拉会回落到「系统默认设备」，但 settings 里保留着旧名字（插回来就不用
+        重选）。状态栏如果说"输出设备：USB DAC"而下拉显示"系统默认设备"，
+        用户看到的就是两处互相矛盾 —— 所以这里跟下拉走，配置值放进 tooltip。
+        """
+        label = getattr(self, "device_label", None)
+        if label is None:
+            return
+        combo = getattr(getattr(self, "settings_panel", None), "device_combo", None)
+        effective = str(combo.currentData() or "").strip() if combo is not None else ""
+        configured = str(getattr(self.settings, "playback_device", "") or "").strip()
+        text = effective or i18n.tr_text("系统默认设备")
+        label.setText(f"{i18n.tr('dev_device')}：{text}")
+        label.setToolTip(configured or text)
+
+    def _refresh_asio_state(self) -> None:
+        """把「ASIO 能不能用」推给设置面板，并在首次可用时提示一次。
+
+        PRD 已拍板：**首次检测到 ASIO 不自动切换后端** —— 用户可能正用 MME 听着歌，
+        程序擅自换后端就是一次断音。所以这里只置灰/点亮下拉项 + 提示一次
+        （``playback_asio_note_seen`` 去重），切换权留给用户。
+        """
+        bridge = getattr(self, "player_bridge", None)
+        panel = getattr(self, "settings_panel", None)
+        if bridge is None or panel is None:
+            return
+        present = self._asio_present()
+        setter = getattr(panel, "set_asio_state", None)
+        if callable(setter):
+            try:
+                setter(present, _asio_reason_text())
+            except TypeError:  # 替身面板只认一个参数（测试用），退回旧签名
+                setter(present)
+        if not present or bool(getattr(self.settings, "playback_asio_note_seen", False)):
+            return
+        # 自动化/离屏环境不写「已提示」标记：否则跑一次测试就把真人的首次提示偷走
+        if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+            return
+        drivers = bridge.list_output_devices("asio")
+        driver = str((drivers[0] or {}).get("name", "")) if drivers else ""
+        self.settings.playback_asio_note_seen = True
+        self._save_settings_quietly()
+        text = i18n.tr("dev_asio_detected", driver=driver or "ASIO")
+        self._append_log("INFO", text)
+        self.status_hint.setText(text)
+
+    def _asio_present(self, refresh: bool = False) -> bool:
+        """桥接层的 ASIO 可用性查询（桥没有该方法时按"不可用"处理）。
+
+        写这么松是因为若干个 UI 用例用的是最小替身 bridge（只有
+        ``list_output_devices``）：一个能力查询不该让整条刷新链路抛异常。
+        """
+        probe = getattr(getattr(self, "player_bridge", None), "asio_present", None)
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe(refresh=refresh))
+        except Exception:  # noqa: BLE001 - 查询失败只影响下拉项，不影响播放
+            log.debug("查询 ASIO 可用性失败", exc_info=True)
+            return False
 
     # ------------------------------------------------------------ 托盘 / 迷你条
 
@@ -869,7 +1233,8 @@ class MainWindow(QMainWindow):
         self.settings.playback_signal_panel_visible = bool(visible)
         self.player_bar.set_signal_panel_visible(bool(visible))
         if visible:
-            self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
+            # 走单一入口（poll_now → update_from），不用 ≤100 ms 陈旧的 last_snapshot
+            self._refresh_signal_panel()
 
     def toggle_signal_panel(self) -> None:
         self.set_signal_panel_visible(not self.player_signals.isVisible())
@@ -3265,7 +3630,7 @@ class MainWindow(QMainWindow):
             self.mini_player.refresh_theme()
         self.player_eq.refresh_texts()
         self.player_eq.refresh_theme()
-        self.player_signals.update_from(self.player_bridge.last_snapshot() or None)
+        self._refresh_signal_panel()
         try:
             from .win_effects import apply_titlebar
 
@@ -3557,7 +3922,9 @@ class MainWindow(QMainWindow):
         bridge.set_eq_enabled(bool(getattr(self.settings, "playback_eq_enabled", False)))
         bridge.set_eq_gains(list(getattr(self.settings, "playback_eq_gains", []) or []))
         # 信号路径面板立刻反映新链路（反馈 2：设置变化就刷新）
-        self.player_signals.update_from(bridge.last_snapshot() or None)
+        self._refresh_signal_panel()
+        self._refresh_dop_state()   # 模式/后端/设备都可能变了：DoP 能力重算
+        self._refresh_device_status()
         self._append_log("INFO", i18n.tr_text("播放参数已即时应用到当前播放"))
 
     def _on_output_device_refresh(self, backend_key: str) -> None:
@@ -3579,6 +3946,15 @@ class MainWindow(QMainWindow):
             self.settings.playback_device = ""
         # scoped=True：已经按后端过滤，显示纯设备名，不再重复 hostapi 前缀。
         self.settings_panel.set_output_devices(devices, scoped=True)
+        # 换后端后热插拔基线必须重建（新后端的设备名集合与旧后端没有可比性），
+        # 且 ASIO 可用性与当前后端无关、但要重算一次提示状态。
+        watcher = getattr(self, "_device_watcher", None)
+        if watcher is not None:
+            watcher.reset(key)
+        self._asio_present(refresh=True)
+        self._refresh_asio_state()
+        self._refresh_dop_state()
+        self._refresh_device_status()
 
     # ------------------------------------------------------------ 日志与状态
 
@@ -3727,6 +4103,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "_quitting", False):
             return
         self._quitting = True
+        timer = getattr(self, "_device_watch_timer", None)
+        if timer is not None:
+            timer.stop()
         self._save_view_state()
         self._save_playback_session()
         if getattr(self, "tray_icon", None) is not None:

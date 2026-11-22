@@ -1,0 +1,127 @@
+%% v1.8.1 增量类图（只含新增/变更结构；v1.6 全量见 docs/class-diagram.mermaid）
+%% 归属：轨 A = devices/player_bridge/settings_panel/main_window；轨 B = dsd/decoder/engine/signal_path
+classDiagram
+    class DeviceChange {
+        +tuple~str~ added
+        +tuple~str~ removed
+        +bool default_changed
+        +bool changed
+    }
+
+    class DeviceWatcher {
+        -frozenset~str~ _names
+        -str _backend
+        -Callable _enumerate
+        +__init__(backend: str, enumerator: Callable|None)
+        +poll_once() DeviceChange
+        +reset(backend: str) None
+        +names() frozenset~str~
+    }
+
+    class DeviceInfo {
+        +int index
+        +str name
+        +int channels
+        +float default_samplerate
+        +str backend_key
+    }
+
+    class OutputPlan {
+        +int rate
+        +OutputMode mode
+        +int level
+        +bool fallback
+        +str note
+    }
+
+    class DsdFormat {
+        +int dsd_rate
+        +int channels
+        +int block_bytes
+        +bool lsb_first
+        +int sample_count
+        +float duration_sec
+        +int dop_rate
+        +str dop_label
+    }
+
+    class DsdSource {
+        -Path _path
+        -DecodeSpec _spec
+        -PcmRingBuffer _ring
+        -DopPacker _packer
+        +probe(path) DsdFormat
+        +start() None
+        +read_block() ndarray
+        +seek(position_sec) None
+        +is_alive() bool
+        +at_eof() bool
+        +position_sec() float
+        +stop() None
+    }
+
+    class DopPacker {
+        -int _channels
+        -int _phase
+        +pack(dsd: ndarray) ndarray
+        +reset() None
+    }
+
+    class DsdDecodeError
+
+    class DecodeSpec {
+        +Path path
+        +int sample_rate
+        +int channels
+        +str sample_fmt
+        +bool is_dsd
+        +bool dop
+        +int dop_rate
+    }
+
+    class PlayerEngine {
+        -DecodeSpec _spec
+        +refresh_signal() None
+        +_make_decoder(spec, ring)
+        +_apply_dop_constraints(spec) DecodeSpec
+    }
+
+    class PlayerBridge {
+        +refresh_signal() None
+        +asio_present() bool
+        +device_watch() list
+    }
+
+    class SignalPath {
+        +configure(dop, dop_rate, dsd_rate)
+        +mark(key, status, detail)
+    }
+
+    class SettingsPanel {
+        +set_asio_state(enabled) None
+        +set_dop_available(available, reason) None
+        +set_output_devices(devices, scoped) None
+    }
+
+    class MainWindow {
+        +_device_watch_timer QTimer
+        +_poll_device_change() None
+        +_on_device_lost(name) None
+        +_refresh_signal_panel() None
+    }
+
+    DeviceWatcher --> DeviceChange
+    DeviceWatcher ..> DeviceInfo : enumerates
+    DsdSource --> DsdFormat
+    DsdSource --> DopPacker
+    DsdSource ..> DecodeSpec : consumes
+    DsdSource ..> DsdDecodeError : raises
+    PlayerEngine --> DsdSource : creates when spec.dop
+    PlayerEngine --> SignalPath : configure / refresh_signal
+    PlayerEngine --> OutputPlan : ASIO 恒 EXCLUSIVE
+    PlayerBridge --> PlayerEngine : refresh_signal()
+    PlayerBridge ..> DeviceWatcher : enumerator
+    MainWindow --> DeviceWatcher : QTimer(3000ms)
+    MainWindow --> PlayerBridge
+    MainWindow --> SettingsPanel : set_output_devices(scoped=True)
+    SettingsPanel ..> PlayerBridge : list_output_devices()

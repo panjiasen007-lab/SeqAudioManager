@@ -159,7 +159,121 @@ def build_all(base: Path = BASE) -> dict[str, Path]:
         "flac": make_flac(base / "sample.flac"),
         "mp3": make_mp3(base / "sample.mp3"),
         "cue": make_cue(base / "album.cue"),
+        "dsf": make_dsf(base / "sample.dsf", blocks=2),
+        "dff": make_dff(base / "sample.dff", byte_frames=256),
     }
+
+
+# ---------------------------------------------------------------- DSD 夹具
+#
+# DSF/DFF 都没有可用的编码器（ffmpeg 只能解，不能造），所以这里按规范手写
+# 容器头 + 确定性位流。位流**必须**可复现：单元测试要拿同一套字节做逐位比对，
+# 用 random 会让失败变得无法定位。
+
+
+def dsd_channel_bytes(channel: int, length: int) -> bytes:
+    """生成某声道 ``length`` 字节的确定性位流（``0x00``–``0xFF`` 全覆盖）。
+
+    取一对互质的乘数，保证相邻声道、相邻位置的字节都不同 —— 若解交错把声道
+    或块顺序搞错了，比对会立刻失败，而不是「碰巧一样」。
+    """
+    return bytes(((channel + 1) * 37 + pos * 11 + (pos >> 3)) & 0xFF for pos in range(length))
+
+
+def make_dsf(
+    path: Path,
+    *,
+    dsd_rate: int = 2822400,
+    channels: int = 2,
+    block_bytes: int = 4096,
+    blocks: int = 4,
+) -> Path:
+    """构造一个合法的 DSF 文件（DSD 位流按块交错、每字节 LSB first 的容器）。
+
+    三处必须照规范写，否则 ``probe_dsd`` 与真实文件的行为会分叉：
+
+    1. ``DSD `` chunk 的 ``size`` 字段**含** 12 字节头（值恒为 28）；
+    2. ``fmt `` chunk 的 ``size`` 同样含头（值恒为 52），载荷 40 字节；
+    3. ``data`` chunk 的 ``size`` 也是「载荷 + 12」。
+
+    位流布局：``block0.ch0(block_bytes) · block0.ch1 · block1.ch0 …``。
+    """
+    samples_per_channel = block_bytes * blocks
+    payload = bytearray()
+    for block_index in range(blocks):
+        chunk = dsd_channel_bytes(block_index, block_bytes)
+        for channel in range(channels):
+            # 每个块内先放 ch0 的所有字节，再放 ch1 —— 这正是 DSF 的交错方式
+            payload += bytes(((byte + channel * 61) & 0xFF) for byte in chunk)
+
+    sample_count_bits = samples_per_channel * 8
+    fmt_payload = struct.pack(
+        "<IIIIIIQII",
+        1,                      # formatVersion
+        0,                      # formatID（0 = DSD raw）
+        2 if channels > 1 else 0,  # channelType
+        channels,
+        dsd_rate,
+        1,                      # bitsPerSample（DSD 恒为 1）
+        sample_count_bits,
+        block_bytes,            # blockSizePerChannel
+        0,                      # reserved
+    )
+    assert len(fmt_payload) == 40, len(fmt_payload)
+
+    data_size = 12 + len(payload)
+    total_size = 28 + 52 + data_size
+    # 元数据指针指向文件末尾（= 没有 ID3v2 元数据块）。DSF 允许这么写，
+    # 我们的解析器也不读它，但要给它一个合法值，别留 0。
+    metadata_ptr = total_size
+
+    header = b"DSD " + struct.pack("<QQQ", 28, total_size, metadata_ptr)
+    fmt_chunk = b"fmt " + struct.pack("<Q", 52) + fmt_payload
+    data_chunk = b"data" + struct.pack("<Q", data_size) + bytes(payload)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(header + fmt_chunk + data_chunk)
+    return path
+
+
+def make_dff(
+    path: Path,
+    *,
+    dsd_rate: int = 2822400,
+    channels: int = 2,
+    byte_frames: int = 512,
+) -> Path:
+    """构造一个合法的 DFF（DSDIFF）文件。
+
+    与 DSF 的三处差别都在这里体现：**大端**长度、chunk ``size`` **不含** 12
+    字节头（IFF 惯例）、位流按字节帧交错（``ch0, ch1, ch0, ch1 …``）且每字节
+    **MSB first**。
+    """
+    payload = bytearray()
+    per_channel = byte_frames
+    streams = [dsd_channel_bytes(channel + 1, per_channel) for channel in range(channels)]
+    for frame in range(byte_frames):
+        for channel in range(channels):
+            payload.append(streams[channel][frame])
+
+    def _chunk(chunk_id: bytes, body: bytes) -> bytes:
+        # DFF：size 只是载荷长度，奇数长度补 1 字节
+        return chunk_id + struct.pack(">Q", len(body)) + body + (b"\x00" if len(body) % 2 else b"")
+
+    fver = _chunk(b"FVER", struct.pack(">I", 0x01050000))
+    fs = _chunk(b"FS  ", struct.pack(">I", dsd_rate))
+    chnl = _chunk(
+        b"CHNL",
+        struct.pack(">H", channels) + b"".join(struct.pack(">I", 0) for _ in range(channels)),
+    )
+    snd = b"SND " + struct.pack(">Q", len(fs) + len(chnl)) + fs + chnl
+    prop = _chunk(b"PROP", snd)
+    dsd = _chunk(b"DSD ", bytes(payload))
+
+    body = b"DSD " + fver + prop + dsd
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"FRM8" + struct.pack(">Q", len(body)) + body)
+    return path
 
 
 if __name__ == "__main__":

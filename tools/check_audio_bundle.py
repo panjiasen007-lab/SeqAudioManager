@@ -26,6 +26,24 @@ CHECKS = [
     ("cffi 后端", "_cffi_backend*.pyd", 100_000),
 ]
 
+#: **缺失只降级、不影响发版**的组件（v1.8.1）。
+#:
+#: ASIO 版 PortAudio 只在 ``SD_ENABLE_ASIO`` 存在时才被 sounddevice dlopen，
+#: 少了它程序照样启动、照样用 WASAPI/MME 出声 —— 只是设置里的「ASIO」项会置灰
+#: （面板写明原因）。把它算成 FAIL 会让"没有 ASIO 的构建"无法发版，那与本版
+#: 「ASIO 可选可播」的定位相悖；反过来把它算成静默通过，又会出现"面板有 ASIO
+#: 选项、一点就报错"的假承诺。所以这里只打印 WARN。
+#:
+#: 注意：``build.py`` 的 ``_prune_portaudio()`` 已经把"两个 win64 变体都在场"
+#: 断言成硬性条件，所以正常构建不该出现这条 WARN —— 它出现就说明包被手工改过、
+#: 或者是旧版遗留包（v1.7 的包体只有普通 DLL）。
+OPTIONAL_CHECKS = [
+    ("PortAudio ASIO DLL", "_sounddevice_data/portaudio-binaries/libportaudio64bit-asio.dll", 100_000),
+]
+
+#: 允许出现在包里的 PortAudio x64 变体（其余一律视为打包错误）
+ALLOWED_PORTAUDIO_DLLS = ("libportaudio64bit.dll", "libportaudio64bit-asio.dll")
+
 #: 必须存在于 PYZ 归档里的纯 Python 模块（它们不落独立文件，只能查归档）
 REQUIRED_MODULES = ("sounddevice", "_sounddevice", "_sounddevice_data", "cffi")
 
@@ -121,6 +139,24 @@ def main(argv: list[str]) -> int:
         if not ok:
             failed += 1
 
+    # 可选组件：缺失只降级（见 OPTIONAL_CHECKS 的注释）
+    for label, rel, min_size in OPTIONAL_CHECKS:
+        path = _resolve(internal, rel)
+        if path is None or not path.exists():
+            print(
+                f"  WARN  {label:<18} 缺失 {rel}"
+                " —— 本构建不支持 ASIO，设置面板里该项会置灰（可用 WASAPI/MME 正常播放）。"
+                "v1.8.1 起 devices.sounddevice() 会在 ASIO 库加载失败时自动退回普通构建，"
+                "所以缺这个 DLL 不会再让整个程序没声音；但发版若想宣称「ASIO 可选可播」，"
+                "必须把它打进包体（见 THIRD-PARTY.md）"
+            )
+            continue
+        size = path.stat().st_size
+        if size < min_size:
+            print(f"  WARN  {label:<18} 文件过小 {size / 1024:.0f} KB（可能被截断）")
+        else:
+            print(f"  PASS  {label:<18} {path.relative_to(internal)}  {size / 1024:.0f} KB")
+
     # 模块层检查（PYZ 归档）
     modules = _pyz_modules(internal)
     if modules is None:
@@ -132,20 +168,25 @@ def main(argv: list[str]) -> int:
             if not ok:
                 failed += 1
 
-    # 确认没有把 7 个平台/位数/ASIO 变体全带进去（v1.7 只允许 win64 非 ASIO 那一个）
+    # 确认没有把 7 个平台/位数变体全带进去。
+    # v1.8.1 起 win64 的两个变体都合法：默认构建 + ASIO 构建（后者由
+    # SD_ENABLE_ASIO 决定是否 dlopen），32bit / arm64 / dylib / so 仍然不许出现。
     pa_dir = internal / "_sounddevice_data" / "portaudio-binaries"
     if pa_dir.is_dir():
         dlls = [
             p.name for p in pa_dir.iterdir() if p.suffix.lower() in (".dll", ".dylib", ".so")
         ]
-        extra = [name for name in dlls if name != "libportaudio64bit.dll"]
+        extra = [name for name in dlls if name not in ALLOWED_PORTAUDIO_DLLS]
         if extra:
-            # v1.7 T06：ASIO/32bit/arm64 变体从未被验证过，出现即视为失败
             print(f"  FAIL  PortAudio 变体过多：{sorted(dlls)}")
-            print("        只允许 libportaudio64bit.dll（v1.7 明确不做 ASIO/DLL 替换）")
+            print(
+                "        只允许 "
+                + " / ".join(ALLOWED_PORTAUDIO_DLLS)
+                + "（32bit、arm64 及其它平台一律不打包）"
+            )
             failed += 1
         else:
-            print(f"  PASS  {'PortAudio 变体':<18} 仅 {dlls[0] if dlls else '（缺失）'}")
+            print(f"  PASS  {'PortAudio 变体':<18} {sorted(dlls) or '（缺失）'}")
 
     print()
     if failed:
