@@ -9,7 +9,7 @@
 |---|---|
 | DevEco Studio | 26.0.1.290（安装在 `D:\HarmonyOS\DevEcoStudio`） |
 | SDK | HarmonyOS 26.0.1 / API 26（内置） |
-| 编译目标 | `compatibleSdkVersion: 7.0.0(26)` |
+| 编译目标 | `compatibleSdkVersion: 26.0.1`（纯版本号，不能写成 `7.0.0(26)`，hvigor 6.26 会报 api version illegal） |
 | 模拟器镜像 | HarmonyOS 7.0.0 PC 版（`D:\HarmonyOS\Emulator\image`，9.1 GB） |
 | bundleName | `com.seqaudio.manager` |
 
