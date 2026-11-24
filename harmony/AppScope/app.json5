@@ -1,0 +1,10 @@
+{
+  "app": {
+    "bundleName": "com.seqaudio.manager",
+    "vendor": "seqaudio",
+    "versionCode": 1008002,
+    "versionName": "1.8.2",
+    "icon": "$media:layered_image",
+    "label": "$string:app_name"
+  }
+}
