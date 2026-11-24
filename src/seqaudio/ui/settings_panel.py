@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -393,15 +392,6 @@ class SettingsPanel(QWidget):
                 ("字号", self.font_scale_combo),
             ]
         )
-
-        self.font_preview = QLabel("乐与怒 · Beyond · 海阔天空")
-        self.font_preview.setObjectName("fontPreview")
-        self.font_preview.setWordWrap(True)
-        self.mono_preview = QLabel("01/12 · 96kHz / 24bit · 1.2 GB")
-        self.mono_preview.setObjectName("monoPreview")
-        self.mono_preview.setWordWrap(True)
-        card.add_widget(self.font_preview)
-        card.add_widget(self.mono_preview)
         return card
 
     def _appearance_values(self) -> tuple[str, str, float]:
@@ -413,24 +403,7 @@ class SettingsPanel(QWidget):
             scale = 1.0
         return str(ui_id), str(mono_id), scale
 
-    def _refresh_appearance_preview(self) -> None:
-        ui_id, mono_id, scale = self._appearance_values()
-        ui = next((c for c in fonts.UI_CHOICES if c.id == ui_id), fonts.UI_CHOICES[0])
-        mono = next(
-            (c for c in fonts.MONO_CHOICES if c.id == mono_id), fonts.MONO_CHOICES[0]
-        )
-        ui_font = QFont(ui.family)
-        ui_font.setFamilies([ui.family, "Noto Sans SC", "Microsoft YaHei UI"])
-        ui_font.setPixelSize(round(14 * scale))
-        self.font_preview.setFont(ui_font)
-
-        mono_font = QFont(mono.family)
-        mono_font.setFamilies([mono.family, "Consolas"])
-        mono_font.setPixelSize(round(12 * scale))
-        self.mono_preview.setFont(mono_font)
-
     def _on_appearance_changed(self, *_) -> None:
-        self._refresh_appearance_preview()
         if not self._loading:
             self.appearancePreviewChanged.emit(*self._appearance_values())
             self._notify()
@@ -737,6 +710,11 @@ class SettingsPanel(QWidget):
             scoped: ``True`` 表示列表已按当前后端过滤，显示纯设备名；后端前缀
                 （``MME · xxx``）在同一后端里是冗余的，反而让列表看起来翻倍。
                 ``False`` 保持旧行为（全量列表带前缀），兼容既有调用方/测试。
+
+        ASIO 特例（v1.8.2）：ASIO **没有「系统默认设备」概念**——PortAudio 会把
+        ASIO hostapi 的默认项映射到第一台 ASIO 设备，再摆一个「系统默认设备」
+        占位项只会误导（选它实际听到的还是那台 ASIO 设备）。所以 ASIO 下直接
+        列出实际设备；一台都没有时置灰并显示「无可用 ASIO 设备」。
         """
         current = self.device_combo.currentData()
         if current is None:
@@ -748,18 +726,32 @@ class SettingsPanel(QWidget):
             for entry in (devices or [])
             if isinstance(entry, dict) and entry.get("name")
         }
+        asio = self._current_backend_key() == "asio"
+        entries = [
+            entry for entry in (devices or [])
+            if isinstance(entry, dict) and entry.get("name")
+        ]
         self._loading = True
         try:
             self.device_combo.clear()
-            self.device_combo.addItem(i18n.tr_text("系统默认设备"), "")
-            for entry in devices or []:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or "")
-                if not name:
-                    continue
-                label = name if scoped else str(entry.get("label") or name)
-                self.device_combo.addItem(label, name)
+            if asio:
+                if not entries:
+                    # 没有可用 ASIO 设备：置灰 + 说明（让用户知道不是"没加载"）
+                    self.device_combo.addItem(i18n.tr("dev_asio_no_device"), "")
+                    self.device_combo.setEnabled(False)
+                else:
+                    self.device_combo.setEnabled(True)
+                    for entry in entries:
+                        name = str(entry.get("name") or "")
+                        label = name if scoped else str(entry.get("label") or name)
+                        self.device_combo.addItem(label, name)
+            else:
+                self.device_combo.setEnabled(True)
+                self.device_combo.addItem(i18n.tr_text("系统默认设备"), "")
+                for entry in entries:
+                    name = str(entry.get("name") or "")
+                    label = name if scoped else str(entry.get("label") or name)
+                    self.device_combo.addItem(label, name)
             index = self.device_combo.findData(current)
             self.device_combo.setCurrentIndex(index if index >= 0 else 0)
             self._update_device_hint()
@@ -1289,7 +1281,6 @@ class SettingsPanel(QWidget):
             self.font_scale_combo.setCurrentIndex(
                 max(0, self.font_scale_combo.findData(float(settings.font_scale or 1.0)))
             )
-            self._refresh_appearance_preview()
 
             # ---- 播放页 ----
             backend = str(getattr(settings, "playback_output_backend", "mme") or "mme")

@@ -747,7 +747,7 @@ class TestBridgeAsioPresent(unittest.TestCase):
 
 
 class TestAsioUsableDevice(unittest.TestCase):
-    """``devices.asio_usable_device``：零出声探测出一台真正可用的 ASIO 设备。"""
+    """``devices.asio_usable_device``：零出声探测 + 短开流验证（v1.8.2）。"""
 
     def _device(self, name: str, rate: float) -> "dev_mod.DeviceInfo":
         return dev_mod.DeviceInfo(
@@ -780,7 +780,9 @@ class TestAsioUsableDevice(unittest.TestCase):
             return device is good
 
         with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
-            got = dev_mod.asio_usable_device(probe=probe)
+            got = dev_mod.asio_usable_device(
+                probe=probe, open_probe=lambda *a, **k: True
+            )
         self.assertIs(got, good)
         self.assertTrue(probed, "至少要探测一次")
         self.assertTrue(
@@ -797,6 +799,174 @@ class TestAsioUsableDevice(unittest.TestCase):
 
         with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
             self.assertIsNone(dev_mod.asio_usable_device(probe=probe))
+
+    def test_open_stream_failure_rejects_device(self) -> None:
+        """v1.8.2：check 通过但**开流失败**（空壳驱动 -9985/-9999）→ 判不可用。"""
+        devices = [self._device("Realtek ASIO (空壳)", 44100.0)]
+        opened: list[tuple[str, int]] = []
+
+        def open_probe(device, rate, channels) -> bool:
+            opened.append((device.name, int(rate)))
+            raise RuntimeError("Invalid device [PaErrorCode -9985]")
+
+        with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
+            got = dev_mod.asio_usable_device(
+                probe=lambda *a, **k: True, open_probe=open_probe
+            )
+        self.assertIsNone(got, "开流失败的 ASIO 设备不许被当成可用")
+        self.assertTrue(opened, "check 通过后必须做开流验证")
+
+    def test_open_stream_success_passes(self) -> None:
+        """零出声探测 + 开流验证都通过 → 返回该设备。"""
+        devices = [self._device("TempoTec ASIO", 48000.0)]
+        rates: list[int] = []
+
+        def open_probe(device, rate, channels) -> bool:
+            rates.append(int(rate))
+            return True
+
+        with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
+            got = dev_mod.asio_usable_device(
+                probe=lambda *a, **k: True, open_probe=open_probe
+            )
+        self.assertIsNotNone(got)
+        self.assertEqual(rates, [48000], "设备默认采样率优先验证")
+
+    def test_playing_skips_open_stream(self) -> None:
+        """播放保护：正在播放（尤其 ASIO 独占）时跳过开流验证，不打断播放。"""
+        devices = [self._device("TempoTec ASIO", 44100.0)]
+        opened: list[int] = []
+
+        def open_probe(device, rate, channels) -> bool:
+            opened.append(int(rate))
+            return True
+
+        with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
+            got = dev_mod.asio_usable_device(
+                probe=lambda *a, **k: True,
+                open_probe=open_probe,
+                playing=True,
+            )
+        self.assertIsNotNone(got)
+        self.assertEqual(opened, [], "播放中绝不允许开第二条流")
+
+    def test_playing_hook_from_bridge_query(self) -> None:
+        """``set_playing_query`` 注入的钩子生效：播放中跳过开流验证。"""
+        devices = [self._device("TempoTec ASIO", 44100.0)]
+        opened: list[int] = []
+
+        def open_probe(device, rate, channels) -> bool:
+            opened.append(int(rate))
+            return True
+
+        dev_mod.set_playing_query(lambda: True)
+        try:
+            with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
+                got = dev_mod.asio_usable_device(
+                    probe=lambda *a, **k: True, open_probe=open_probe
+                )
+            self.assertIsNotNone(got)
+            self.assertEqual(opened, [], "钩子报「播放中」时不得开流")
+        finally:
+            dev_mod.set_playing_query(None)
+
+        # 钩子报「没在播」→ 开流验证照常执行
+        dev_mod.set_playing_query(lambda: False)
+        try:
+            with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
+                got = dev_mod.asio_usable_device(
+                    probe=lambda *a, **k: True, open_probe=open_probe
+                )
+            self.assertIsNotNone(got)
+            self.assertEqual(len(opened), 1)
+        finally:
+            dev_mod.set_playing_query(None)
+
+    def test_playing_hook_exception_is_tolerated(self) -> None:
+        """钩子抛异常按「未在播放」处理，不许拖垮可用性探测。"""
+        devices = [self._device("TempoTec ASIO", 44100.0)]
+
+        def boom() -> bool:
+            raise RuntimeError("状态查询炸了")
+
+        dev_mod.set_playing_query(boom)
+        try:
+            self.assertFalse(dev_mod.playback_in_progress())
+            with mock.patch.object(dev_mod, "list_output_devices", return_value=devices):
+                got = dev_mod.asio_usable_device(
+                    probe=lambda *a, **k: True, open_probe=lambda *a, **k: True
+                )
+            self.assertIsNotNone(got)
+        finally:
+            dev_mod.set_playing_query(None)
+
+    def test_default_open_probe_uses_silent_short_stream(self) -> None:
+        """默认开流验证：exclusive/int16/0.1~0.2s 静音流，start→write→stop→close。"""
+        fake_sd = SimpleNamespace(created=[])
+
+        class _Stream:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+                self.started = False
+                self.stopped = False
+                self.closed = False
+                self.written: list[object] = []
+
+            def start(self) -> None:
+                self.started = True
+
+            def write(self, data) -> None:
+                self.written.append(data)
+
+            def stop(self) -> None:
+                self.stopped = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        def factory(**kwargs) -> "_Stream":
+            stream = _Stream(**kwargs)
+            fake_sd.created.append(stream)
+            return stream
+
+        fake_sd.OutputStream = factory
+        device = self._device("TempoTec ASIO", 44100.0)
+        with mock.patch.object(dev_mod, "sounddevice", return_value=fake_sd):
+            self.assertTrue(dev_mod._asio_open_stream_ok(device, 44100, 2))
+        self.assertEqual(len(fake_sd.created), 1)
+        stream = fake_sd.created[0]
+        self.assertEqual(stream.kwargs["samplerate"], 44100)
+        self.assertEqual(stream.kwargs["channels"], 2)
+        self.assertEqual(stream.kwargs["dtype"], "int16")
+        self.assertEqual(stream.kwargs["device"], 18)
+        self.assertIsNone(stream.kwargs["extra_settings"], "ASIO 不传 WasapiSettings")
+        self.assertTrue(stream.started and stream.stopped and stream.closed)
+        self.assertEqual(len(stream.written), 1, "写入一次静音缓冲")
+        buffer = stream.written[0]
+        self.assertEqual(buffer.shape, (int(44100 * 0.15), 2), "0.1~0.2 s 静音流")
+
+    def test_default_open_probe_swallows_write_errors(self) -> None:
+        """个别驱动对极短流 write 报错：不影响「能开流」的结论。"""
+        class _Stream:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def start(self) -> None:
+                pass
+
+            def write(self, _data) -> None:
+                raise RuntimeError("write failed")
+
+            def stop(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        fake_sd = SimpleNamespace(OutputStream=_Stream)
+        device = self._device("TempoTec ASIO", 44100.0)
+        with mock.patch.object(dev_mod, "sounddevice", return_value=fake_sd):
+            self.assertTrue(dev_mod._asio_open_stream_ok(device, 44100, 2))
 
 
 if __name__ == "__main__":

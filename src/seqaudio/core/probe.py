@@ -236,9 +236,16 @@ def find_cue_for(audio_path: Path) -> Optional[Path]:
     if not cues:
         return None
     stem = audio_path.stem.lower()
+    # 多 FILE CUE（每轨一个文件的索引清单，EAC 分轨抓轨模式）对单曲目录
+    # 没有展开/切分价值，关联上去只会误导下游——一律不关联。
     # 同名优先
     for c in cues:
         if c.stem.lower() == stem:
+            try:
+                if cue_mod.parse_cue(c).file_count > 1:
+                    return None
+            except Exception:
+                pass
             return c
     # 其次按 CUE 内 FILE 声明匹配
     for c in cues:
@@ -246,9 +253,15 @@ def find_cue_for(audio_path: Path) -> Optional[Path]:
             sheet = cue_mod.parse_cue(c)
         except Exception:
             continue
+        if sheet.file_count > 1:
+            continue
         if sheet.audio_file and sheet.audio_file.name.lower() == audio_path.name.lower():
             return c
-    return cues[0] if len(cues) == 1 else None
+    # 不做"目录里只有一个 CUE 就挂上去"的兜底：EAC 等抓轨软件会为**整张碟**
+    # 生成一个 CUE（FILE 行指向第一首单曲），单曲目录里配上它就会让每首
+    # 单曲都被塞进 19 轨的整碟 CUE，展开后 19 首变 361 首（v1.8.2 用户实测
+    # KuschelRock vol.23 CD1）。CUE 必须点名指向这个音频文件才关联。
+    return None
 
 
 def _codec_is_lossless(codec: str) -> bool:
@@ -521,7 +534,29 @@ def expand_cue_tracks(tracks: list[Track]) -> list[Track]:
         if cue is None or len(cue.tracks) <= 1:
             out.append(track)
             continue
-        cue_mod.fill_durations(cue, track.info.duration or 0.0)
+        # 多 FILE CUE = 「每轨一个文件」的索引清单（EAC 分轨抓轨模式）：
+        # 文件本身就是单曲，FILE 行还各不相同（audio_file 只剩最后一条），
+        # 再展开只会把一首歌复制成 N 行（实测 19 首变 361 首）。原样保留。
+        if cue.file_count > 1:
+            track.note(
+                f"CUE 含 {cue.file_count} 个 FILE（每轨一文件的索引清单），"
+                "按单曲保留（不展开）"
+            )
+            out.append(track)
+            continue
+        # CUE 覆盖时长必须与音频实际时长相符：抓轨软件有时会把整碟 CUE 的
+        # FILE 行指向第一首单曲，末轨起点远超单曲时长——这种 CUE 展开只会
+        # 炮制出大量不存在的「分轨」（实测 19 首变 361 首），按单曲原样保留。
+        duration = track.info.duration or 0.0
+        last_start_sec = (cue.tracks[-1].start_ms or 0) / 1000.0
+        if duration > 0 and last_start_sec > duration + 1.0:
+            track.note(
+                f"CUE 末轨起点 {last_start_sec:.0f}s 超出音频时长 {duration:.0f}s，"
+                "判定为不匹配，按单曲保留"
+            )
+            out.append(track)
+            continue
+        cue_mod.fill_durations(cue, duration)
         total = len(cue.tracks)
         for index, entry in enumerate(cue.tracks):
             title = entry.title or f"Track {entry.number:02d}"

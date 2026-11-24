@@ -65,6 +65,7 @@ def parse_cue(path: Path | str) -> CueSheet:
     current: Optional[CueTrack] = None
     pending_track_title = ""
     file_name = ""
+    file_count = 0
     global_performer_seen = False
 
     for raw_line in text.splitlines():
@@ -100,6 +101,7 @@ def parse_cue(path: Path | str) -> CueSheet:
                 current.performer = value
         elif keyword == "FILE":
             file_name = _unquote(rest.rsplit(" ", 1)[0] if rest.upper().endswith("WAVE") else rest)
+            file_count += 1
         elif keyword == "TRACK":
             parts = rest.split()
             if not parts:
@@ -139,6 +141,7 @@ def parse_cue(path: Path | str) -> CueSheet:
     sheet.title = album_title
     sheet.album = album_title
     sheet.performer = album_performer
+    sheet.file_count = file_count
 
     if file_name:
         candidate = (path.parent / file_name).resolve()

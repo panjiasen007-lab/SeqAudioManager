@@ -12,7 +12,10 @@
 * 霞鹜文楷 LXGW WenKai — SIL Open Font License 1.1
 * 得意黑 Smiley Sans — SIL Open Font License 1.1
 * Inter — SIL Open Font License 1.1
+* IBM Plex Sans — SIL Open Font License 1.1
 * JetBrains Mono — SIL Open Font License 1.1
+* Fira Code — SIL Open Font License 1.1
+* Cascadia Code — SIL Open Font License 1.1
 
 全部允许随软件分发与商用，唯一要求是保留授权声明（见 ``assets/fonts/OFL-*.txt``）。
 
@@ -41,32 +44,20 @@ class FontChoice:
     cjk: bool = True
 
 
-#: 20 款随包开源字体：5 款中文字体 + 10 款西文界面字体 + 5 款等宽字体。
-#: 西文字体不含中文字形，QSS/字体族会自动回退到 Noto Sans SC。
+#: 8 款随包开源字体（v1.8.2 起精简）：5 款界面字体（2 款中文 + 3 款西文）
+#: + 3 款等宽字体。西文字体不含中文字形，QSS/字体族会自动回退到 Noto Sans SC。
 UI_CHOICES: tuple[FontChoice, ...] = (
     FontChoice("noto", "思源黑体 / Noto Sans SC", "Noto Sans SC", "中文无衬线"),
     FontChoice("wenkai", "霞鹜文楷", "LXGW WenKai", "中文楷体"),
     FontChoice("smiley", "得意黑", "Smiley Sans", "中文展示"),
-    FontChoice("mashan", "马善政毛笔楷书", "Ma Shan Zheng", "中文书法"),
-    FontChoice("zcool_qk", "站酷庆科黄油体", "ZCOOL QingKe HuangYou", "中文展示"),
     FontChoice("inter", "Inter", "Inter", "UI", cjk=False),
     FontChoice("plex_sans", "IBM Plex Sans", "IBM Plex Sans", "UI", cjk=False),
-    FontChoice("source_sans", "Source Sans 3", "Source Sans 3", "UI", cjk=False),
-    FontChoice("fira_sans", "Fira Sans", "Fira Sans", "UI", cjk=False),
-    FontChoice("public_sans", "Public Sans", "Public Sans", "UI", cjk=False),
-    FontChoice("manrope", "Manrope", "Manrope", "UI", cjk=False),
-    FontChoice("work_sans", "Work Sans", "Work Sans", "UI", cjk=False),
-    FontChoice("rubik", "Rubik", "Rubik", "UI", cjk=False),
-    FontChoice("lato", "Lato", "Lato", "UI", cjk=False),
-    FontChoice("noto_sans", "Noto Sans", "Noto Sans", "UI", cjk=False),
 )
 
 #: 可选的等宽字体（数据列/路径/规格）。
 MONO_CHOICES: tuple[FontChoice, ...] = (
     FontChoice("jetbrains", "JetBrains Mono", "JetBrains Mono", "Mono", cjk=False),
     FontChoice("fira_code", "Fira Code", "Fira Code", "Mono ligatures", cjk=False),
-    FontChoice("plex_mono", "IBM Plex Mono", "IBM Plex Mono", "Mono", cjk=False),
-    FontChoice("source_code_pro", "Source Code Pro", "Source Code Pro", "Mono", cjk=False),
     FontChoice("cascadia", "Cascadia Code", "Cascadia Code", "Mono ligatures", cjk=False),
 )
 

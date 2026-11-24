@@ -23,9 +23,10 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRectF,
     Qt,
+    QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractSlider,
@@ -51,6 +52,16 @@ LYRIC_LINES = 3
 OPACITY_MIN = 10
 OPACITY_MAX = 100
 OPACITY_DEFAULT = 80
+
+# ---- 左上角旋转封面（v1.8.2）----
+#: 转盘直径（px）。34~38 px 是标题行在不挤压按钮/标题截断前提下放得下的尺寸。
+SPIN_COVER_SIZE = 36
+#: 匀速旋转角速度（度/秒）。约 4 s 一圈：能看出在转，又不晃眼。
+SPIN_SPEED_DPS = 90.0
+#: 旋转定时器周期（ms，≈30 fps）。只重绘一个 36 px 的小控件，开销可忽略。
+SPIN_TICK_MS = 33
+#: 封面图占盘面的直径比例（黑胶盘露出一圈纹理环）。
+SPIN_COVER_RATIO = 0.66
 
 MODES = ("sequential", "shuffle", "repeat_one", "repeat_all")
 _MODE_ICON = {
@@ -155,6 +166,150 @@ class _Card(QFrame):
         painter.drawPath(path)
 
 
+class _SpinCover(QWidget):
+    """黑胶唱片样式的旋转封面（迷你条标题行最左侧，v1.8.2）。
+
+    行为
+    ----
+    * 深色圆盘 + 主题色细环纹 + 中心孔；盘面中央叠当前曲目封面图。
+    * 播放中匀速旋转；暂停/停止/无曲目时**缓停**（角速度逐拍衰减到 0，
+      不瞬间冻结）；拿到新曲目重新起转时同样渐入。
+    * 拿不到封面（无曲目/无内嵌图）时画默认唱片纹理——环纹是对称的，另加
+      一枚随盘旋转的高亮标记点，让"在转"即使无封面也看得见。
+    * 窗口隐藏时停表（``suspend``），重新显示且在播放时恢复（``resume``），
+      避免不可见时白白重绘。
+
+    性能：QTimer 驱动 ``update()`` 重绘一个 36 px 控件，≈30 fps，开销可忽略。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(SPIN_COVER_SIZE, SPIN_COVER_SIZE)
+        self._angle = 0.0            # 当前旋转角（度）
+        self._speed = 0.0            # 当前角速度（度/秒），缓停/渐起都靠它
+        self._target_speed = 0.0     # 目标角速度：播放中 = SPIN_SPEED_DPS，否则 0
+        self._pixmap: Optional[QPixmap] = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(SPIN_TICK_MS)
+        self._timer.setTimerType(Qt.CoarseTimer)
+        self._timer.timeout.connect(self._tick)
+
+    # ------------------------------------------------------------ 数据
+
+    def set_cover(self, data: Optional[bytes | bytearray]) -> None:
+        """用当前曲目的封面字节（内嵌图）更新盘面；拿不到就画默认纹理。"""
+        pixmap = QPixmap()
+        if data and isinstance(data, (bytes, bytearray)) and pixmap.loadFromData(bytes(data)):
+            self._pixmap = pixmap
+        else:
+            self._pixmap = None
+        self.update()
+
+    def set_spinning(self, spinning: bool) -> None:
+        """播放态切换：``True`` 渐入匀速旋转，``False`` 缓停。"""
+        self._target_speed = SPIN_SPEED_DPS if spinning else 0.0
+        if spinning:
+            self.resume()
+        else:
+            self._maybe_stop_timer()
+
+    def suspend(self) -> None:
+        """窗口隐藏时停表（不清角度，恢复时从原角度继续）。"""
+        self._timer.stop()
+
+    def resume(self) -> None:
+        """需要转动时恢复定时器（正在旋转或刚切到播放态）。"""
+        if self._target_speed > 0.0 and not self._timer.isActive():
+            self._timer.start()
+
+    # ------------------------------------------------------------ 动画
+
+    def _tick(self) -> None:
+        # 指数趋近目标速度：起转渐入、停止渐出（"缓停"，不瞬间冻结）
+        self._speed += (self._target_speed - self._speed) * 0.22
+        if self._target_speed <= 0.0 and abs(self._speed) < 1.0:
+            self._speed = 0.0
+            self._timer.stop()
+            if abs(self._angle - round(self._angle)) < 360.0:
+                self.update()
+            return
+        self._angle = (self._angle + self._speed * (SPIN_TICK_MS / 1000.0)) % 360.0
+        self.update()
+
+    def _maybe_stop_timer(self) -> None:
+        """目标速度为 0 且已基本停转时停表；仍在滑行则让 ``_tick`` 收尾。"""
+        if self._target_speed <= 0.0 and abs(self._speed) < 1.0:
+            self._speed = 0.0
+            self._timer.stop()
+
+    # ------------------------------------------------------------ 绘制
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        side = float(min(self.width(), self.height()))
+        radius = side / 2.0 - 0.5
+        center = QPointF(self.width() / 2.0, self.height() / 2.0)
+
+        # ---- 盘体：深色圆盘 + 边缘描线 ----
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(theme.BG_BASE))
+        painter.drawEllipse(center, radius, radius)
+        painter.setPen(QPen(QColor(theme.LINE), 1.0))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(center, radius - 0.5, radius - 0.5)
+
+        painter.save()
+        painter.translate(center)
+        painter.rotate(self._angle)
+
+        # ---- 环纹：两圈主题色细环（黑胶沟槽的示意）----
+        groove_color = QColor(theme.ACCENT)
+        groove_color.setAlpha(70)
+        groove = QPen(groove_color)
+        groove.setWidthF(1.0)
+        painter.setPen(groove)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPointF(0.0, 0.0), radius * 0.80, radius * 0.80)
+        painter.drawEllipse(QPointF(0.0, 0.0), radius * 0.60, radius * 0.60)
+
+        # ---- 盘面中央的封面（随盘旋转）----
+        cover_radius = radius * SPIN_COVER_RATIO
+        if self._pixmap is not None and not self._pixmap.isNull():
+            clip = QPainterPath()
+            clip.addEllipse(QPointF(0.0, 0.0), cover_radius, cover_radius)
+            painter.setClipping(True)
+            painter.setClipPath(clip)
+            source = QRectF(self._pixmap.rect())
+            target = QRectF(-cover_radius, -cover_radius, cover_radius * 2.0, cover_radius * 2.0)
+            painter.drawPixmap(target, self._pixmap, source)
+            painter.setClipping(False)
+            # 封面外缘压一圈细环，和盘面区分
+            painter.setPen(QPen(QColor(theme.LINE), 1.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPointF(0.0, 0.0), cover_radius, cover_radius)
+        else:
+            # 默认唱片纹理：中心标签区 + 一枚随盘旋转的高亮标记点
+            painter.setPen(Qt.NoPen)
+            label_color = QColor(theme.SURFACE_ACTIVE)
+            painter.setBrush(label_color)
+            painter.drawEllipse(QPointF(0.0, 0.0), cover_radius, cover_radius)
+            marker = QColor(theme.ACCENT)
+            marker.setAlpha(200)
+            painter.setBrush(marker)
+            painter.drawEllipse(
+                QPointF(radius * 0.72, 0.0), max(1.2, radius * 0.09), max(1.2, radius * 0.09)
+            )
+        painter.restore()
+
+        # ---- 中心孔 ----
+        hole = QColor(theme.BG_BASE)
+        painter.setPen(QPen(QColor(theme.LINE), 1.0))
+        painter.setBrush(hole)
+        hole_r = max(2.0, radius * 0.14)
+        painter.drawEllipse(center, hole_r, hole_r)
+
+
 class MiniPlayerWindow(QWidget):
     """迷你形态：标题栏 + 进度 + 全套播放控制 + 三行歌词 + 透明度。"""
 
@@ -241,6 +396,9 @@ class MiniPlayerWindow(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 0, 0)
         row.setSpacing(6)
+        # 左上角旋转封面（v1.8.2）：黑胶转盘，播放中匀速旋转
+        self.spin_cover = _SpinCover()
+        row.addWidget(self.spin_cover, 0, Qt.AlignVCenter)
         self.title_label = QLabel(i18n.tr_text("未在播放"))
         self.title_label.setObjectName("miniTitle")
         font = QFont(self.title_label.font())
@@ -400,10 +558,12 @@ class MiniPlayerWindow(QWidget):
 
     def set_state(self, state: str) -> None:
         self._state = str(state or "IDLE")
-        playing = self._state == "PLAYING"
+        playing = self._state in ("PLAYING", "LOADING")
         self.btn_play.icon_key = "pause" if playing else "play"
         self.btn_play.setToolTip(i18n.tr("ui_mini_pause" if playing else "ui_mini_play"))
         self.btn_play.update()
+        # 转盘跟随播放态：播放中匀速旋转，暂停/停止/无曲目缓停（v1.8.2）
+        self.spin_cover.set_spinning(playing)
         self._refresh_enabled()
 
     def set_track(self, track: Optional[dict]) -> None:
@@ -422,11 +582,16 @@ class MiniPlayerWindow(QWidget):
             if duration_ms <= 0:
                 duration_ms = int(round(float(self._track.get("duration") or 0.0) * 1000.0))
             self._total_ms = max(0, duration_ms)
+            # 转盘封面：主窗口在 trackChanged 里已把内嵌封面字节放进 "cover"
+            # （与 PlayerBar 同源同拍），拿不到就画默认唱片纹理
+            cover = self._track.get("cover")
+            self.spin_cover.set_cover(cover if isinstance(cover, (bytes, bytearray)) else None)
         else:
             self.title_label.setText(i18n.tr_text("未在播放"))
             self.title_label.setToolTip("")
             self._total_ms = 0
             self._position_ms = 0
+            self.spin_cover.set_cover(None)
         self._refresh_progress()
         self._refresh_enabled()
 
@@ -618,10 +783,14 @@ class MiniPlayerWindow(QWidget):
             pass
         if self._glow.state() != QPropertyAnimation.Running:
             self._glow.start()
+        # 转盘：窗口重新可见且在播放时恢复旋转（隐藏期间定时器已停）
+        self.spin_cover.resume()
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._glow.stop()
         self._shadow.setBlurRadius(18.0)
+        # 转盘停表：窗口不可见时不必重绘（恢复显示时按播放态续转）
+        self.spin_cover.suspend()
         super().hideEvent(event)
 
     # ------------------------------------------------------------ 拖动
@@ -666,4 +835,7 @@ __all__ = [
     "OPACITY_MIN",
     "OPACITY_MAX",
     "OPACITY_DEFAULT",
+    "SPIN_COVER_SIZE",
+    "SPIN_SPEED_DPS",
+    "SPIN_TICK_MS",
 ]

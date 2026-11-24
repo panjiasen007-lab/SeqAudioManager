@@ -5,6 +5,11 @@
 * **探测不许出声**：判定「设备支持某采样率」只用 ``sd.check_output_settings()``
   （内部是 ``Pa_IsFormatSupported``），它不下发任何音频数据；绝不为了探测而
   ``start()`` 一条流。
+  **唯一例外（v1.8.2）**：ASIO 可用性验证（``_asio_open_stream_ok``）。空壳
+  ASIO 驱动（驱动残留但硬件不可用）会骗过 ``check_output_settings``——它只
+  验证参数组合是否被驱动**声明**支持，不真正开流。所以 ASIO 必须再开一条
+  **静音**短流才能识别真伪：缓冲是全零样本，依旧不出声；但"开流"毕竟不是
+  只读查询，因此只在**没有播放进行时**才允许执行（见 ``set_playing_query``）。
 * **异常定义放这里而不是 output.py**：``output.py`` 需要 import ``devices``，
   若异常反过来定义在 ``output.py`` 就成了循环导入。``output.py`` 会原样
   再导出这三个名字，对外用起来和架构文档的写法一致。
@@ -98,29 +103,162 @@ def asio_switch_disabled() -> bool:
     return bool(asio_unavailable_reason())
 
 
-def asio_usable_device(probe=None) -> Optional["DeviceInfo"]:
-    """找一台「零出声探测可通过」的 ASIO 设备；一台都没有返回 ``None``。
+# ---------------------------------------------------------------- 播放状态钩子
 
-    为什么只有"枚举到设备"还不够（v1.8.1 用户反馈）：ASIO 驱动装了 ≠ 能用——
-    驱动可能被其它程序独占、可能不支持任何当前参数，枚举照样把它列出来，
-    用户选上去就是连环 ``-9999/-9985``。这里对每台 ASIO 设备做
-    ``check_output_settings``（零出声、不开流、不打断播放），设备声明默认率
-    优先，44.1k/48k 兜底；**一台通过就返回那一台**，全失败返回 ``None``。
+#: 「引擎是否正在播放」的查询钩子（由 ``PlayerBridge`` 启动时注入）。
+#:
+#: 为什么放模块级函数指针而不是参数：``asio_usable_device`` 的调用点分散在
+#: 桥接层与设置面板，把"是否在播"逐层传下去会让所有调用方都背上这个参数；
+#: 而 ``devices`` 层（player 包）**不许** import UI/引擎模块（架构 2.3），
+#: 所以由 UI 层在创建桥接时把一个无参可调用对象注册进来，本模块只保存并
+#: 调用它——依赖方向仍然是 UI → player，不出现反向导入。
+_PLAYING_QUERY: Optional[Callable[[], bool]] = None
+
+
+def set_playing_query(query: Optional[Callable[[], bool]]) -> None:
+    """注册/清除「是否正在播放」查询（``query() -> bool``；``None`` 清除）。
+
+    传入的 callable 必须线程安全且不抛异常（内部实现自己兜底）。
+    """
+    global _PLAYING_QUERY
+    _PLAYING_QUERY = query
+
+
+def playback_in_progress() -> bool:
+    """当前是否有播放正在进行（钩子未注册或查询失败时按"没有"处理）。"""
+    query = _PLAYING_QUERY
+    if query is None:
+        return False
+    try:
+        return bool(query())
+    except Exception:  # noqa: BLE001 - 状态查询失败不能拖垮探测流程
+        log.debug("播放状态查询钩子抛异常，按「未在播放」处理", exc_info=True)
+        return False
+
+
+# ---------------------------------------------------------------- ASIO 可用性
+
+
+#: ASIO 开流验证的静音流时长（秒）。0.1~0.2 s 足以让驱动暴露"空壳"
+#: （开流即抛 -9985/-9999），又不至于被用户察觉任何声音或延迟。
+ASIO_OPEN_PROBE_SECONDS = 0.15
+#: 开流验证的样本格式。选 int16：候选采样率下所有 ASIO 驱动都必然支持 16bit
+#: 交错立体声（这是 ASIO 规范的最小公约数），不会把"驱动不支持 int16"误判
+#: 成"硬件不可用"。
+ASIO_OPEN_PROBE_DTYPE = "int16"
+#: 开流验证的声道数：与 ``asio_usable_device`` 的探测口径一致（立体声）。
+ASIO_OPEN_PROBE_CHANNELS = 2
+
+
+def _asio_open_stream_ok(
+    device: DeviceInfo,
+    rate: int,
+    channels: int = ASIO_OPEN_PROBE_CHANNELS,
+    duration_sec: float = ASIO_OPEN_PROBE_SECONDS,
+) -> bool:
+    """对一台 ASIO 设备做「零出声短开流」验证；能开并正常关闭才返回 ``True``。
+
+    为什么 ``check_output_settings`` 不够（v1.8.2 用户实测）：它只问驱动
+    "这个参数组合你**声明**支持吗"（``Pa_IsFormatSupported``），而空壳 ASIO
+    驱动（卸载残留/硬件拔除后驱动还在）对任何参数都会答"支持"——枚举得到、
+    探测通过、一开流就 ``-9985``（设备被占用）/``-9999``（无效参数）。
+
+    这里真开一条 ``duration_sec`` 秒的**全零静音**输出流：构造 + ``start()``
+    不抛异常、``stop()``/``close()`` 正常收尾，才认定设备真正可用。任何一步
+    抛异常都向上抛给调用方（调用方把该设备判为不可用）。
+    """
+    import numpy as np  # 局部导入：只有真开流验证需要造静音缓冲
+
+    sd = sounddevice()
+    frames = max(1, int(int(rate) * float(duration_sec)))
+    silence = np.zeros((frames, int(channels)), dtype=ASIO_OPEN_PROBE_DTYPE)
+    # ASIO 没有 WasapiSettings（extra_settings_for 对非 WASAPI 返回 None），
+    # 这里显式传 None，语义与 supports_rate 的 ASIO 分支一致。
+    stream = sd.OutputStream(
+        samplerate=int(rate),
+        channels=int(channels),
+        dtype=ASIO_OPEN_PROBE_DTYPE,
+        device=int(device.index),
+        extra_settings=None,
+    )
+    try:
+        stream.start()
+        # 写入静音缓冲；个别驱动对极短流的 write 报错不影响"能开流"这一结论，
+        # 开流本身才是验证目标，所以写失败只吞掉不作为判据。
+        try:
+            stream.write(silence)
+        except Exception:  # noqa: BLE001
+            log.debug("ASIO 开流验证写入静音缓冲失败（不影响结论）", exc_info=True)
+    finally:
+        try:
+            stream.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
+def asio_usable_device(
+    probe=None,
+    *,
+    open_probe=None,
+    playing: Optional[bool] = None,
+) -> Optional["DeviceInfo"]:
+    """找一台「零出声探测 + 短开流验证」都通过的 ASIO 设备；全失败返回 ``None``。
+
+    两级验证（v1.8.2 起）
+    --------------------
+    1. **枚举 + ``check_output_settings``**（零出声、不开流）：设备声明默认率
+       优先，44.1k/48k 兜底；这一级过滤掉参数声明都不支持的设备。
+    2. **静音短开流**（``_asio_open_stream_ok``）：exclusive + int16 + 候选率
+       开一条 0.1~0.2 s 的静音流，能开并正常关闭才算真可用。空壳驱动会在
+       这一级暴露（-9985/-9999），判该设备不可用，换下一台。
+
+    冲突保护：引擎正在播放时（尤其正在用 ASIO 独占播放），**跳过开流验证**、
+    只做第 1 级判断——此时再开第二条流要么打断播放、要么因设备被自己独占而
+    吃 -9985，把好设备误判成坏设备。播放状态优先取参数 ``playing``（测试用），
+    缺省查 ``playback_in_progress()``（由 ``PlayerBridge`` 注入）。
+
+    Args:
+        probe: 注入的零出声探测函数 ``(device, rate, channels, mode) -> bool``。
+        open_probe: 注入的开流验证函数 ``(device, rate, channels) -> bool``；
+            测试用 Fake 替换，避免真开声卡。
+        playing: 显式指定"是否正在播放"（``True`` 跳过开流验证）；``None``
+            表示由播放状态钩子决定。
+
+    Returns:
+        第一台两级验证都通过的设备；一台都没有则 ``None``。
     """
     devices = list_output_devices("asio")
     if not devices:
         return None
     check = probe or _check_rate
+    verify_open = open_probe or _asio_open_stream_ok
+    skip_open = playback_in_progress() if playing is None else bool(playing)
     for device in devices:
         base = int(device.rate or 0)
         for rate in dict.fromkeys((base, 44100, 48000)):  # 去重保序
             if rate <= 0:
                 continue
             try:
-                if check(device, rate, 2, OutputMode.EXCLUSIVE):
-                    return device
+                if not check(device, rate, 2, OutputMode.EXCLUSIVE):
+                    continue
             except Exception:  # noqa: BLE001 - 单台探测异常换下一台
                 continue
+            if skip_open:
+                # 正在播放：绝不开第二条流，零出声探测通过即认定可用
+                return device
+            try:
+                if verify_open(device, rate, 2):
+                    return device
+                # 开流被拒（未抛异常的假阴性）：换下一个候选率再试
+            except Exception:  # noqa: BLE001 - 开流失败（-9985/-9999 等）
+                # 这些都是**设备级**失败（驱动加载不了/被独占/设备无效），
+                # 换个采样率不会变好 → 直接换下一台，别再戳这台驱动
+                break
     return None
 
 
@@ -1460,6 +1598,8 @@ __all__ = [
     "sounddevice",
     "asio_unavailable_reason",
     "asio_switch_disabled",
+    "set_playing_query",
+    "playback_in_progress",
     "backend_key_for_hostapi",
     "resolve_backend",
     "backend_default_output_index",

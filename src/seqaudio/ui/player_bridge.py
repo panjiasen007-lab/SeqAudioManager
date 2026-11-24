@@ -108,6 +108,15 @@ class PlayerBridge(QObject):
 
         self._engine.on_error = None  # 统一走 on_event，避免双份回调
         self._last_busy = bool(getattr(self._engine, "busy", False))
+        # 把「是否正在播放」注册给 devices 层：ASIO 可用性探测在播放中必须
+        # 跳过开流验证（避免打断播放/被 -9985 误判）。devices 层不依赖 UI，
+        # 依赖方向是本桥 → devices，符合架构 2.3。
+        try:
+            from ..player import devices as _player_devices
+
+            _player_devices.set_playing_query(self._engine_playing)
+        except Exception:  # noqa: BLE001 - 注册失败只影响探测精度，不影响播放
+            log.debug("注册播放状态查询钩子失败", exc_info=True)
 
     # ------------------------------------------------------------ 只读
 
@@ -122,6 +131,17 @@ class PlayerBridge(QObject):
 
     def state(self) -> str:
         return str(getattr(self._engine.state, "value", self._engine.state))
+
+    def _engine_playing(self) -> bool:
+        """「是否正在播放」钩子（devices 层的 ASIO 开流验证保护用）。
+
+        ``LOADING`` 也算：起播过程中输出流正在建立，此时再开一条 ASIO 探测流
+        同样可能与引擎争用设备。
+        """
+        try:
+            return self.state() in ("PLAYING", "LOADING")
+        except Exception:  # noqa: BLE001 - 引擎状态异常时按"没在播"处理
+            return False
 
     def last_snapshot(self) -> dict[str, Any]:
         """最近一次 ``poll()`` 的完整快照（信号面板/队列面板复用，避免重复计算）。"""
@@ -166,6 +186,14 @@ class PlayerBridge(QObject):
             self._timer.stop()
             self._timer.timeout.disconnect(self._poll)
         except (RuntimeError, TypeError):
+            pass
+        # 先摘掉播放状态钩子再关引擎：引擎关闭后状态查询已无意义，
+        # 留着只会让 devices 层引用一个即将失效的桥接对象。
+        try:
+            from ..player import devices as _player_devices
+
+            _player_devices.set_playing_query(None)
+        except Exception:  # noqa: BLE001
             pass
         try:
             self._engine.shutdown()
@@ -675,13 +703,18 @@ class PlayerBridge(QObject):
         return self.list_output_devices(key or None)
 
     def asio_present(self, refresh: bool = False) -> bool:
-        """当前环境是否**真的**能用 ASIO（构建里有 + 至少一台驱动）。
+        """当前环境是否**真的**能用 ASIO（构建里有 + 至少一台驱动真开得出来）。
 
         为什么不直接返回 ``backend_present("asio")``：
         加载 ASIO 版 PortAudio 之后，hostapi 列表里**恒定**有 "ASIO"（哪怕一台
         ASIO 驱动都没装）。只看 hostapi 会把下拉项点亮，展开却是空列表 ——
-        用户只会以为程序坏了。所以这里要求「hostapi 在 **且** 至少一台 ASIO
-        输出设备」，两条都满足才允许选择。
+        用户只会以为程序坏了。所以这里要求三道门：① 构建里有 ASIO hostapi；
+        ② 至少一台 ASIO 输出设备；③ 该设备**零出声探测 + 静音短开流**都通过
+        （v1.8.2 起，见 ``devices.asio_usable_device``）。空壳 ASIO 驱动
+        （驱动残留但硬件不可用）会在开流一级被拦下，不再误报为可用。
+
+        播放保护：引擎正在播放时 ``asio_usable_device`` 自动跳过开流验证
+        （只做零出声探测），不会打断当前播放。
 
         Args:
             refresh: 忽略缓存重新查询（设备表变化后由热插拔轮询调用）。

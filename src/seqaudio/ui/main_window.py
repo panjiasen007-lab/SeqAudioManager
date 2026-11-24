@@ -2663,7 +2663,7 @@ class MainWindow(QMainWindow):
         走 Windows 回收站而不是直接删；正在播放的文件拒绝删除（PortAudio
         还握着句柄，删了播放立刻炸且不可恢复）。
         """
-        from .core.quarantine import send_to_recycle_bin
+        from ..core.quarantine import send_to_recycle_bin
 
         tracks = self._selected_tracks()
         if not tracks:

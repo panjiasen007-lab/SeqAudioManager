@@ -428,14 +428,6 @@ QLabel#hint {{ color: {p.fg_mute}; font-size: 11px; }}
 QLabel#strong {{ color: {p.fg}; font-weight: 600; }}
 QLabel#warnHint {{ color: {p.warn}; font-size: 11px; }}
 QLabel#mono {{ font-family: {mono_font}; color: {p.fg_dim}; }}
-QLabel#fontPreview {{
-    padding: 8px 10px; border: 1px solid {p.line_soft}; border-radius: 10px;
-    color: {p.fg_dim};
-}}
-QLabel#monoPreview {{
-    padding: 6px 10px; border: 1px solid {p.line_soft}; border-radius: 10px;
-    color: {p.fg_mute};
-}}
 QPushButton#smallGhost {{
     background: {_rgba(p.fg, 0.03)};
     border: 1px solid {_rgba(p.line, 0.80)};

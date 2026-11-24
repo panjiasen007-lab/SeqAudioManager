@@ -299,6 +299,10 @@ class CueSheet:
     genre: str = ""
     date: str = ""
     tracks: list[CueTrack] = field(default_factory=list)
+    #: CUE 里 FILE 行的条数。1 = 整轨文件+索引（可展开分轨）；
+    #: >1 = 「每轨一个文件」的索引清单（EAC 分轨抓轨模式），文件本身就是
+    #: 单曲，再展开只会把一首歌复制成 N 行（v1.8.2 KuschelRock 19→361 实测）。
+    file_count: int = 0
     encoding_used: str = ""
     warnings: list[str] = field(default_factory=list)
     #: 来自 SACD ISO 光盘镜像（而不是 .cue 文件）

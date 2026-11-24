@@ -1206,9 +1206,9 @@ def _bridge_snapshot(*, source: str, codec: str, rate: int) -> dict[str, Any]:
 
 
 class TestVersionConsistency(unittest.TestCase):
-    """四处版本号必须一致为 1.8.1（PRD P0-4）。"""
+    """四处版本号必须一致为 1.8.2（PRD P0-4）。"""
 
-    EXPECTED = "1.8.1"
+    EXPECTED = "1.8.2"
 
     def test_pyproject(self) -> None:
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -1230,7 +1230,7 @@ class TestVersionConsistency(unittest.TestCase):
         self.assertIsNotNone(payload, "installer/_meta.py 缺 PAYLOAD")
         self.assertEqual(version.group(1), self.EXPECTED)
         self.assertIn(
-            f"v{self.EXPECTED}", payload.group(1), "PAYLOAD 文件名必须带 v1.8.1"
+            f"v{self.EXPECTED}", payload.group(1), "PAYLOAD 文件名必须带版本号"
         )
 
 
