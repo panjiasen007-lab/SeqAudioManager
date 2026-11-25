@@ -229,9 +229,10 @@ export class Scanner {
     const out: string[] = [];
     for (const root of roots) {
       try {
+        const base = root.replace(/\/+$/, '');
         const rels = fs.listFileSync(root, { recursion: true, filter: { suffix: AUDIO_EXTS } });
         for (const rel of rels) {
-          out.push(root.endsWith('/') ? root + rel : `${root}/${rel}`);
+          out.push(`${base}/${rel.replace(/^\/+/, '')}`);
         }
       } catch (e) {
         // 单个根目录不可读不影响其他根目录
@@ -244,6 +245,8 @@ export class Scanner {
     onProgress: (done: number, total: number, cur: string) => void): Promise<ScanResult> {
     const res = new ScanResult();
     const t0 = Date.now();
+    // 清理历史遗留的双斜杠路径（会被本次扫描以规范路径重新入库）
+    await Db.purgeBadPaths();
     const files = Scanner.collectFiles(roots);
     res.files = files.length;
     const known = await Db.pathMtimes();

@@ -22,6 +22,7 @@ struct Index {
   @State keyword: string = '';
   @State stats: Stats = new Stats();
   @State scanning: boolean = false;
+  private rowClickGuard: number = 0;
   @State scanText: string = '';
   @State toast: string = '';
   @State roots: string[] = [];
@@ -100,7 +101,8 @@ struct Index {
       } catch (e) {
         // 目录已存在：继续检查缺失的示例文件
       }
-      const names: string[] = ['01_yehangxing.flac', '02_chenguang.mp3', '03_sine_48k.wav', 'sample.cue'];
+      const names: string[] = ['01_yehangxing.flac', '02_chenguang.mp3', '03_sine_48k.wav',
+        '04_sine24_96k.wav', 'sample.cue'];
       let copied = 0;
       for (const n of names) {
         try {
@@ -372,12 +374,20 @@ struct Index {
         .backgroundColor('#26221A')
         .fontColor(ACCENT)
         .onClick(() => {
+          // 子控件点击会冒泡到整行，用时间戳抑制同一次点击的播放
+          this.rowClickGuard = Date.now();
           this.openEditor(t);
         })
     }
       .width('100%')
       .padding({ top: 9, bottom: 9, left: 8, right: 8 })
       .borderRadius(8)
+      .onClick(() => {
+        if (Date.now() - this.rowClickGuard < 350) {
+          return;
+        }
+        this.playAt(i);
+      })
   }
 
   build() {

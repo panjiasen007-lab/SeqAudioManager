@@ -2,6 +2,7 @@ import media from '@ohos.multimedia.media';
 import fs from '@ohos.file.fs';
 import { BusinessError } from '@ohos.base';
 import { Track } from '../model/Track';
+import { NativePlayer } from './NativePlayer';
 
 export enum PlayMode {
   ORDER = 0,
@@ -75,6 +76,13 @@ export class PlayerEngine {
   private pendingSeekMs: number = 0;
   private cueEndHandled: boolean = false;
 
+  // 原生内核（FFmpeg + OH_AudioRenderer）状态
+  private nativeMode: boolean = false;
+  private nativeEndMs: number = 0;
+  private tickTimer: number = -1;
+  // 音频焦点被抢占时通知 UI（2=暂停 3=停止）
+  onInterrupt?: (hint: number) => void;
+
   private listeners: (() => void)[] = [];
   // 由 Index 注入：关键事件立即持久化会话（避免 PlayerEngine 与 SessionStore 循环依赖）
   onSessionDirty?: (force: boolean) => void;
@@ -130,6 +138,83 @@ export class PlayerEngine {
       return Math.max(0, end - t.cueStartMs);
     }
     return this.durationMs;
+  }
+
+  private startTick(): void {
+    this.stopTick();
+    const eng = this;
+    this.tickTimer = setInterval(() => {
+      eng.onTick();
+    }, 100);
+  }
+
+  private stopTick(): void {
+    if (this.tickTimer >= 0) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = -1;
+    }
+  }
+
+  private onTick(): void {
+    if (!this.nativeMode) {
+      return;
+    }
+    const hint = NativePlayer.takeInterrupt();
+    if (hint == 2 || hint == 3) {
+      this.playing = false;
+      this.emit();
+      if (this.onInterrupt) {
+        this.onInterrupt(hint);
+      }
+      return;
+    }
+    this.positionMs = NativePlayer.position();
+    AppStorage.setOrCreate('npPos', this.logicalPos());
+    const limit = this.nativeEndMs > 0 ? this.nativeEndMs - 120 : 0;
+    if (limit > 0 && this.positionMs >= limit && !this.cueEndHandled) {
+      this.cueEndHandled = true;
+      this.onTrackEnd();
+      return;
+    }
+    for (const l of this.listeners) {
+      try {
+        l();
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
+
+  // 原生内核对支持的格式优先接管；失败则返回 false 由 AVPlayer 兜底
+  private loadNative(physical: string, t: Track): boolean {
+    this.stopTick();
+    NativePlayer.release();
+    this.nativeMode = false;
+    if (!NativePlayer.supports(physical)) {
+      return false;
+    }
+    if (NativePlayer.open(physical) != 0) {
+      return false;
+    }
+    this.closeFd();
+    this.nativeMode = true;
+    const dur = NativePlayer.duration();
+    this.durationMs = dur > 0 ? dur : t.durationMs;
+    const startMs = Math.max(0, this.pendingSeekMs);
+    this.pendingSeekMs = 0;
+    const begin = t.isCueChild == 1 ? t.cueStartMs + startMs : startMs;
+    this.nativeEndMs = t.isCueChild == 1 && t.cueEndMs > t.cueStartMs ? t.cueEndMs : this.durationMs;
+    NativePlayer.setVolume(this.volume);
+    if (begin > 0) {
+      NativePlayer.seek(begin);
+    }
+    this.positionMs = begin;
+    this.cueEndHandled = false;
+    NativePlayer.start();
+    this.playing = true;
+    this.emit();
+    this.startTick();
+    return true;
   }
 
   private async ensurePlayer(): Promise<media.AVPlayer> {
@@ -205,10 +290,13 @@ export class PlayerEngine {
     if (!t) {
       return;
     }
+    const physical = t.isCueChild == 1 && t.cuePath != '' ? t.cuePath : t.path;
+    if (this.loadNative(physical, t)) {
+      return;
+    }
     const av = await this.ensurePlayer();
     this.closeFd();
     try {
-      const physical = t.isCueChild == 1 && t.cuePath != '' ? t.cuePath : t.path;
       const f = fs.openSync(physical, fs.OpenMode.READ_ONLY);
       this.fd = f.fd;
       this.cueEndHandled = false;
@@ -285,6 +373,17 @@ export class PlayerEngine {
       }
       return;
     }
+    if (this.nativeMode) {
+      if (this.playing) {
+        NativePlayer.pause();
+        this.playing = false;
+      } else {
+        NativePlayer.start();
+        this.playing = true;
+      }
+      this.emit();
+      return;
+    }
     const av = this.av;
     if (!av) {
       // 恢复的队列尚未加载物理文件：首次点播时加载并在 prepared 后 seek 到断点
@@ -299,10 +398,6 @@ export class PlayerEngine {
   }
 
   seek(ms: number): void {
-    const av = this.av;
-    if (!av) {
-      return;
-    }
     const cur = this.current();
     let target = ms;
     if (cur && cur.isCueChild == 1) {
@@ -313,7 +408,12 @@ export class PlayerEngine {
       target = Math.max(0, Math.min(ms, this.durationMs > 0 ? this.durationMs - 50 : ms));
     }
     this.positionMs = Math.round(target);
-    av.seek(Math.round(target), media.SeekMode.SEEK_PREV_SYNC);
+    if (this.nativeMode) {
+      this.cueEndHandled = false;
+      NativePlayer.seek(target);
+    } else if (this.av) {
+      this.av.seek(Math.round(target), media.SeekMode.SEEK_PREV_SYNC);
+    }
     this.emit();
     if (this.onSessionDirty) {
       this.onSessionDirty(true);
@@ -322,7 +422,9 @@ export class PlayerEngine {
 
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
-    if (this.av) {
+    if (this.nativeMode) {
+      NativePlayer.setVolume(this.volume);
+    } else if (this.av) {
       this.av.setVolume(this.volume);
     }
     if (this.onSessionDirty) {
@@ -379,12 +481,24 @@ export class PlayerEngine {
       this.playIndex((this.index + 1) % this.queue.length);
     } else {
       // 顺序：播完即止
+      if (this.nativeMode) {
+        NativePlayer.stop();
+        NativePlayer.release();
+        this.nativeMode = false;
+        this.stopTick();
+      }
       this.playing = false;
       this.emit();
     }
   }
 
   stop(): void {
+    this.stopTick();
+    if (this.nativeMode) {
+      NativePlayer.stop();
+      NativePlayer.release();
+      this.nativeMode = false;
+    }
     if (this.av) {
       try {
         this.av.stop();

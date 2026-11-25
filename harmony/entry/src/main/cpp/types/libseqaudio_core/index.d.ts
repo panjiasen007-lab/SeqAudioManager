@@ -1,0 +1,12 @@
+export const open: (path: string) => number;
+export const start: () => number;
+export const pause: () => number;
+export const stop: () => number;
+export const release: () => void;
+export const seek: (ms: number) => number;
+export const setVolume: (volume: number) => number;
+export const position: () => number;
+export const duration: () => number;
+export const takeInterrupt: () => number;
+export const info: () => string;
+export const isOpen: () => boolean;

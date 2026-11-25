@@ -72,6 +72,47 @@ export class Db {
     Db.store = store;
   }
 
+  // 转成 ValuesBucket（列名与表结构一致）；已有 id 时一并写入以保持主键稳定
+  private static toBucket(t: Track): relationalStore.ValuesBucket {
+    refreshSearchBlob(t);
+    const b: relationalStore.ValuesBucket = {
+      'path': t.path,
+      'file_name': t.fileName,
+      'ext': t.ext,
+      'title': t.title,
+      'artist': t.artist,
+      'album': t.album,
+      'genre': t.genre,
+      'year': t.year,
+      'track_no': t.trackNo,
+      'duration_ms': t.durationMs,
+      'sample_rate': t.sampleRate,
+      'channels': t.channels,
+      'bit_depth': t.bitDepth,
+      'bitrate_kbps': t.bitrateKbps,
+      'size_bytes': t.sizeBytes,
+      'mtime_ms': t.mtimeMs,
+      'added_at_ms': Date.now(),
+      'cue_path': t.cuePath,
+      'is_cue_child': t.isCueChild,
+      'cue_track_no': t.cueTrackNo,
+      'cue_start_ms': t.cueStartMs,
+      'cue_end_ms': t.cueEndMs,
+      'replay_gain': t.replayGain,
+      'health_status': t.healthStatus,
+      'health_detail': t.healthDetail,
+      'search_blob': t.searchBlob,
+      'lyrics': t.lyrics,
+      'cover_blob_path': t.coverBlobPath,
+      'meta_source': t.metaSource,
+      'meta_checked_at': t.metaCheckedAt
+    };
+    if (t.id > 0) {
+      b['id'] = t.id;
+    }
+    return b;
+  }
+
   private static rowToTrack(rs: relationalStore.ResultSet): Track {
     const t = emptyTrack();
     t.id = readLong(rs, 'id');
@@ -131,48 +172,54 @@ export class Db {
      health_status, health_detail, search_blob, lyrics, cover_blob_path, meta_source, meta_checked_at,
      added_at_ms`;
 
-  // 批量写入（path 唯一，冲突则更新）；返回写入条数
+  // 批量写入（path 唯一，冲突则替换）；返回实际写入条数
+  // 注意：relationalStore 的 executeSql 对超长 upsert 语句（>1KB）会报 14800021，
+  // 因此改走 batchInsert（内部使用 ON_CONFLICT_REPLACE），失败再逐条 insert 兜底。
   static async upsertTracks(tracks: Track[]): Promise<number> {
     const store = Db.store;
     if (!store || tracks.length == 0) {
       return 0;
     }
-    // 每批 30 首（900 个占位符），兼容 SQLite 变量数上限
-    const marks: string[] = [];
-    for (let k = 0; k < 30; k++) {
-      marks.push('?');
-    }
-    const sql = `INSERT INTO tracks (${Db.INSERT_COLS}) VALUES (${marks.join(',')})
-      ON CONFLICT(path) DO UPDATE SET
-       file_name=excluded.file_name, ext=excluded.ext, title=excluded.title, artist=excluded.artist,
-       album=excluded.album, genre=excluded.genre, year=excluded.year, track_no=excluded.track_no,
-       duration_ms=excluded.duration_ms, sample_rate=excluded.sample_rate, channels=excluded.channels,
-       bit_depth=excluded.bit_depth, bitrate_kbps=excluded.bitrate_kbps, size_bytes=excluded.size_bytes,
-       mtime_ms=excluded.mtime_ms, cue_path=excluded.cue_path, is_cue_child=excluded.is_cue_child,
-       cue_track_no=excluded.cue_track_no, cue_start_ms=excluded.cue_start_ms, cue_end_ms=excluded.cue_end_ms,
-       replay_gain=excluded.replay_gain, health_status=excluded.health_status,
-       health_detail=excluded.health_detail, search_blob=excluded.search_blob, lyrics=excluded.lyrics,
-       cover_blob_path=excluded.cover_blob_path, meta_source=excluded.meta_source,
-       meta_checked_at=excluded.meta_checked_at`;
+    const CHUNK = 200;
     let written = 0;
-    for (let i = 0; i < tracks.length; i += 30) {
-      const part = tracks.slice(i, i + 30);
-      const args: Array<relationalStore.ValueType> = [];
-      for (const t of part) {
-        const one = Db.argsOf(t, false);
-        for (const v of one) {
-          args.push(v);
-        }
-      }
+    for (let i = 0; i < tracks.length; i += CHUNK) {
+      const part = tracks.slice(i, i + CHUNK);
+      const buckets: relationalStore.ValuesBucket[] = part.map((t: Track) => Db.toBucket(t));
       try {
-        await store.executeSql(sql, args);
-        written += part.length;
+        const n = await store.batchInsert('tracks', buckets);
+        if (n > 0) {
+          written += n;
+          continue;
+        }
       } catch (e) {
         const err = e as BusinessError;
-        console.error(`Db.upsertTracks fail: ${err.message}`);
+        console.error(`Db.upsertTracks batchInsert fail code=${err.code} msg=${err.message}`);
+      }
+      for (const b of buckets) {
+        try {
+          await store.insert('tracks', b, relationalStore.ConflictResolution.ON_CONFLICT_REPLACE);
+          written++;
+        } catch (e2) {
+          const err2 = e2 as BusinessError;
+          console.error(`Db.upsertTrack fail code=${err2.code} msg=${err2.message} path=${b['path']}`);
+        }
       }
     }
     return written;
+  }
+
+  // 删除路径中包含双斜杠的历史脏数据（扫描会以规范路径重新写入）
+  static async purgeBadPaths(): Promise<void> {
+    const store = Db.store;
+    if (!store) {
+      return;
+    }
+    try {
+      await store.executeSql("DELETE FROM tracks WHERE path LIKE '%//%'");
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.purgeBadPaths fail: ${err.message}`);
+    }
   }
 
   // 按 id 全量更新（标签编辑/健康管理用）
