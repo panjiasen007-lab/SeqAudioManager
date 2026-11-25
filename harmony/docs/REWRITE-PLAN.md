@@ -5,7 +5,7 @@
 | 文档版本 | v1.1 |
 | 日期 | 2026-11-25 |
 | 编制 | software-seqaudio-harmony 团队：许清楚（产品经理 / PRD）、高见远（架构师 / 方案与任务分解）、齐活林（交付总监 / 汇编） |
-| 状态 | **M2 推进中** —— M1（T01–T05）已完成并推送（`harmony-v1.1.0`）；M2 已完成 T10 / T09 / T08 与 T07 预设数据层（本地提交）；T06 Native 内核因缺 arm64 FFmpeg 动态库阻塞，T07 DSP 接入随 T06 进行 |
+| 状态 | **M2 推进中** —— M1（T01–T05）已完成并推送（`harmony-v1.1.0`）；M2 已完成 T10 / T09 / T08、T07 预设数据层与 **T06 Native 内核**（自建 FFmpeg 7.1.1 交叉编译 + OH_AudioRenderer 直通，模拟器实测 16bit/44.1k 与 24bit/96k 直通）；T07 DSP 接入待做 |
 | 目标分支 | `harmony-pc`（当前基线 v1.0，提交 52f5c6a，已在 2in1 模拟器验证） |
 
 ---
@@ -198,10 +198,12 @@ flowchart TB
 | 第三方移植库（libFLAC 等）拼装 | 分格式 | 可达 | 不全 | L | 中 | 放弃（维护碎） |
 
 **FFmpeg 裁剪与合规**
-- 只保留：demuxer（flac/mp3/wav/mov/ape）、decoder（flac/mp3/pcm/alac/ape）、resampler（swr，仅 EQ/混音路径需要时启用）、util。
-- 关闭：网络模块、全部 encoder（除 PCM）、滤镜图、示例与文档；预计 .so 体积控制在 **8–12MB**（arm64）。
-- 合规：LGPL-2.1+ 动态链接（随包 .so，不静态链），保留版权声明与 LICENSE 文件；不修改 FFmpeg 源码则无需公开裁剪脚本（修改则需按 LGPL 提供）。
-- ABI：只出 C 接口封装（audiocore_napi），ArkTS 侧零 FFmpeg 依赖，便于替换与降级。
+- 只保留：demuxer（flac/mp3/wav/mov/aac/ape）、decoder（flac/mp3/aac/alac/ape + pcm 16/24/32/f32）、resampler（swr）、util。
+- 关闭：网络模块、全部 encoder、滤镜图/avfilter/avdevice、zlib/bzlib/lzma/iconv、汇编优化（无 nasm/yasm 依赖）；实测静态库 arm64 合计 **2.6MB**、x86_64 **2.9MB**，链入后 `libseqaudio_core.so` 分别 1.6MB / 1.7MB。
+- **构建方式（已落地）**：用 DevEco 自带 OHOS LLVM + sysroot 直接交叉编译 FFmpeg 7.1.1，脚本与说明见 `harmony/tools/ffmpeg-ohos/`。
+- **链接方式**：改为**静态链入 `libseqaudio_core.so`**。原因：带版本号的 `libavcodec.so.61` 在 HAP 打包与 `DT_NEEDED` 解析上不可靠，静态链入可一次性消除 soname 与打包目录风险。
+- 合规：LGPL-2.1+，构建未开启 `--enable-gpl` / `--enable-nonfree`；FFmpeg 源码未修改（仅裁剪配置），保留 LICENSE 与版本说明。若后续改为动态库分发需重新评估 LGPL 替换条款。
+- ABI：只出 C 接口封装（`seqaudio_core`），ArkTS 侧零 FFmpeg 依赖，便于替换与降级。
 
 **cpp/audiocore 模块设计**
 
@@ -304,19 +306,21 @@ ets/pages/Index.ets                # 曲库页接入以上能力
 ### 6.2 M2（v1.2，T06–T10）
 
 ```
-cpp/audiocore/CMakeLists.txt                 # Native 构建脚本（T06）
-cpp/audiocore/audiocore_napi.cpp             # NAPI 接口：start/stop/seek/volume/eq/rate-follow（T06）
-cpp/audiocore/decoder/FFmpegDecoder.cpp/.h   # 随包 FFmpeg 解码（T06）
-cpp/audiocore/output/RendererSink.cpp/.h     # OH_AudioRenderer 封装、独占/低延迟（T06）
-cpp/audiocore/dsp/DspChain.cpp/.h            # EQ(31 band biquad，对齐桌面版)/重采样(可选)/限幅/淡入淡出（T06/T07）
-cpp/audiocore/ring/RingBuffer.h
-ets/player/PlayerEngine.ets                  # 切换到 audiocore，AVPlayer 降级保留（T06）
-ets/player/EqPresets.ets                     # EQ 预设（T07）
+cpp/CMakeLists.txt                           # Native 构建脚本，按 OHOS_ARCH 选 prebuilt/<arch>
+cpp/napi_init.cpp                            # NAPI 模块 seqaudio_core：open/start/pause/stop/seek/setVolume/position/duration/info
+cpp/audio_engine.cpp/.h                      # 解码线程 + swr 重采样 + 环形缓冲 + OH_AudioRenderer 直通 + 焦点中断
+cpp/prebuilt/include/lib{avcodec,avformat,avutil,swresample}   # 裁剪版 FFmpeg 头文件
+cpp/prebuilt/<x86_64|aarch64>/lib/*.a        # 裁剪版 FFmpeg 静态库（构建脚本见 tools/ffmpeg-ohos）
+cpp/types/libseqaudio_core/                  # .so 的 d.ts 与 oh-package 描述
+ets/player/NativePlayer.ets                  # Native 内核 ArkTS 封装与格式自述
+ets/player/PlayerEngine.ets                  # 原生优先、AVPlayer 兜底，100ms 进度轮询（T06）
+ets/player/EqPresets.ets                     # EQ 预设（T07，DSP 待接）
 ets/lyrics/LyricsService.ets                 # 歌词获取/解析/缓存（T08）
 ets/lyrics/LyricsPage.ets                    # 歌词显示（T08）
 ets/cover/CoverService.ets                   # 封面搜索/嵌入（T09）
 ets/library/RenameDedupService.ets           # 批量重命名/去重（T10）
-# 防爆音：DspChain 内 soft-limiter + fade
+tools/ffmpeg-ohos/                           # FFmpeg 交叉编译脚本与合规说明
+# 防爆音：DSP 链内 soft-limiter + fade（T07 未接入）
 ```
 
 ### 6.3 M3（v2.0，T11–T15）
@@ -358,8 +362,7 @@ graph TD
 | T03 | M1·v1.1 | 标签写回：FLAC/MP3/M4A 全量重写+原子替换+回滚；编辑页（单首/批量预览） | TagWriter/TrackEditPage | 第三方可读回；批量可预览；失败留 .bak | T01 | L |
 | T04 | M1·v1.1 | CUE：解析（外置）、逻辑轨映射、按轨播放/切轨、（M3）分轨导出 | CueParser/CuePlayer | 切轨误差 ≤0.5s；多 FILE 可解析 | T01 | M |
 | T05 | M1·v1.1 | 健康检查基线：可解码性/时长一致性/截断标记 + 报告页 | HealthCheck | 损坏样本 100% 标记 | T01 | M |
-| T06 | M2·v1.2 | Native 内核一期：NAPI+FFmpeg 解码+RendererSink 直通+环形缓冲；AVPlayer 降级 | cpp/audiocore 可用 | 192k/24bit 直通；点击→出声 ≤1s；24h 无爆音 | T03 | L |
-| T07 | M2·v1.2 | EQ 与防爆音：31 段 biquad（桌面版频点/Q=1.41）、预设持久化、soft-limiter/fade | DspChain/EqPresets | 频段/增益符合 Q1 结论；切换 ≤200ms | T06 | L |
+| T06 | M2·v1.2 | Native 内核一期：NAPI+FFmpeg 解码+RendererSink 直通+环形缓冲；AVPlayer 降级 | cpp/audiocore 可用 | 192k/24bit 直通；点击→出声 ≤1s；24h 无爆音 | T03 | L || T07 | M2·v1.2 | EQ 与防爆音：31 段 biquad（桌面版频点/Q=1.41）、预设持久化、soft-limiter/fade | DspChain/EqPresets | 频段/增益符合 Q1 结论；切换 ≤200ms | T06 | L |
 | T08 | M2·v1.2 | 歌词：lrclib+嵌入歌词、逐行滚动、降级链 | LyricsService/Page | 成功率 ≥90%；同步误差 ≤300ms | T06 | M |
 | T09 | M2·v1.2 | 封面：多源搜索、嵌入、曲库缓存 | CoverService | 嵌入后第三方可读；无结果可手动 | T03 | M |
 | T10 | M2·v1.2 | 重命名与去重：模板变量+预览；标签+指纹去重（仅标记/隔离） | RenameDedupService | 抽检准确率 ≥95%；零自动删除 | T03 | M |

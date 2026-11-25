@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# 交叉编译鸿蒙可用的裁剪版 FFmpeg 静态库
+#
+# 用法：
+#   FFMPEG_SRC=/d/HarmonyOS/ffmpeg/FFmpeg bash build_ffmpeg.sh x86_64
+#   FFMPEG_SRC=/d/HarmonyOS/ffmpeg/FFmpeg bash build_ffmpeg.sh aarch64
+#
+# 产物：$OUT_ROOT/static-<arch>/{lib,include}，把 lib 下的 .a 与 include 拷到
+#       entry/src/main/cpp/prebuilt/<arch>/lib 与 prebuilt/include 即可。
+#
+# 依赖：DevEco Studio 自带的 OHOS LLVM 与 sysroot（路径见下方 NATIVE）。
+set -eo pipefail
+
+ARCH="${1:-}"
+case "$ARCH" in
+  x86_64)  TRIPLE="x86_64-linux-ohos" ;;
+  aarch64) TRIPLE="aarch64-linux-ohos" ;;
+  *) echo "usage: build_ffmpeg.sh x86_64|aarch64"; exit 2 ;;
+esac
+
+NATIVE="${OHOS_NATIVE:-D:/HarmonyOS/DevEcoStudio/sdk/default/openharmony/native}"
+LLVM="$NATIVE/llvm/bin"
+SYSROOT="$NATIVE/sysroot"
+SRC="${FFMPEG_SRC:-/d/HarmonyOS/ffmpeg/FFmpeg}"
+OUT_ROOT="${OUT_ROOT:-$(cd "$SRC/.." && pwd)}"
+OUTWIN="$OUT_ROOT/static-$ARCH"
+TMPDIR_POSIX="$OUT_ROOT/tmp"
+
+mkdir -p "$TMPDIR_POSIX" "$OUT_ROOT/static-$ARCH"
+export TMPDIR="$TMPDIR_POSIX"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
+
+cd "$SRC"
+make distclean >/dev/null 2>&1 || true
+# MSYS 下 distclean 可能残留对象文件，跨架构会混链，强制清干净
+find "$SRC" -type f \( -name '*.o' -o -name '*.d' -o -name '*.ho' \) -delete 2>/dev/null || true
+rm -f "$SRC"/ffbuild/config.mak "$SRC"/config.h "$SRC"/config_components.h 2>/dev/null || true
+
+./configure \
+  --prefix="$OUTWIN" \
+  --arch="$ARCH" \
+  --cc="$LLVM/clang.exe" \
+  --cxx="$LLVM/clang++.exe" \
+  --ar="$LLVM/llvm-ar.exe" \
+  --ranlib="$LLVM/llvm-ranlib.exe" \
+  --strip="$LLVM/llvm-strip.exe" \
+  --sysroot="$SYSROOT" \
+  --target-os=linux \
+  --enable-cross-compile \
+  --enable-static --disable-shared \
+  --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
+  --disable-network --disable-autodetect --disable-asm --disable-debug \
+  --disable-iconv --disable-zlib --disable-bzlib --disable-lzma \
+  --disable-sdl2 --disable-xlib \
+  --disable-everything \
+  --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
+  --enable-protocol=file \
+  --enable-demuxer=flac,mp3,wav,mov,aac,ape \
+  --enable-decoder=flac,mp3,aac,alac,ape,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
+  --enable-parser=mpegaudio,flac,aac \
+  --extra-cflags="--target=$TRIPLE -D__MUSL__ -fPIC -O2 -fno-stack-protector" \
+  --extra-ldflags="--target=$TRIPLE -fuse-ld=lld"
+
+make -j8
+make install
+echo "=== DONE $ARCH ==="
+find "$OUT_ROOT/static-$ARCH/lib" -name "*.a" -exec ls -lh {} \;
