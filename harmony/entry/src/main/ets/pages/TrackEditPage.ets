@@ -142,6 +142,13 @@ struct TrackEditPage {
       Row({ space: 12 }) {
         Text('标签编辑').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#F5F5F7')
         Blank()
+        if (this.tracks.length == 1) {
+          Button('封面').fontSize(12).height(30).backgroundColor('#26221A').fontColor(ACCENT)
+            .onClick(() => {
+              AppStorage.setOrCreate('seqaudio_cover_path', JSON.stringify([this.tracks[0].path]));
+              router.pushUrl({ url: 'pages/CoverPage' });
+            })
+        }
         Button('返回').fontSize(12).height(30).backgroundColor('#2A2A30').fontColor('#F0F0F2')
           .onClick(() => {
             router.back();

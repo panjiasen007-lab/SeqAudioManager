@@ -4,6 +4,7 @@
     "pages/PlayerPage",
     "pages/TrackEditPage",
     "pages/HealthPage",
-    "pages/LibraryToolsPage"
+    "pages/LibraryToolsPage",
+    "pages/CoverPage"
   ]
 }

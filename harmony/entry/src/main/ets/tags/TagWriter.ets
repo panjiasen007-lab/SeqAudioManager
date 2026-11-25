@@ -171,12 +171,12 @@ function patchBe32(pos: number, value: number): BytePatch {
 
 // ---------------- FLAC ----------------
 
-interface FlacBlock {
-  headerPos: number;
-  type: number;
-  dataStart: number;
-  dataEnd: number;
-  last: boolean;
+class FlacBlock {
+  headerPos: number = 0;
+  type: number = 0;
+  dataStart: number = 0;
+  dataEnd: number = 0;
+  last: boolean = false;
 }
 
 function buildVorbisComment(vendor: Uint8Array, desired: Map<string, string>): Uint8Array {
@@ -219,7 +219,30 @@ function buildVorbisComment(vendor: Uint8Array, desired: Map<string, string>): U
   return concat(parts);
 }
 
-function writeFlac(dstFd: number, r: RAF, size: number, p: TagPatch): void {
+class RangeEdit {
+  start: number = 0;
+  end: number = 0;
+  bytes: Uint8Array = new Uint8Array(0);
+}
+
+// FLAC PICTURE block（type 6）：front cover / MIME / 描述 / 尺寸 / 颜色 / 图像长度 / 图像
+function buildPictureBlock(cover: Uint8Array, mime: string, last: boolean): Uint8Array {
+  const mimeBytes = bytesOf(mime);
+  const data = concat([
+    u32be(3), u32be(mimeBytes.length), mimeBytes,
+    u32be(0), u32be(0), u32be(0), u32be(0), u32be(0),
+    u32be(cover.length), cover
+  ]);
+  const h = new Uint8Array(4);
+  h[0] = (last ? 0x80 : 0) | 0x06;
+  h[1] = (data.length >>> 16) & 0xff;
+  h[2] = (data.length >>> 8) & 0xff;
+  h[3] = data.length & 0xff;
+  return concat([h, data]);
+}
+
+function writeFlac(dstFd: number, r: RAF, size: number, p: TagPatch,
+  cover?: Uint8Array, mime: string = 'image/jpeg'): void {
   const head = r.read(0, 4);
   if (ascii(head, 0, 4) != 'fLaC') {
     throw new Error('FLAC 头校验失败');
@@ -238,7 +261,13 @@ function writeFlac(dstFd: number, r: RAF, size: number, p: TagPatch): void {
     if (dataStart + len > size) {
       break;
     }
-    blocks.push({ headerPos: pos, type: type, dataStart: dataStart, dataEnd: dataStart + len, last: last });
+    const block = new FlacBlock();
+    block.headerPos = pos;
+    block.type = type;
+    block.dataStart = dataStart;
+    block.dataEnd = dataStart + len;
+    block.last = last;
+    blocks.push(block);
     pos = dataStart + len;
     if (last) {
       break;
@@ -252,42 +281,75 @@ function writeFlac(dstFd: number, r: RAF, size: number, p: TagPatch): void {
   if (p.year != '') desired.set('DATE', p.year);
   if (p.trackNo > 0) desired.set('TRACKNUMBER', `${p.trackNo}`);
 
-  let vc = blocks.find((b: FlacBlock) => b.type == 4);
+  const vc = blocks.find((b: FlacBlock) => b.type == 4);
+  const pic = blocks.find((b: FlacBlock) => b.type == 6);
   const patches: BytePatch[] = [];
+  const edits: RangeEdit[] = [];
   let insertAt: number = -1;
-  let vendor = new Uint8Array(0);
+  let insertBytes = new Uint8Array(0);
+
   if (vc) {
     const old = r.read(vc.dataStart, vc.dataEnd - vc.dataStart);
     const vl = readLe32(old, 0);
-    vendor = old.subarray(4, 4 + vl);
+    const vendor = old.subarray(4, 4 + vl);
+    const vcData = buildVorbisComment(vendor, desired);
+    const header = new Uint8Array(4);
+    header[0] = (vc.last ? 0x80 : 0) | 0x04;
+    header[1] = (vcData.length >>> 16) & 0xff;
+    header[2] = (vcData.length >>> 8) & 0xff;
+    header[3] = vcData.length & 0xff;
+    const edit = new RangeEdit();
+    edit.start = vc.headerPos;
+    edit.end = vc.dataEnd;
+    edit.bytes = concat([header, vcData]);
+    edits.push(edit);
   } else {
-    // 没找到 Vorbis Comment：在 STREAMINFO 之后插入，并清掉原末块的 last 标志
     const first = blocks.length > 0 ? blocks[0] : undefined;
     insertAt = first ? first.dataEnd : 4;
     const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : undefined;
-    if (lastBlock) {
+    if (insertAt >= size && lastBlock) {
       const h = r.read(lastBlock.headerPos, 1);
       patches.push({ pos: lastBlock.headerPos, bytes: new Uint8Array([h[0] & 0x7f]) });
     }
+    const vcData = buildVorbisComment(new Uint8Array(0), desired);
+    const header = new Uint8Array(4);
+    header[0] = (insertAt >= size ? 0x80 : 0) | 0x04;
+    header[1] = (vcData.length >>> 16) & 0xff;
+    header[2] = (vcData.length >>> 8) & 0xff;
+    header[3] = vcData.length & 0xff;
+    insertBytes = concat([insertBytes, header, vcData]);
   }
-  const vcData = buildVorbisComment(vendor, desired);
-  const header = new Uint8Array(4);
-  header[0] = (vc ? (vc.last ? 0x80 : 0) : (insertAt >= size ? 0x80 : 0)) | 0x04;
-  const len = vcData.length;
-  header[1] = (len >>> 16) & 0xff;
-  header[2] = (len >>> 8) & 0xff;
-  header[3] = len & 0xff;
-  const newBlock = concat([header, vcData]);
 
-  if (vc) {
-    copyRange(r, dstFd, 0, vc.headerPos, patches);
-    writeBytes(dstFd, newBlock);
-    copyRange(r, dstFd, vc.dataEnd, size, patches);
-  } else {
-    copyRange(r, dstFd, 0, insertAt, patches);
-    writeBytes(dstFd, newBlock);
-    copyRange(r, dstFd, insertAt, size, patches);
+  if (cover) {
+    if (pic) {
+      const edit = new RangeEdit();
+      edit.start = pic.headerPos;
+      edit.end = pic.dataEnd;
+      edit.bytes = buildPictureBlock(cover, mime, pic.last);
+      edits.push(edit);
+    } else {
+      // 插在 Vorbis Comment 之前；若无 VC 则与 VC 一起插在 STREAMINFO 之后
+      if (insertAt < 0) {
+        insertAt = vc ? vc.headerPos : (blocks.length > 0 ? blocks[0].dataEnd : 4);
+      }
+      insertBytes = concat([insertBytes, buildPictureBlock(cover, mime, false)]);
+    }
   }
+  if (insertBytes.length > 0 && insertAt >= 0) {
+    const edit = new RangeEdit();
+    edit.start = insertAt;
+    edit.end = insertAt;
+    edit.bytes = insertBytes;
+    edits.push(edit);
+  }
+  edits.sort((a: RangeEdit, b: RangeEdit) => a.start - b.start);
+  let cursor = 0;
+  for (const edit of edits) {
+    copyRange(r, dstFd, cursor, edit.start, patches);
+    writeBytes(dstFd, edit.bytes);
+    cursor = edit.end;
+  }
+  copyRange(r, dstFd, cursor, size, patches);
 }
 
 // ---------------- MP3 ----------------
@@ -338,7 +400,8 @@ function buildId3v1(p: TagPatch): Uint8Array {
   return b;
 }
 
-function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch): void {
+function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch,
+  cover?: Uint8Array, mime: string = 'image/jpeg'): void {
   let audioStart = 0;
   let major = 3;
   const frames: Id3Frame[] = [];
@@ -384,6 +447,22 @@ function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch): void {
     }
     if (!found) {
       frames.push({ id: id, body: encodeId3(text) });
+    }
+  }
+  if (cover) {
+    const apic = concat([
+      new Uint8Array([3]), bytesOf(mime), new Uint8Array([0, 3, 0]), cover
+    ]);
+    let foundApic = false;
+    for (const f of frames) {
+      if (f.id == 'APIC') {
+        f.body = apic;
+        foundApic = true;
+        break;
+      }
+    }
+    if (!foundApic) {
+      frames.push({ id: 'APIC', body: apic });
     }
   }
   const frameParts: Uint8Array[] = [];
@@ -457,7 +536,8 @@ function buildIlstChild(name: string, text: string): Uint8Array {
   return concat([u32be(inner.length + 8), bytesOf(name), inner]);
 }
 
-function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch): void {
+function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch,
+  cover?: Uint8Array, mime: string = 'image/jpeg'): void {
   const moov = findAtom(r, 0, size, atomType('moov'));
   if (!moov) {
     throw new Error('M4A 缺少 moov');
@@ -481,7 +561,7 @@ function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch): void {
   // 保留非文本原子（封面等），替换/追加文本原子
   const keep: Uint8Array[] = [];
   let pos = ilst.start + 8;
-  const names = ['©nam', '©ART', '©alb', '©day', '©gen'];
+  const names = ['©nam', '©ART', '©alb', '©day', '©gen', 'covr'];
   while (pos + 8 <= ilstEnd) {
     const h = r.read(pos, 8);
     const childSize = readBe32(h, 0);
@@ -503,6 +583,12 @@ function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch): void {
   }
   for (const b of keep) {
     children.push(b);
+  }
+  if (cover) {
+    const dataType: number = mime == 'image/png' ? 14 : 13;
+    const data = concat([new Uint8Array([0, 0, 0, dataType, 0, 0, 0, 0]), cover]);
+    const inner = concat([u32be(data.length + 8), bytesOf('data'), data]);
+    children.push(concat([u32be(inner.length + 8), bytesOf('covr'), inner]));
   }
   const body = concat(children);
   const newIlst = concat([u32be(body.length + 8), bytesOf('ilst'), body]);
@@ -611,6 +697,112 @@ export class TagWriter {
       res.ok = false;
       res.message = err.message ? err.message : `${e}`;
       // 清理可能残留的 tmp（原文件仍在或已由 rename 恢复）
+      try {
+        fs.unlinkSync(tmp);
+      } catch (e2) {
+        // ignore
+      }
+    } finally {
+      if (dstFile != undefined) {
+        try {
+          fs.closeSync(dstFile);
+        } catch (e) {
+          // ignore
+        }
+      }
+      try {
+        fs.closeSync(src);
+      } catch (e) {
+        // ignore
+      }
+    }
+    return res;
+  }
+
+  // 封面嵌入：复用同一套全量重写 + 原子替换 + .bak 策略
+  static async embedCover(path: string, coverPath: string): Promise<WriteResult> {
+    const res = new WriteResult();
+    const ext = extOf(path);
+    if (ext != '.flac' && ext != '.mp3' && ext != '.m4a') {
+      res.message = `不支持写入的格式：${ext}`;
+      return res;
+    }
+    const mime = extOf(coverPath) == '.png' ? 'image/png' : 'image/jpeg';
+    const st = fs.statSync(path);
+    if (st.size > MAX_WRITE_BYTES) {
+      res.message = '文件超过 500MB，按策略拒绝写入';
+      return res;
+    }
+    const cf = fs.openSync(coverPath, fs.OpenMode.READ_ONLY);
+    let cover: Uint8Array = new Uint8Array(0);
+    try {
+      const cs = fs.statSync(coverPath);
+      const cab = new ArrayBuffer(cs.size);
+      const n = fs.readSync(cf.fd, cab, { offset: 0, length: cs.size });
+      cover = new Uint8Array(cab, 0, n);
+    } finally {
+      fs.closeSync(cf);
+    }
+    if (cover.length == 0) {
+      res.message = '封面文件为空';
+      return res;
+    }
+    const tmp = `${path}.seqaudio.tmp`;
+    const old = `${path}.seqaudio.old`;
+    const bak = `${path}.bak`;
+    const keepBackup = (await Db.getSetting('tag_write_backup', '1')) != '0';
+    const src = fs.openSync(path, fs.OpenMode.READ_ONLY);
+    let dstFile: fs.File | undefined = undefined;
+    try {
+      const before = TagParser.parse(src, ext, st.size);
+      dstFile = fs.openSync(tmp, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      const r = new RAF(src);
+      const patch = new TagPatch();
+      if (ext == '.flac') {
+        writeFlac(dstFile.fd, r, st.size, patch, cover, mime);
+      } else if (ext == '.mp3') {
+        writeMp3(dstFile.fd, r, st.size, patch, cover, mime);
+      } else {
+        writeM4a(dstFile.fd, r, st.size, patch, cover, mime);
+      }
+      fs.closeSync(dstFile);
+      dstFile = undefined;
+      const tmpFile = fs.openSync(tmp, fs.OpenMode.READ_ONLY);
+      try {
+        const after = TagParser.parse(tmpFile, ext, st.size);
+        if (Math.abs(after.durationMs - before.durationMs) > 1000) {
+          throw new Error('写后时长偏差超过 1s，已回滚');
+        }
+      } finally {
+        fs.closeSync(tmpFile);
+      }
+      const removeIfExists = (p: string): void => {
+        try {
+          fs.unlinkSync(p);
+        } catch (e) {
+          // ignore
+        }
+      };
+      removeIfExists(keepBackup ? bak : old);
+      fs.renameSync(path, keepBackup ? bak : old);
+      try {
+        fs.renameSync(tmp, path);
+      } catch (e) {
+        fs.renameSync(keepBackup ? bak : old, path);
+        const err = e as BusinessError;
+        throw new Error(err.message ? err.message : '原子替换失败');
+      }
+      if (!keepBackup) {
+        removeIfExists(old);
+      } else {
+        res.backupPath = bak;
+      }
+      res.ok = true;
+      res.message = keepBackup ? '封面已嵌入（保留 .bak）' : '封面已嵌入';
+    } catch (e) {
+      const err = e as BusinessError;
+      res.ok = false;
+      res.message = err.message ? err.message : `${e}`;
       try {
         fs.unlinkSync(tmp);
       } catch (e2) {
