@@ -2,10 +2,10 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v1.0 |
+| 文档版本 | v1.1 |
 | 日期 | 2026-11-25 |
 | 编制 | software-seqaudio-harmony 团队：许清楚（产品经理 / PRD）、高见远（架构师 / 方案与任务分解）、齐活林（交付总监 / 汇编） |
-| 状态 | **待确认** —— 第 10 节 8 个问题拍板后即可开工 M1 |
+| 状态 | **M1 进行中** —— Q1 / Q3 / Q5 已拍板（见 §10），T01 / T02 已完成；其余问题按建议默认执行，不阻塞 M1 |
 | 目标分支 | `harmony-pc`（当前基线 v1.0，提交 52f5c6a，已在 2in1 模拟器验证） |
 
 ---
@@ -72,7 +72,7 @@ Windows 桌面级 Hi-Fi 音乐曲库管理 + 播放器（Python + PySide6）：
 | U3 | 直接编辑标签并支持批量应用 | 写入后第三方工具可正确回读；批量有预览与失败报告 |
 | U4 | 播放 CUE 整轨专辑并按单轨切换 | 内嵌/外置 CUE 均可解析；切轨误差 ≤0.5s |
 | U5 | 采样率跟随、无重采样直通播放 | 192k/24bit 输出规格与源一致；可「跟随/锁定」输出采样率 |
-| U6 | 10 段 EQ 调音并保存预设 | 10 频段 ±12dB；预设保存/切换；切换 ≤200ms 生效 |
+| U6 | 31 段 EQ 调音并保存预设 | 与桌面版 `EQ_BANDS_HZ` 一致（20Hz–20kHz 1/3 倍频程，Q=1.41），±12dB；预设保存/切换；切换 ≤200ms 生效 |
 | U7 | 联网获取并显示歌词（逐行滚动） | 获取成功率 ≥90%；无网回退嵌入/本地歌词；同步误差 ≤300ms |
 | U8 | 自动搜索并嵌入专辑封面 | 多源按匹配度排序；嵌入后第三方可读；无结果可手动指定 |
 | U9 | 鉴别 fake FLAC 并隔离可疑文件 | 检出率 ≥90%、误报率 ≤5%；一键移入隔离区 |
@@ -96,7 +96,7 @@ Windows 桌面级 Hi-Fi 音乐曲库管理 + 播放器（Python + PySide6）：
 | 编号 | 名称 | 说明 | 验收要点 | 规模 |
 |---|---|---|---|---|
 | R07 | Native 播放内核一期 | NAPI + AudioRenderer 直通输出；采样率跟随/锁定；独占/低延迟；真实输出规格上报 | 192k/24bit 输出与源一致（无重采样）；独占被抢占明确降级；延迟不劣于 AVPlayer | L |
-| R08 | 10 段 EQ 与预设 | 31.5Hz–16kHz 十频段 ±12dB；预设保存/切换；全局开关 | 频段与桌面版一致（待确认 Q1）；切换 ≤200ms；预设持久化 | L |
+| R08 | 31 段 EQ 与预设 | 对齐桌面版 31 段 1/3 倍频程（20Hz–20kHz，Q=1.41），±12dB；预设保存/切换；全局开关 | 频点与桌面版 `EQ_BANDS_HZ` 一致（Q1 已定）；切换 ≤200ms；预设持久化 | L |
 | R09 | 歌词获取与显示 | lrclib 等源；读取嵌入歌词；逐行滚动；无网降级 | 成功率 ≥90%；同步误差 ≤300ms | M |
 | R10 | 封面多源搜索与嵌入 | 多源搜索按匹配度排序；嵌入文件+曲库缓存 | 嵌入后第三方可读；无结果支持手动选择 | M |
 | R11 | 淡入淡出与防爆音 | 切歌/暂停/音量突变平滑过渡；时长可配置 | 主观无爆音；无瞬时满幅跳变 | M |
@@ -209,7 +209,7 @@ flowchart TB
 |---|---|---|
 | AudioCoreNapi | NAPI 接口：start/stop/pause/seek/setVolume/setEq/setRateFollow/on(event) | 状态与进度经 ThreadSafeFunction 回调 ArkTS |
 | DecoderWorker | 独立线程，FFmpeg 解码→PCM 帧 | 帧队列 + 背压；支持 cue offset 定位 |
-| DspChain | 10 段 biquad EQ、音量、soft-limiter（防爆音）、fade in/out、（可选）重采样 | 直通路径零处理；EQ/防爆音开启才插入 |
+| DspChain | 31 段 biquad EQ（对齐桌面版频点/Q 值）、音量、soft-limiter（防爆音）、fade in/out、（可选）重采样 | 直通路径零处理；EQ/防爆音开启才插入 |
 | RendererSink | OH_AudioRenderer 封装 | lowLatency 模式；采样率跟随源；输出规格上报；被抢占回调→自动切 AVPlayer 并通知 UI |
 | RingBuffer | 解码线程 ↔ 渲染线程缓冲 | ≥500ms，SPSC 无锁 |
 
@@ -308,7 +308,7 @@ cpp/audiocore/CMakeLists.txt                 # Native 构建脚本（T06）
 cpp/audiocore/audiocore_napi.cpp             # NAPI 接口：start/stop/seek/volume/eq/rate-follow（T06）
 cpp/audiocore/decoder/FFmpegDecoder.cpp/.h   # 随包 FFmpeg 解码（T06）
 cpp/audiocore/output/RendererSink.cpp/.h     # OH_AudioRenderer 封装、独占/低延迟（T06）
-cpp/audiocore/dsp/DspChain.cpp/.h            # EQ(10 band biquad)/重采样(可选)/限幅/淡入淡出（T06/T07）
+cpp/audiocore/dsp/DspChain.cpp/.h            # EQ(31 band biquad，对齐桌面版)/重采样(可选)/限幅/淡入淡出（T06/T07）
 cpp/audiocore/ring/RingBuffer.h
 ets/player/PlayerEngine.ets                  # 切换到 audiocore，AVPlayer 降级保留（T06）
 ets/player/EqPresets.ets                     # EQ 预设（T07）
@@ -359,7 +359,7 @@ graph TD
 | T04 | M1·v1.1 | CUE：解析（外置）、逻辑轨映射、按轨播放/切轨、（M3）分轨导出 | CueParser/CuePlayer | 切轨误差 ≤0.5s；多 FILE 可解析 | T01 | M |
 | T05 | M1·v1.1 | 健康检查基线：可解码性/时长一致性/截断标记 + 报告页 | HealthCheck | 损坏样本 100% 标记 | T01 | M |
 | T06 | M2·v1.2 | Native 内核一期：NAPI+FFmpeg 解码+RendererSink 直通+环形缓冲；AVPlayer 降级 | cpp/audiocore 可用 | 192k/24bit 直通；点击→出声 ≤1s；24h 无爆音 | T03 | L |
-| T07 | M2·v1.2 | EQ 与防爆音：10 段 biquad、预设持久化、soft-limiter/fade | DspChain/EqPresets | 频段/增益符合 Q1 结论；切换 ≤200ms | T06 | L |
+| T07 | M2·v1.2 | EQ 与防爆音：31 段 biquad（桌面版频点/Q=1.41）、预设持久化、soft-limiter/fade | DspChain/EqPresets | 频段/增益符合 Q1 结论；切换 ≤200ms | T06 | L |
 | T08 | M2·v1.2 | 歌词：lrclib+嵌入歌词、逐行滚动、降级链 | LyricsService/Page | 成功率 ≥90%；同步误差 ≤300ms | T06 | M |
 | T09 | M2·v1.2 | 封面：多源搜索、嵌入、曲库缓存 | CoverService | 嵌入后第三方可读；无结果可手动 | T03 | M |
 | T10 | M2·v1.2 | 重命名与去重：模板变量+预览；标签+指纹去重（仅标记/隔离） | RenameDedupService | 抽检准确率 ≥95%；零自动删除 | T03 | M |
@@ -440,11 +440,11 @@ graph LR
 
 | # | 问题 | 背景 | 选项与建议 |
 |---|---|---|---|
-| Q1 | EQ 频段与桌面版一致性 | R08 要求频段与桌面版一致（待确认）。桌面版 10 段 EQ 的中心频点/增益范围需最终确认 | 建议：标准 ISO 十频段 31.5Hz–16kHz，±12dB；若桌面版不同，以桌面版为准并在 EqPresets 固化 |
+| Q1 | EQ 频段与桌面版一致性 | 已核对桌面版 `EQ_BANDS_HZ`：31 段 1/3 倍频程（20Hz–20kHz，Q=1.41，±12dB），非原计划书假设的 10 段 | **已拍板（2026-11-25）**：对齐桌面版 31 段，R08/T07/DspChain 已回写；EqPresets 固化同一频点表 |
 | Q2 | DSD 支持形态 | 鸿蒙平台无原生 DSD 输出通路确认 | 建议：v2.0 仅支持 DSF/DFF 文件，转 176.4k/24bit PCM 播放；SACD ISO 维持非目标；DoP 待真机能力确认 |
-| Q3 | 「独占」被抢占时的策略 | 鸿蒙以低时延+直通近似独占；通话/其他应用占用音频焦点时需明确行为 | 建议：A=自动暂停并 UI 提示（Hi-Fi 用户可感知可控）；备选 B=静默降级共享模式继续播 |
+| Q3 | 「独占」被抢占时的策略 | 鸿蒙以低时延+直通近似独占；通话/其他应用占用音频焦点时需明确行为 | **已拍板（2026-11-25）**：A=自动暂停并 UI 提示；不静默降级 |
 | Q4 | 性能验收环境 | 1 万首 ≤5min、10 万首搜索 ≤200ms 需明确硬件基准 | 建议：M.2 SSD 真机/开发机为准；若仅有模拟器，标注平台差异并给出换算基线 |
-| Q5 | 标签写回备份策略 | .bak 文件保留策略与 >500MB 拒写阈值需确认 | 建议：保留最近 1 份 .bak（设置可关）；>500MB 拒写并提示；.bak 不参与扫描 |
+| Q5 | 标签写回备份策略 | .bak 文件保留策略与 >500MB 拒写阈值需确认 | **已拍板（2026-11-25）**：按建议——保留最近 1 份 .bak（设置可关）；>500MB 拒写并提示；.bak 不参与扫描 |
 | Q6 | fake FLAC 样本集 | 鉴别算法回归需要标注样本集（建议真假各 ≥50 首） | 建议：自造（升频+转码伪造）+ 用户提供真实样本各半；样本路径与标签登记入测试清单 |
 | Q7 | 外部数据源可用性 | lrclib/MusicBrainz/iTunes 为公网官方接口；QQ/网易为非官方接口 | 建议：QQ/网易仅作降级补充；「联网功能整体可关、离线全功能可用」为底线 |
 | Q8 | 卡片/迷你窗形态优先级 | 2in1 上桌面卡片与迷你窗实现成本不同 | 建议：先做应用内迷你窗（成本低、随 M2 顺带），桌面卡片随 v2.0 交付 |

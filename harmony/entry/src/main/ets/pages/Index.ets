@@ -184,6 +184,11 @@ struct Index {
     router.pushUrl({ url: 'pages/PlayerPage' });
   }
 
+  private openEditor(t: Track): void {
+    AppStorage.setOrCreate('seqaudio_edit_paths', JSON.stringify([t.path]));
+    router.pushUrl({ url: 'pages/TrackEditPage' });
+  }
+
   private async startScan(): Promise<void> {
     if (this.scanning) {
       return;
@@ -302,6 +307,9 @@ struct Index {
         .textAlign(TextAlign.Center)
         .fontSize(14)
         .fontColor(this.isPlayingTrack(t) ? ACCENT : '#6E6E76')
+        .onClick(() => {
+          this.playAt(i);
+        })
       Column({ space: 3 }) {
         Text(t.title)
           .fontSize(15)
@@ -325,13 +333,18 @@ struct Index {
       Text(fmtDuration(t.durationMs))
         .fontSize(12)
         .fontColor('#8A8A92')
+      Button('编辑')
+        .fontSize(10)
+        .height(24)
+        .backgroundColor('#26221A')
+        .fontColor(ACCENT)
+        .onClick(() => {
+          this.openEditor(t);
+        })
     }
       .width('100%')
       .padding({ top: 9, bottom: 9, left: 8, right: 8 })
       .borderRadius(8)
-      .onClick(() => {
-        this.playAt(i);
-      })
   }
 
   build() {
