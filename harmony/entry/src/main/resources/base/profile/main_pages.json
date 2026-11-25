@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/PlayerPage",
     "pages/TrackEditPage",
-    "pages/HealthPage"
+    "pages/HealthPage",
+    "pages/LibraryToolsPage"
   ]
 }

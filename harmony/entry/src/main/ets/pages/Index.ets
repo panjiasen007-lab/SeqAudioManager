@@ -430,6 +430,14 @@ struct Index {
           .onClick(() => {
             router.pushUrl({ url: 'pages/HealthPage' });
           })
+        Button('整理')
+          .fontSize(13)
+          .height(34)
+          .backgroundColor('#2A2A30')
+          .fontColor('#F0F0F2')
+          .onClick(() => {
+            router.pushUrl({ url: 'pages/LibraryToolsPage' });
+          })
       }
         .width('100%')
 
