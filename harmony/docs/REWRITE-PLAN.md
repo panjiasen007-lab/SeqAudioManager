@@ -456,6 +456,6 @@ graph LR
 - **代码基线**：`D:\HarmonyOS\Projects\SeqAudioHarmony\harmony`（GitHub `panjiasen007-lab/SeqAudioManager` 的 `harmony-pc` 分支 worktree，sparse-checkout，路径不含空格）；当前基线提交 `52f5c6a`（v1.0）。桌面版主仓库在 `D:\SeqAudio Manager`（`main` 分支），两线不混提。
 - **构建与验证链**：DevEco Studio 26.0.1.290（`D:\HarmonyOS\DevEcoStudio`）；hvigor 编译目标必须为纯版本号 `26.0.0`；构建命令：`PATH` 加 `jbr/bin`、设 `DEVECO_SDK_HOME=D:\HarmonyOS\DevEcoStudio\sdk`，在 harmony 目录执行 `cmd //c D:\HarmonyOS\DevEcoStudio\tools\hvigor\bin\hvigorw.bat assembleHap --mode module -p product=default -p buildMode=debug --no-daemon`；安装：cd 到 outputs 目录用相对路径 `hdc -t 127.0.0.1:5555 install -r entry-default-unsigned.hap`；启动：`hdc shell aa start -a EntryAbility -b com.seqaudio.manager`；bash 调 hdc 需 `MSYS_NO_PATHCONV=1`（与 `cmd //c` 互斥）。
 - **工程约定**：ArkTS 严格模式（禁 any/unknown；避免 `let x = null` 推断 never 的写法）；`picker` 默认导入；耗时操作一律进 TaskPool；DB 变更一律走 DbMigrate（`PRAGMA user_version` / settings.schema_version）；NAPI 状态回调一律走 ThreadSafeFunction；网络请求统一走 HttpStack（超时 5s、重试 1 次、并发 ≤3）。
-- **分支与提交**：全部工作在 `harmony-pc`；每个任务（T01–T15）至少一个提交，信息格式 `task(Txx): 摘要`；里程碑出口打 tag `v1.1.0` / `v1.2.0` / `v2.0.0` 并推送。
+- **分支与提交**：全部工作在 `harmony-pc`；每个任务（T01–T15）至少一个提交，信息格式 `task(Txx): 摘要`；里程碑出口打 tag `harmony-v1.1.0` / `harmony-v1.2.0` / `harmony-v2.0.0` 并推送（仓库已有桌面版同名 `v1.1.0` 等标签，故鸿蒙线统一加 `harmony-` 前缀避免冲突）。
 - **验收流程**：每任务完成即模拟器冒烟；里程碑出口按 §9.1 清单全量回归；音频硬指标（直通规格/点击→出声/长播稳定性）优先真机复测，无真机时标注平台差异并给出模拟器基线数据。
 - **变更管理**：PRD 或架构决策变更须回写本计划书（版本号 +1，并更新对应章节与风险登记册）。
