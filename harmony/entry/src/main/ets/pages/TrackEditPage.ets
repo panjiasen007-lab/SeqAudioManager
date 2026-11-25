@@ -1,4 +1,5 @@
 import { router } from '@kit.ArkUI';
+import fs from '@ohos.file.fs';
 import { Track, emptyTrack, refreshSearchBlob } from '../model/Track';
 import { Db } from '../db/Db';
 import { TagPatch, TagWriter, WriteResult } from '../tags/TagWriter';
@@ -105,6 +106,14 @@ struct TrackEditPage {
         updated.bitrateKbps = t.bitrateKbps;
         updated.sizeBytes = t.sizeBytes;
         updated.mtimeMs = t.mtimeMs;
+        // 写回会改变文件体积/时间戳：按磁盘实况回填，否则健康检查会把刚才的改写误报成「大小变化」
+        try {
+          const st = fs.statSync(t.path);
+          updated.sizeBytes = st.size;
+          updated.mtimeMs = Math.round(st.mtime * 1000);
+        } catch (e) {
+          // 读取失败就沿用旧值
+        }
         updated.cuePath = t.cuePath;
         updated.isCueChild = t.isCueChild;
         updated.cueTrackNo = t.cueTrackNo;

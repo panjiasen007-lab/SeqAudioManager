@@ -131,9 +131,19 @@ function writeBytes(fd: number, data: Uint8Array): void {
   if (data.length == 0) {
     return;
   }
-  const ab = new ArrayBuffer(data.length);
-  new Uint8Array(ab).set(data);
-  fs.writeSync(fd, ab, { offset: 0, length: data.length });
+  // 注意：必须顺序写（不带 options）。带 {offset:0} 是"定位写"，每次都会落在文件开头，
+  // 结果是整个重写文件只剩最后一段（FLAC 会丢掉 fLaC/STREAMINFO，MP3 会丢掉 ID3 头）。
+  let written = 0;
+  while (written < data.length) {
+    const rest = data.length - written;
+    const ab = new ArrayBuffer(rest);
+    new Uint8Array(ab).set(data.subarray(written));
+    const n = fs.writeSync(fd, ab);
+    if (n <= 0) {
+      throw new Error('写入目标文件失败');
+    }
+    written += n;
+  }
 }
 
 function applyPatches(buf: Uint8Array, absPos: number, patches: BytePatch[]): void {
@@ -408,7 +418,7 @@ function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch,
   const head = r.read(0, 10);
   if (ascii(head, 0, 3) == 'ID3') {
     major = head[3];
-    const tagSize = major >= 3 ? readSyncsafe(head, 6) : readBe32(head, 6);
+    const tagSize = readSyncsafe(head, 6); // ID3v2 全系标签头长度均为 syncsafe
     audioStart = Math.min(size, 10 + tagSize);
     let pos = 10;
     while (pos + 10 <= audioStart) {
@@ -473,7 +483,8 @@ function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch,
     frameParts.push(f.body);
     tagBodyLen += h.length + f.body.length;
   }
-  const id3 = concat([bytesOf('ID3'), new Uint8Array([3, 0]), syncsafe(tagBodyLen), concat(frameParts)]);
+  // ID3v2 头固定 10 字节：'ID3' + 版本(2) + 标志(1) + syncsafe 长度(4)
+  const id3 = concat([bytesOf('ID3'), new Uint8Array([3, 0, 0]), syncsafe(tagBodyLen), concat(frameParts)]);
   const tail = r.read(Math.max(0, size - 128), 128);
   const hasId3v1 = ascii(tail, 0, 3) == 'TAG';
   const audioEnd = hasId3v1 ? size - 128 : size;
@@ -632,6 +643,7 @@ export class TagWriter {
     let dstFile: fs.File | undefined = undefined;
     try {
       const before = TagParser.parse(src, ext, st.size);
+      console.info(`tag write ${ext} size=${st.size} dur=${before.durationMs} sr=${before.sampleRate} title=${before.title}`);
       dstFile = fs.openSync(tmp, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       const r = new RAF(src);
       if (ext == '.flac') {
@@ -646,7 +658,9 @@ export class TagWriter {
       // 写后校验：可解析 + 时长差异 ≤1s + 目标字段回读一致
       const tmpFile = fs.openSync(tmp, fs.OpenMode.READ_ONLY);
       try {
-        const after = TagParser.parse(tmpFile, ext, st.size);
+        const tmpSize = fs.statSync(tmp).size;
+        const after = TagParser.parse(tmpFile, ext, tmpSize);
+        console.info(`tag verify dur=${after.durationMs} sr=${after.sampleRate} title=${after.title} tmp=${tmpSize}`);
         if (Math.abs(after.durationMs - before.durationMs) > 1000) {
           throw new Error('写后时长偏差超过 1s，已回滚');
         }
@@ -757,7 +771,15 @@ export class TagWriter {
       const before = TagParser.parse(src, ext, st.size);
       dstFile = fs.openSync(tmp, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       const r = new RAF(src);
+      // 只加封面时也要把原标签读回来重写：writeFlac 会用空 patch 重建 Vorbis Comment，
+      // 不带上原字段就会把标题/歌手/专辑全部抹掉。
       const patch = new TagPatch();
+      patch.title = before.title;
+      patch.artist = before.artist;
+      patch.album = before.album;
+      patch.genre = before.genre;
+      patch.year = before.year;
+      patch.trackNo = before.trackNo;
       if (ext == '.flac') {
         writeFlac(dstFile.fd, r, st.size, patch, cover, mime);
       } else if (ext == '.mp3') {
@@ -769,9 +791,16 @@ export class TagWriter {
       dstFile = undefined;
       const tmpFile = fs.openSync(tmp, fs.OpenMode.READ_ONLY);
       try {
-        const after = TagParser.parse(tmpFile, ext, st.size);
-        if (Math.abs(after.durationMs - before.durationMs) > 1000) {
+      const tmpSize = fs.statSync(tmp).size;
+      const after = TagParser.parse(tmpFile, ext, tmpSize);
+      if (Math.abs(after.durationMs - before.durationMs) > 1000) {
           throw new Error('写后时长偏差超过 1s，已回滚');
+        }
+        if (before.title != '' && after.title != before.title) {
+          throw new Error(`嵌入封面后标签丢失：${before.title} → ${after.title || '(空)'}`);
+        }
+        if (before.album != '' && after.album != before.album) {
+          throw new Error(`嵌入封面后专辑丢失：${before.album} → ${after.album || '(空)'}`);
         }
       } finally {
         fs.closeSync(tmpFile);

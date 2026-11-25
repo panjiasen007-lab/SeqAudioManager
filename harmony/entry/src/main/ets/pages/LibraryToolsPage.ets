@@ -14,6 +14,7 @@ struct LibraryToolsPage {
   @State template: string = '{artist} - {album} - {track} {title}';
   @State tracks: Track[] = [];
   @State previews: RenamePreview[] = [];
+  @State cuePaths: string[] = [];
   @State groups: DuplicateGroup[] = [];
   @State reportText: string = '';
   @State busy: boolean = false;
@@ -24,12 +25,20 @@ struct LibraryToolsPage {
 
   private async loadTracks(): Promise<void> {
     const all = await Db.listTracks('');
+    const cuePaths: string[] = [];
+    for (const t of all) {
+      if (t.isCueChild == 1 && t.cuePath != '') {
+        cuePaths.push(t.cuePath);
+      }
+    }
+    this.cuePaths = cuePaths;
     this.tracks = all.filter((t: Track) => t.isCueChild == 0);
   }
 
   private makePreview(): void {
-    this.previews = RenameDedupService.buildPreview(this.tracks, this.template);
-    this.reportText = `预览 ${this.previews.length} 项，应用失败时整批回滚`;
+    this.previews = RenameDedupService.buildPreview(this.tracks, this.template, this.cuePaths);
+    const pending = this.previews.filter((p: RenamePreview) => p.status == '待应用').length;
+    this.reportText = `预览 ${this.previews.length} 项（待应用 ${pending}），应用失败时整批回滚`;
   }
 
   private async applyRename(): Promise<void> {
@@ -39,6 +48,8 @@ struct LibraryToolsPage {
     this.busy = true;
     const rep: RenameReport = await RenameDedupService.applyRenames(this.previews);
     await this.loadTracks();
+    // 重新生成预览：否则列表停在「待应用」，用户会对着已经改完的文件再点一次
+    this.makePreview();
     this.reportText = `重命名：成功 ${rep.ok} · 失败 ${rep.failed} · 回滚 ${rep.rolledBack}` +
       (rep.errors.length > 0 ? `｜${rep.errors.slice(0, 3).join(' / ')}` : '');
     this.busy = false;
@@ -69,6 +80,7 @@ struct LibraryToolsPage {
     const ctx = getContext(this) as common.UIAbilityContext;
     const n = await RenameDedupService.quarantineDuplicates(this.groups, `${ctx.filesDir}/Quarantine`);
     await this.loadTracks();
+    this.groups = []; // 已隔离的组不再展示，避免重复点击对已移动文件再操作
     this.reportText = `已隔离 ${n} 首到 Quarantine 目录（未删除）`;
     this.busy = false;
   }
@@ -110,7 +122,7 @@ struct LibraryToolsPage {
                 .fontColor(p.status == '失败' ? '#E06C6C' : '#B8B8C0').maxLines(1).width('100%')
             }
               .width('100%').padding({ top: 4, bottom: 4 })
-          }, (p: RenamePreview) => `${p.id}`)
+          }, (p: RenamePreview) => `${p.id}-${p.status}-${p.newName}`)
 
           Text('重复检测').fontSize(14).fontColor(ACCENT).margin({ top: 12 })
           Text('指纹 = 歌手/专辑/标题 + 时长(±1s) + 采样率/位深；只标记或隔离，不自动删除')

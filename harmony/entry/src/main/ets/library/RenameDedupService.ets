@@ -67,11 +67,29 @@ function cloneTrack(t: Track): Track {
 
 export class RenameDedupService {
   // {title} {artist} {album} {year} {track} {ext} {index}
-  static buildPreview(tracks: Track[], template: string): RenamePreview[] {
+  static buildPreview(tracks: Track[], template: string, cuePaths?: string[]): RenamePreview[] {
     const out: RenamePreview[] = [];
     const used = new Set<string>();
+    const cues = new Set<string>();
+    if (cuePaths != undefined) {
+      for (const c of cuePaths) {
+        cues.add(c);
+      }
+    }
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
+      if (cues.has(t.path)) {
+        // CUE 母文件被 .cue 的 FILE 行按名字引用：改名会让子轨全部失联，直接跳过
+        const cp = new RenamePreview();
+        cp.id = t.id;
+        cp.oldPath = t.path;
+        cp.newPath = t.path;
+        cp.oldName = t.fileName;
+        cp.newName = t.fileName;
+        cp.status = 'CUE 母文件跳过';
+        out.push(cp);
+        continue;
+      }
       const ext = extOf(t.path);
       const trackStr = t.trackNo > 0 ? (t.trackNo < 10 ? `0${t.trackNo}` : `${t.trackNo}`) : '';
       let name = template
@@ -81,6 +99,8 @@ export class RenameDedupService {
         .replace(/\{year\}/g, t.year)
         .replace(/\{track\}/g, trackStr)
         .replace(/\{index\}/g, `${i + 1}`);
+      // 变量为空时只留值不留分隔符，否则会生成 "- - 03_sine_48k.wav" 这类残名
+      name = name.replace(/\s*-\s*-\s*/g, ' - ').replace(/^[\s-]+/, '').replace(/[\s-]+$/, '');
       name = sanitize(name);
       if (name == '' || name == ext) {
         name = `${t.fileName}${ext}`;

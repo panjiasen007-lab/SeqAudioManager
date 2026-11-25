@@ -5,6 +5,7 @@ import { Track, emptyTrack } from '../model/Track';
 import { Db } from '../db/Db';
 import { HttpStack } from '../net/HttpStack';
 import { TagWriter, WriteResult } from '../tags/TagWriter';
+import { PictureBytes, TagParser } from '../scanner/TagParser';
 
 interface ItunesItem {
   artistName: string;
@@ -252,5 +253,49 @@ export class CoverService {
       res.message = err.message ? err.message : `${e}`;
     }
     return res;
+  }
+
+  // 兜底：文件里已经内嵌了封面（比如清空曲库后重扫、换设备重扫），直接从文件抽出来补缓存
+  static async ensureCover(ctx: common.UIAbilityContext, track: Track): Promise<string> {
+    if (track.ext != '.flac' && track.ext != '.mp3') {
+      console.info(`ensureCover: skip ext=${track.ext}`);
+      return '';
+    }
+    try {
+      const st = fs.statSync(track.path);
+      const f = fs.openSync(track.path, fs.OpenMode.READ_ONLY);
+      let pic: PictureBytes | undefined = undefined;
+      try {
+        pic = TagParser.extractCover(f, track.ext, st.size);
+      } finally {
+        fs.closeSync(f);
+      }
+      console.info(`ensureCover: track=${track.id} ext=${track.ext} pic=${pic ? pic.bytes.length : -1}`);
+      if (pic == undefined || pic.bytes.length == 0) {
+        return '';
+      }
+      const ext = pic.mime.indexOf('png') >= 0 ? '.png' : '.jpg';
+      const dir = await CoverService.cacheDir(ctx);
+      const path = `${dir}/${track.id}${ext}`;
+      const out = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        const ab = new ArrayBuffer(pic.bytes.length);
+        new Uint8Array(ab).set(pic.bytes);
+        fs.writeSync(out.fd, ab);
+      } finally {
+        fs.closeSync(out);
+      }
+      const row = await Db.getTrackById(track.id);
+      if (row) {
+        row.coverBlobPath = path;
+        await Db.updateTrack(row);
+      }
+      console.info(`ensureCover: ok track=${track.id} path=${path}`);
+      return path;
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`ensureCover: fail ${err.message}`);
+      return '';
+    }
   }
 }

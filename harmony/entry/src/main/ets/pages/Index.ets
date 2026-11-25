@@ -24,7 +24,6 @@ struct Index {
   @State keyword: string = '';
   @State stats: Stats = new Stats();
   @State scanning: boolean = false;
-  private rowClickGuard: number = 0;
   @State scanText: string = '';
   @State toast: string = '';
   @State roots: string[] = [];
@@ -97,13 +96,27 @@ struct Index {
         break;
       }
     }
-    this.engine.restoreQueue(tracks, idx, positionMs);
+    // 只有「恢复到的曲目就是上次那首」才带进度，且进度不能超过该曲时长，
+    // 否则换曲/换队列后会直接显示 0:05 / 0:03 这种越界进度并秒跳下一首
+    let pos = 0;
+    if (lastPath != '' && tracks[idx].path == lastPath) {
+      const t = tracks[idx];
+      const dur = t.isCueChild == 1 ? Math.max(0, t.cueEndMs - t.cueStartMs) : t.durationMs;
+      pos = dur > 1000 ? Math.min(positionMs, dur - 800) : 0;
+      pos = Math.max(0, pos);
+    }
+    this.engine.restoreQueue(tracks, idx, pos);
     this.toastMsg(`已恢复上次会话：${tracks[idx].title}`);
   }
 
   // 首次启动：把内置示例曲目复制进沙箱 Music，保证开箱即有内容可扫可播
   private async seedSamplesIfNeeded(ctx: common.UIAbilityContext): Promise<void> {
     const musicDir = `${ctx.filesDir}/Music`;
+    // 只在首次启动播种：否则用户把示例曲改名/删掉后，每次启动都会被补回一份，变成重复曲目
+    const seeded = await Db.getSetting('seed_samples_done', '');
+    if (seeded == '1') {
+      return;
+    }
     console.info(`seedSamples: start dir=${musicDir}`);
     try {
       try {
@@ -145,6 +158,7 @@ struct Index {
       if (copied > 0) {
         this.toastMsg(`已载入 ${copied} 个内置示例文件`);
       }
+      await Db.setSetting('seed_samples_done', '1');
       console.info(`seedSamples: copied=${copied} dir=${musicDir} files=${fs.listFileSync(musicDir).join(',')}`);
     } catch (e) {
       console.error(`seedSamples: 失败 ${(e as BusinessError).message}`);
@@ -347,28 +361,32 @@ struct Index {
   @Builder
   trackRow(t: Track, i: number) {
     Row({ space: 12 }) {
-      Text(this.isPlayingTrack(t) ? '▶' : `${i + 1}`)
-        .width(30)
-        .textAlign(TextAlign.Center)
-        .fontSize(14)
-        .fontColor(this.isPlayingTrack(t) ? ACCENT : '#6E6E76')
+      // 播放点击只挂在左侧文本区：行容器不绑 onClick，编辑按钮天然不会误触播放
+      Row({ space: 12 }) {
+        Text(this.isPlayingTrack(t) ? '▶' : `${i + 1}`)
+          .width(30)
+          .textAlign(TextAlign.Center)
+          .fontSize(14)
+          .fontColor(this.isPlayingTrack(t) ? ACCENT : '#6E6E76')
+        Column({ space: 3 }) {
+          Text(t.title)
+            .fontSize(15)
+            .fontColor(this.isPlayingTrack(t) ? ACCENT : '#F0F0F2')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.subLine(t))
+            .fontSize(12)
+            .fontColor('#8A8A92')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+      }
+        .layoutWeight(1)
         .onClick(() => {
           this.playAt(i);
         })
-      Column({ space: 3 }) {
-        Text(t.title)
-          .fontSize(15)
-          .fontColor(this.isPlayingTrack(t) ? ACCENT : '#F0F0F2')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.subLine(t))
-          .fontSize(12)
-          .fontColor('#8A8A92')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
       Text(fmtSpec(t))
         .fontSize(10)
         .fontColor(ACCENT)
@@ -384,20 +402,12 @@ struct Index {
         .backgroundColor('#26221A')
         .fontColor(ACCENT)
         .onClick(() => {
-          // 子控件点击会冒泡到整行，用时间戳抑制同一次点击的播放
-          this.rowClickGuard = Date.now();
           this.openEditor(t);
         })
     }
       .width('100%')
       .padding({ top: 9, bottom: 9, left: 8, right: 8 })
       .borderRadius(8)
-      .onClick(() => {
-        if (Date.now() - this.rowClickGuard < 350) {
-          return;
-        }
-        this.playAt(i);
-      })
   }
 
   build() {
@@ -587,7 +597,7 @@ struct Index {
             ListItem() {
               this.trackRow(t, i)
             }
-          }, (t: Track) => `${t.id}`)
+          }, (t: Track) => `${t.id}-${t.path}`)
         }
           .width('100%')
           .layoutWeight(1)

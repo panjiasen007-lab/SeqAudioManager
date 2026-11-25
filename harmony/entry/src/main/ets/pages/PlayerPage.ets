@@ -1,8 +1,10 @@
 import { router } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import { PlayerEngine, MODE_NAMES, PlayMode } from '../player/PlayerEngine';
 import { NativePlayer } from '../player/NativePlayer';
 import { fmtDuration, fmtSpec, fmtSize } from '../utils/Util';
 import { Db } from '../db/Db';
+import { CoverService } from '../cover/CoverService';
 
 const ACCENT = '#E8B04B';
 
@@ -18,16 +20,71 @@ struct PlayerPage {
   @State vol: number = 100;
   @State toast: string = '';
   @State eqOn: boolean = false;
+  @State coverPath: string = '';
   private engine: PlayerEngine = PlayerEngine.get();
+  private probedTrackId: number = -1;
+  // 跟随曲目切换刷新封面（引擎每次 tick 都会回调，值不变时不触发重绘）
+  private onEngineTick = (): void => {
+    const next = this.resolveCover();
+    if (next != this.coverPath) {
+      this.coverPath = next;
+    }
+    const cur = this.engine.current();
+    if (cur && next == '' && cur.id != this.probedTrackId) {
+      // 换了曲子且没有缓存封面：试着从文件内嵌图里补一份
+      this.probedTrackId = cur.id;
+      this.probeEmbeddedCover();
+    }
+  };
+
+  private async probeEmbeddedCover(): Promise<void> {
+    const t = this.engine.current();
+    if (!t || t.coverBlobPath != '') {
+      return;
+    }
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const path = await CoverService.ensureCover(ctx, t);
+    if (path == '') {
+      return;
+    }
+    // 同步内存里的队列对象：切回来也不会再显示占位图
+    t.coverBlobPath = path;
+    const cur = this.engine.current();
+    if (cur && cur.path == t.path) {
+      this.coverPath = `file://${path}`;
+    }
+  }
+
+  private resolveCover(): string {
+    const t = this.engine.current();
+    if (!t || t.coverBlobPath == '') {
+      return '';
+    }
+    return `file://${t.coverBlobPath}`;
+  }
 
   aboutToAppear(): void {
     this.modeIdx = this.engine.mode as number;
     this.vol = Math.round(this.engine.volume * 100);
     this.eqOn = NativePlayer.eqEnabled();
+    this.coverPath = this.resolveCover();
+    this.engine.addListener(this.onEngineTick);
+    if (this.coverPath == '') {
+      const cur = this.engine.current();
+      if (cur) {
+        this.probedTrackId = cur.id;
+      }
+      this.probeEmbeddedCover();
+    }
+  }
+
+  aboutToDisappear(): void {
+    this.engine.removeListener(this.onEngineTick);
   }
 
   onPageShow(): void {
     this.eqOn = NativePlayer.eqEnabled();
+    this.coverPath = this.resolveCover();
   }
 
   private toastMsg(msg: string): void {
@@ -101,16 +158,28 @@ struct PlayerPage {
         .width('100%')
         .height(44)
 
-      // 封面占位
+      // 封面：有缓存图就用缓存，否则保留占位
       Stack() {
         Column()
           .width(240)
           .height(240)
           .borderRadius(16)
           .linearGradient({ angle: 135, colors: [['#3A3A46', 0.0], ['#1C1C22', 1.0]] })
-        Text('♪')
-          .fontSize(84)
-          .fontColor(ACCENT)
+        if (this.coverPath != '') {
+          Image(this.coverPath)
+            .width(240)
+            .height(240)
+            .borderRadius(16)
+            .objectFit(ImageFit.Cover)
+            .onError(() => {
+              console.error(`cover image load fail: ${this.coverPath}`);
+              this.coverPath = '';
+            })
+        } else {
+          Text('♪')
+            .fontSize(84)
+            .fontColor(ACCENT)
+        }
       }
         .margin({ top: 28, bottom: 28 })
 

@@ -2,6 +2,11 @@ import fs from '@ohos.file.fs';
 import util from '@ohos.util';
 
 // 从文件 fd 中解析音频元数据（纯 ArkTS 实现，覆盖 FLAC / MP3 / WAV / M4A）
+export class PictureBytes {
+  bytes: Uint8Array = new Uint8Array(0);
+  mime: string = '';
+}
+
 export class Meta {
   title: string = '';
   artist: string = '';
@@ -298,7 +303,9 @@ function parseMp3(r: Reader, size: number, m: Meta): void {
   const h = r.read(10, 0);
   if (h.length >= 10 && ascii(h, 0, 3) == 'ID3') {
     const major = h[3];
-    const tagSize = major >= 4 ? syncsafe(h, 6) : u32be(h, 6);
+    // ID3v2 全系（2.2/2.3/2.4）标签头长度都是 syncsafe；此前把 2.3 当大端读，
+    // 会把 tagEnd 算成天文数字从而整段跳过，导致写回后回读标题为空。
+    const tagSize = syncsafe(h, 6);
     const tagEnd = 10 + tagSize;
     if (tagEnd > 10 && tagEnd < size + 1024) {
       let pos = 10;
@@ -493,6 +500,100 @@ function parseMp4(r: Reader, size: number, m: Meta): void {
 
 // ---------------- 入口 ----------------
 
+// ---------------- 内嵌封面 ----------------
+
+// FLAC：type 6 的 PICTURE 块
+function flacPicture(r: Reader, size: number): PictureBytes | undefined {
+  let pos = 4;
+  while (pos + 4 <= size) {
+    const h = r.read(4, pos);
+    if (h.length < 4) {
+      break;
+    }
+    const last = (h[0] & 0x80) != 0;
+    const type = h[0] & 0x7f;
+    const len = (h[1] << 16) | (h[2] << 8) | h[3];
+    const dataPos = pos + 4;
+    if (type == 6 && len > 32) {
+      const b = r.read(len, dataPos);
+      if (b.length > 32) {
+        let i = 4;
+        const mimeLen = u32be(b, i);
+        i += 4;
+        const mime = ascii(b, i, Math.min(mimeLen, b.length - i));
+        i += mimeLen;
+        const descLen = u32be(b, i);
+        i += 4 + descLen + 16; // 描述 + 宽/高/色深/色数
+        const picLen = u32be(b, i);
+        i += 4;
+        if (picLen > 0 && i + picLen <= b.length) {
+          const pic = new PictureBytes();
+          pic.mime = mime;
+          pic.bytes = b.subarray(i, i + picLen);
+          return pic;
+        }
+      }
+    }
+    pos = dataPos + len;
+    if (last) {
+      break;
+    }
+  }
+  return undefined;
+}
+
+// MP3：ID3 里的 APIC 帧
+function mp3Picture(r: Reader, size: number): PictureBytes | undefined {
+  const head = r.read(10, 0);
+  if (head.length < 10 || ascii(head, 0, 3) != 'ID3') {
+    return undefined;
+  }
+  const major = head[3];
+  const tagEnd = Math.min(size, 10 + syncsafe(head, 6));
+  let pos = 10;
+  while (pos + 10 <= tagEnd) {
+    const fh = r.read(10, pos);
+    if (fh.length < 10 || !/^[A-Z0-9]{4}$/.test(ascii(fh, 0, 4))) {
+      break;
+    }
+    const fsize = major >= 4 ? syncsafe(fh, 4) : u32be(fh, 4);
+    if (fsize <= 0 || fsize > 16777216) {
+      break;
+    }
+    if (ascii(fh, 0, 4) == 'APIC') {
+      const body = r.read(fsize, pos + 10);
+      if (body.length > 4) {
+        let i = 1;
+        let mime = '';
+        while (i < body.length && body[i] != 0) {
+          mime += String.fromCharCode(body[i]);
+          i++;
+        }
+        i += 2; // 跳过 mime 结束符 + 图片类型
+        if (body[0] == 1 || body[0] == 2) {
+          while (i + 1 < body.length && !(body[i] == 0 && body[i + 1] == 0)) {
+            i += 2;
+          }
+          i += 2;
+        } else {
+          while (i < body.length && body[i] != 0) {
+            i++;
+          }
+          i++;
+        }
+        if (i < body.length) {
+          const pic = new PictureBytes();
+          pic.mime = mime;
+          pic.bytes = body.subarray(i);
+          return pic;
+        }
+      }
+    }
+    pos += 10 + fsize;
+  }
+  return undefined;
+}
+
 export class TagParser {
   static parse(f: fs.File, ext: string, size: number): Meta {
     const m = new Meta();
@@ -511,5 +612,21 @@ export class TagParser {
       // 解析失败时返回已取得的 partial 结果
     }
     return m;
+  }
+
+  // 抽取内嵌封面：清空曲库/重扫后 DB 里的封面缓存会丢，靠这个从文件里补回来
+  static extractCover(f: fs.File, ext: string, size: number): PictureBytes | undefined {
+    try {
+      const r = new Reader(f);
+      if (ext == '.flac') {
+        return flacPicture(r, size);
+      }
+      if (ext == '.mp3') {
+        return mp3Picture(r, size);
+      }
+    } catch (e) {
+      // 忽略：当作没有内嵌封面
+    }
+    return undefined;
   }
 }

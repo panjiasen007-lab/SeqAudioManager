@@ -98,7 +98,7 @@ struct HealthPage {
             }
               .width('100%').padding({ top: 8, bottom: 8, left: 6, right: 6 })
           }
-        }, (t: Track) => `${t.id}`)
+        }, (t: Track) => `${t.id}-${t.healthStatus}-${t.healthDetail}`)
       }
         .width('100%').layoutWeight(1).margin({ top: 10 }).scrollBar(BarState.Auto)
     }

@@ -91,19 +91,33 @@ export class LyricsService {
   static async searchOnline(track: Track): Promise<LyricsResult> {
     const res = new LyricsResult();
     res.source = 'lrclib';
-    const q = `track_name=${encodeURIComponent(track.title)}&artist_name=${encodeURIComponent(track.artist)}&album_name=${encodeURIComponent(track.album)}`;
-    try {
-      const text = await HttpStack.getText(`https://lrclib.net/api/search?${q}`);
-      const arr = JSON.parse(text) as LrclibItem[];
-      if (arr.length > 0) {
-        const item = arr[0];
-        const synced = item.syncedLyrics ? item.syncedLyrics : '';
-        res.plain = item.plainLyrics ? item.plainLyrics : '';
-        res.lines = LyricsService.parseLrc(synced != '' ? synced : res.plain);
+    const title = encodeURIComponent(track.title);
+    // 逐级放宽条件：专辑名对不上时 lrclib 直接返回空数组，不放宽就永远搜不到
+    const tries: string[] = [];
+    if (track.album != '' && track.artist != '') {
+      tries.push(`track_name=${title}&artist_name=${encodeURIComponent(track.artist)}&album_name=${encodeURIComponent(track.album)}`);
+    }
+    if (track.artist != '') {
+      tries.push(`track_name=${title}&artist_name=${encodeURIComponent(track.artist)}`);
+    }
+    tries.push(`track_name=${title}`);
+    for (const q of tries) {
+      try {
+        const text = await HttpStack.getText(`https://lrclib.net/api/search?${q}`);
+        const arr = JSON.parse(text) as LrclibItem[];
+        if (arr.length > 0) {
+          const item = arr[0];
+          const synced = item.syncedLyrics ? item.syncedLyrics : '';
+          res.plain = item.plainLyrics ? item.plainLyrics : '';
+          res.lines = LyricsService.parseLrc(synced != '' ? synced : res.plain);
+          if (res.lines.length > 0) {
+            return res;
+          }
+        }
+      } catch (e) {
+        const err = e as BusinessError;
+        console.error(`LyricsService search fail: ${err.message}`);
       }
-    } catch (e) {
-      const err = e as BusinessError;
-      console.error(`LyricsService search fail: ${err.message}`);
     }
     return res;
   }
