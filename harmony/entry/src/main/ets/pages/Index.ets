@@ -7,6 +7,7 @@ import { Db, Stats } from '../db/Db';
 import { Scanner } from '../scanner/Scanner';
 import { PlayerEngine, PlayMode } from '../player/PlayerEngine';
 import { MiniPlayer } from '../components/MiniPlayer';
+import { SessionStore } from '../session/SessionStore';
 import { fmtDuration, fmtSize, fmtSpec } from '../utils/Util';
 
 const ACCENT = '#E8B04B';
@@ -71,12 +72,15 @@ struct Index {
   private async initAsync(): Promise<void> {
     const ctx = getContext(this) as common.UIAbilityContext;
     await Db.init(ctx);
-    const modeVal = parseInt(await Db.getSetting('play_mode', '1'));
-    this.engine.setMode((isNaN(modeVal) ? PlayMode.LOOP : modeVal) as PlayMode);
-    const vol = parseFloat(await Db.getSetting('volume', '1'));
-    if (!isNaN(vol)) {
-      this.engine.setVolume(vol);
-    }
+    const session = await SessionStore.load();
+    this.engine.setMode(session.playMode as PlayMode);
+    this.engine.setVolume(session.volume);
+    this.engine.onSessionDirty = (force: boolean): void => {
+      SessionStore.markDirty(this.engine, force);
+    };
+    this.engine.addListener((): void => {
+      SessionStore.markDirty(this.engine, false);
+    });
     await this.seedSamplesIfNeeded(ctx);
     const st = await Db.stats();
     if (st.count == 0) {
@@ -84,6 +88,32 @@ struct Index {
     } else {
       await this.refresh();
     }
+    await this.restoreSession(session.queuePaths, session.lastTrackPath, session.lastPositionMs);
+    SessionStore.startAutoSave(this.engine);
+  }
+
+  aboutToDisappear(): void {
+    SessionStore.saveNow(this.engine);
+    SessionStore.stopAutoSave();
+  }
+
+  private async restoreSession(paths: string[], lastPath: string, positionMs: number): Promise<void> {
+    if (paths.length == 0) {
+      return;
+    }
+    const tracks = await Db.tracksByPaths(paths);
+    if (tracks.length == 0) {
+      return;
+    }
+    let idx = 0;
+    for (let i = 0; i < tracks.length; i++) {
+      if (tracks[i].path == lastPath) {
+        idx = i;
+        break;
+      }
+    }
+    this.engine.restoreQueue(tracks, idx, positionMs);
+    this.toastMsg(`已恢复上次会话：${tracks[idx].title}`);
   }
 
   // 首次启动：把内置示例曲目复制进沙箱 Music，保证开箱即有内容可扫可播

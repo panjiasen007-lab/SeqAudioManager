@@ -71,8 +71,12 @@ export class PlayerEngine {
   positionMs: number = 0;
   durationMs: number = 0;
   volume: number = 1.0;
+  // 会话恢复时待定位的进度（首次加载完成后 seek）
+  private pendingSeekMs: number = 0;
 
   private listeners: (() => void)[] = [];
+  // 由 Index 注入：关键事件立即持久化会话（避免 PlayerEngine 与 SessionStore 循环依赖）
+  onSessionDirty?: (force: boolean) => void;
 
   addListener(cb: () => void): void {
     this.listeners.push(cb);
@@ -195,6 +199,14 @@ export class PlayerEngine {
       await av.prepare();
       await prepared;
       await av.setVolume(this.volume);
+      if (this.pendingSeekMs > 0) {
+        const target = Math.min(this.pendingSeekMs,
+          this.durationMs > 0 ? this.durationMs - 50 : this.pendingSeekMs);
+        av.seek(Math.max(0, target), media.SeekMode.SEEK_PREV_SYNC);
+        this.positionMs = Math.max(0, target);
+        this.pendingSeekMs = 0;
+        this.emit();
+      }
       await av.play();
     } catch (e) {
       const err = e as BusinessError;
@@ -209,11 +221,25 @@ export class PlayerEngine {
     this.playIndex(startIndex);
   }
 
+  // 会话恢复：只装载队列与进度，不自动播放；用户点播时从断点续播
+  restoreQueue(tracks: Track[], startIndex: number, positionMs: number): void {
+    this.queue = tracks.slice();
+    this.index = startIndex >= 0 && startIndex < this.queue.length ? startIndex : -1;
+    this.pendingSeekMs = Math.max(0, Math.round(positionMs));
+    this.positionMs = this.pendingSeekMs;
+    const cur = this.current();
+    this.durationMs = cur ? cur.durationMs : 0;
+    this.emit();
+  }
+
   playIndex(i: number): void {
     if (i < 0 || i >= this.queue.length) {
       return;
     }
     this.index = i;
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
     this.loadCurrent();
   }
 
@@ -226,6 +252,8 @@ export class PlayerEngine {
     }
     const av = this.av;
     if (!av) {
+      // 恢复的队列尚未加载物理文件：首次点播时加载并在 prepared 后 seek 到断点
+      this.loadCurrent();
       return;
     }
     if (this.playing) {
@@ -244,6 +272,9 @@ export class PlayerEngine {
     this.positionMs = clamped;
     av.seek(clamped, media.SeekMode.SEEK_PREV_SYNC);
     this.emit();
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
   }
 
   setVolume(v: number): void {
@@ -251,10 +282,16 @@ export class PlayerEngine {
     if (this.av) {
       this.av.setVolume(this.volume);
     }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
   }
 
   setMode(m: PlayMode): void {
     this.mode = m;
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
   }
 
   private randomIndex(): number {
