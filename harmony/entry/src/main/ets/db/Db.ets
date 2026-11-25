@@ -320,6 +320,19 @@ export class Db {
     await store.executeSql('DELETE FROM tracks');
   }
 
+  static async setLyrics(id: number, lyrics: string): Promise<void> {
+    const store = Db.store;
+    if (!store) {
+      return;
+    }
+    try {
+      await store.executeSql('UPDATE tracks SET lyrics = ? WHERE id = ?', [lyrics, id]);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.setLyrics fail: ${err.message}`);
+    }
+  }
+
   static async deleteCueChildren(): Promise<void> {
     const store = Db.store;
     if (!store) {

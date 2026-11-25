@@ -66,9 +66,20 @@ struct PlayerPage {
           .fontSize(14)
           .fontColor('#8A8A92')
         Blank()
+        Text('歌词')
+          .fontSize(13)
+          .fontColor(ACCENT)
+          .onClick(() => {
+            const cur = this.engine.current();
+            if (cur) {
+              AppStorage.setOrCreate('seqaudio_lyrics_path', JSON.stringify([cur.path]));
+              router.pushUrl({ url: 'pages/LyricsPage' });
+            }
+          })
         Text(MODE_NAMES[this.modeIdx])
           .fontSize(13)
           .fontColor(ACCENT)
+          .margin({ left: 14 })
           .onClick(() => {
             this.cycleMode();
           })

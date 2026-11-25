@@ -5,6 +5,7 @@
     "pages/TrackEditPage",
     "pages/HealthPage",
     "pages/LibraryToolsPage",
-    "pages/CoverPage"
+    "pages/CoverPage",
+    "pages/LyricsPage"
   ]
 }
