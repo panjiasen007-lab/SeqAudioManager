@@ -30,7 +30,7 @@
 
 ```bash
 export PATH=/d/HarmonyOS/DevEcoStudio/jbr/bin:$PATH
-cd /d/HarmonyOS/Projects/SeqAudioHarmony/harmony
+cd /d/SeqAudioManager/harmony-pc/harmony
 DEVECO_SDK_HOME="D:\HarmonyOS\DevEcoStudio\sdk" hvigorw.bat assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
 # 安装（模拟器接受未签名 HAP）
 hdc -t 127.0.0.1:5555 install -r entry/build/default/outputs/default/entry-default-unsigned.hap
