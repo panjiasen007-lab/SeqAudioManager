@@ -12,6 +12,13 @@ export class ImportReport {
 // 首次读取可能阻塞数秒；放在主线程会触发 THREAD_BLOCK_6S 被系统强杀。
 @Concurrent
 function copyOne(srcUri: string, dest: string): number {
+  // 优先使用系统 copyFileSync：避免 readSync 的 offset 语义导致大文件反复读同一块
+  try {
+    fs.copyFileSync(srcUri, dest);
+    return fs.statSync(dest).size;
+  } catch (e) {
+    // picker URI 不支持 copyFileSync 时，退回顺序读写（不传 offset）
+  }
   let src: fs.File | undefined = undefined;
   let dst: fs.File | undefined = undefined;
   try {
@@ -19,21 +26,22 @@ function copyOne(srcUri: string, dest: string): number {
     dst = fs.openSync(dest, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     const buf = new ArrayBuffer(1048576);
     let total = 0;
-    let n = 0;
-    do {
-      n = fs.readSync(src.fd, buf, { offset: 0, length: 1048576 });
-      if (n > 0) {
-        let written = 0;
-        while (written < n) {
-          const w = fs.writeSync(dst.fd, buf, { offset: written, length: n - written });
-          if (w <= 0) {
-            return -1;
-          }
-          written += w;
-        }
-        total += n;
+    while (true) {
+      const n = fs.readSync(src.fd, buf, { length: 1048576 });
+      if (n <= 0) {
+        break;
       }
-    } while (n > 0);
+      let written = 0;
+      while (written < n) {
+        const slice = buf.slice(written, n);
+        const w = fs.writeSync(dst.fd, slice);
+        if (w <= 0) {
+          return -1;
+        }
+        written += w;
+      }
+      total += n;
+    }
     return total;
   } catch (e) {
     return -1;

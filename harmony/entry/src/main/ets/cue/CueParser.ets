@@ -7,6 +7,8 @@ export class CueTrack {
   performer: string = '';
   startMs: number = 0;
   endMs: number = 0;
+  // INDEX 00：本轨预间隙起点，也是上一轨的结束边界
+  pregapMs: number = 0;
 }
 
 export class CueFile {
@@ -98,6 +100,8 @@ export class CueParser {
         const m = rest.match(/^(\d+)\s+([\d:]+)/);
         if (m && m[1] == '01') {
           currentTrack.startMs = indexToMs(m[2]);
+        } else if (m && m[1] == '00') {
+          currentTrack.pregapMs = indexToMs(m[2]);
         }
       }
     }

@@ -24,6 +24,19 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
+      // 桌面工作台按桌面版窗口尺寸启动：最小 1040×720（与桌面版一致），2in1 上直接最大化
+      try {
+        const mainWindow = windowStage.getMainWindowSync();
+        mainWindow.setWindowBackgroundColor('#070B14');
+        mainWindow.setWindowLimits({ minWidth: 1040, minHeight: 720 }).catch((e: Error) => {
+          hilog.warn(DOMAIN, 'testTag', 'setWindowLimits failed: %{public}s', e.message);
+        });
+        mainWindow.maximize().catch((e: Error) => {
+          hilog.warn(DOMAIN, 'testTag', 'maximize failed: %{public}s', e.message);
+        });
+      } catch (e) {
+        hilog.warn(DOMAIN, 'testTag', 'window setup failed: %{public}s', JSON.stringify(e));
+      }
     });
   }
 

@@ -1,9 +1,10 @@
 import { router } from '@kit.ArkUI';
+import { T } from '../theme/Tokens';
 import { EqPreset, EqPresets, EqState } from '../eq/EqPresets';
 import { NativePlayer } from '../player/NativePlayer';
+import { AppLog } from '../utils/AppLog';
 
-const ACCENT = '#E8B04B';
-const BAR_H = 200;
+const BAR_H = 190;
 
 interface DspSelfTest {
   band: number;
@@ -14,7 +15,6 @@ interface DspSelfTest {
   bands: number;
 }
 
-// 31 段图形均衡器：拖动柱体调增益，改动即下发原生 DSP（≤1 个音频回调生效）
 @Entry
 @Component
 struct EqPage {
@@ -27,6 +27,8 @@ struct EqPage {
   @State nativeReady: boolean = true;
   private applyTimer: number = -1;
   private saveTimer: number = -1;
+  private curveSettings: RenderingContextSettings = new RenderingContextSettings(true);
+  private curveCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.curveSettings);
 
   aboutToAppear(): void {
     this.initAsync();
@@ -63,11 +65,57 @@ struct EqPage {
     }
   }
 
+  private drawCurve(): void {
+    const w = this.curveCtx.width;
+    const h = this.curveCtx.height;
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    this.curveCtx.clearRect(0, 0, w, h);
+    const padX = 10;
+    const padY = 10;
+    const mid = h / 2;
+    this.curveCtx.lineWidth = 1;
+    this.curveCtx.strokeStyle = 'rgba(38, 52, 74, 0.75)';
+    for (let i = 0; i <= 4; i++) {
+      const y = padY + i * (h - padY * 2) / 4;
+      this.curveCtx.beginPath();
+      this.curveCtx.moveTo(padX, y);
+      this.curveCtx.lineTo(w - padX, y);
+      this.curveCtx.stroke();
+    }
+    this.curveCtx.strokeStyle = 'rgba(110, 168, 232, 0.55)';
+    this.curveCtx.beginPath();
+    this.curveCtx.moveTo(padX, mid);
+    this.curveCtx.lineTo(w - padX, mid);
+    this.curveCtx.stroke();
+
+    const amp = (h / 2 - padY) / EqPresets.MAX_DB;
+    this.curveCtx.beginPath();
+    for (let i = 0; i < this.gains.length; i++) {
+      const x = padX + i * (w - padX * 2) / (this.gains.length - 1);
+      const y = mid - this.gains[i] * amp;
+      if (i == 0) {
+        this.curveCtx.moveTo(x, y);
+      } else {
+        this.curveCtx.lineTo(x, y);
+      }
+    }
+    this.curveCtx.strokeStyle = T.CYAN;
+    this.curveCtx.lineWidth = 2;
+    this.curveCtx.stroke();
+
+    this.curveCtx.lineTo(w - padX, mid);
+    this.curveCtx.lineTo(padX, mid);
+    this.curveCtx.closePath();
+    this.curveCtx.fillStyle = 'rgba(78, 201, 190, 0.10)';
+    this.curveCtx.fill();
+  }
+
   private applyNow(): void {
     NativePlayer.setEq(this.eqOn, this.gains);
   }
 
-  // 拖动时 60ms 合并下发；落盘再慢一拍，避免频繁写 settings
   private scheduleApply(persist: boolean): void {
     if (this.applyTimer >= 0) {
       clearTimeout(this.applyTimer);
@@ -115,6 +163,7 @@ struct EqPage {
     this.applyNow();
     EqPresets.save(this.currentState());
     this.message = on ? '均衡器已启用' : '均衡器已关闭（PCM 直通）';
+    AppLog.info(this.message);
   }
 
   private pickPreset(p: EqPreset): void {
@@ -123,6 +172,8 @@ struct EqPage {
     this.applyNow();
     EqPresets.save(this.currentState());
     this.message = `已切换到预设「${p.name}」`;
+    this.drawCurve();
+    AppLog.info(this.message);
   }
 
   private resetFlat(): void {
@@ -131,6 +182,7 @@ struct EqPage {
     this.applyNow();
     EqPresets.save(this.currentState());
     this.message = '已重置为平坦';
+    this.drawCurve();
   }
 
   private async saveCustom(): Promise<void> {
@@ -188,6 +240,7 @@ struct EqPage {
     if (this.presetName != EqPresets.CUSTOM_NAME) {
       this.presetName = EqPresets.CUSTOM_NAME;
     }
+    this.drawCurve();
     this.scheduleApply(true);
   }
 
@@ -196,58 +249,65 @@ struct EqPage {
     Column() {
       Text(this.gainText(i))
         .fontSize(9)
-        .fontColor(Math.abs(this.bandDb(i)) > 0.05 ? ACCENT : '#6E6E76')
+        .fontColor(Math.abs(this.bandDb(i)) > 0.05 ? T.CYAN : T.FG_MUTE)
         .height(12)
       Stack({ alignContent: Alignment.Center }) {
         Column()
-          .width(16)
+          .width(14)
           .height(BAR_H)
-          .borderRadius(8)
-          .backgroundColor('#1B1B21')
+          .borderRadius(7)
+          .backgroundColor(T.INPUT)
         Divider()
-          .width(26)
+          .width(24)
           .strokeWidth(1)
-          .color('#3A3A44')
+          .color(T.LINE)
         if (Math.abs(this.bandDb(i)) > 0.05) {
           Column()
-            .width(16)
+            .width(14)
             .height(this.fillHeight(i))
-            .borderRadius(8)
-            .backgroundColor(ACCENT)
+            .borderRadius(7)
+            .backgroundColor(T.CYAN)
             .offset({ y: this.fillOffset(i) })
         }
       }
-      .width(30)
+      .width(28)
       .height(BAR_H)
       .onTouch((e: TouchEvent) => {
         this.onBandTouch(i, e, BAR_H);
       })
       Text(this.freqLabel(i))
         .fontSize(8)
-        .fontColor('#7A7A84')
+        .fontColor(T.FG_MUTE)
         .height(11)
         .margin({ top: 4 })
     }
-    .width(38)
+    .width(36)
   }
 
   build() {
     Column() {
-      Row() {
-        Text('均衡器')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#F5F5F7')
+      Row({ space: 12 }) {
+        Column({ space: 2 }) {
+          Text('均衡器')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(T.FG)
+          Text('31 段 · 峰值 ±12 dB · Q=1.41')
+            .fontSize(10)
+            .fontColor(T.FG_MUTE)
+        }
+        .alignItems(HorizontalAlign.Start)
         Blank()
-        Text(this.nativeReady ? '31 段 · Q=1.41 · ±12dB' : 'AVPlayer 降级')
-          .fontSize(11)
-          .fontColor(this.nativeReady ? '#8A8A92' : '#C86A5A')
+        Text(this.nativeReady ? '原生直通' : 'AVPlayer 降级')
+          .fontSize(10)
+          .fontColor(this.nativeReady ? T.OK : T.WARN)
         Button('返回')
-          .fontSize(12)
-          .height(28)
-          .margin({ left: 12 })
-          .backgroundColor('#2A2A30')
-          .fontColor('#F0F0F2')
+          .height(30)
+          .fontSize(11)
+          .fontColor(T.FG)
+          .backgroundColor(T.GHOST_BG)
+          .border({ width: 1, color: T.LINE_SOFT })
+          .borderRadius(8)
           .onClick(() => {
             this.flushTimers();
             router.back();
@@ -255,90 +315,134 @@ struct EqPage {
       }
       .width('100%')
 
-      Row() {
-        Text('启用均衡器')
-          .fontSize(14)
-          .fontColor('#D8D8DC')
-        Toggle({ type: ToggleType.Switch, isOn: this.eqOn })
-          .margin({ left: 10 })
-          .selectedColor(ACCENT)
-          .enabled(this.nativeReady)
-          .onChange((on: boolean) => {
-            this.toggleOn(on);
-          })
-        Blank()
-        Text(this.message)
-          .fontSize(11)
-          .fontColor(ACCENT)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .width('100%')
-      .margin({ top: 10 })
-
-      Flex({ wrap: FlexWrap.Wrap }) {
-        ForEach(this.presets, (p: EqPreset) => {
-          Button(p.name)
-            .fontSize(11)
-            .height(26)
-            .margin({ right: 8, top: 8 })
-            .backgroundColor(this.presetName == p.name ? '#3A2F1C' : '#22222A')
-            .fontColor(this.presetName == p.name ? ACCENT : '#B8B8C0')
-            .onClick(() => {
-              this.pickPreset(p);
-            })
-        }, (p: EqPreset) => p.name)
-        Button('重置平坦')
-          .fontSize(11)
-          .height(26)
-          .margin({ right: 8, top: 8 })
-          .backgroundColor('#22222A')
-          .fontColor('#B8B8C0')
-          .onClick(() => {
-            this.resetFlat();
-          })
-        Button('存为自定义')
-          .fontSize(11)
-          .height(26)
-          .margin({ top: 8 })
-          .backgroundColor('#26221A')
-          .fontColor(ACCENT)
-          .enabled(this.nativeReady)
-          .onClick(() => {
-            this.saveCustom();
-          })
-      }
-      .width('100%')
-
-      Scroll() {
+      Column() {
+        Column({ space: 10 }) {
         Row() {
-          ForEach(EqPresets.BANDS_HZ, (hz: number, i: number) => {
-            this.bandColumn(i);
-          }, (hz: number, i: number) => `${hz}-${i}`)
+          Text('启用均衡器')
+            .fontSize(12)
+            .fontColor(T.FG_DIM)
+          Toggle({ type: ToggleType.Switch, isOn: this.eqOn })
+            .margin({ left: 10 })
+            .selectedColor(T.ACCENT)
+            .enabled(this.nativeReady)
+            .onChange((on: boolean) => {
+              this.toggleOn(on);
+            })
+          Blank()
+          Text(this.message)
+            .fontSize(10)
+            .fontColor(T.ACCENT)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
-        .alignItems(VerticalAlign.Top)
-        .padding({ left: 4, right: 4, top: 8, bottom: 6 })
-      }
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Off)
-      .width('100%')
-      .height(BAR_H + 44)
-      .margin({ top: 4 })
+        .width('100%')
 
-      Text('拖动柱体上下移动调节增益；关闭开关后 PCM 直通不经过 DSP')
-        .fontSize(10)
-        .fontColor('#6E6E76')
-        .margin({ top: 8 })
-      Text(this.selfTestText)
-        .fontSize(10)
-        .fontColor('#7F8A7A')
-        .margin({ top: 4 })
-      Blank()
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.presets, (p: EqPreset) => {
+            Button(p.name)
+              .fontSize(10)
+              .height(26)
+              .margin({ right: 8, top: 6 })
+              .backgroundColor(this.presetName == p.name ? T.CHIP_ON_BG : T.GHOST_BG)
+              .fontColor(this.presetName == p.name ? T.ACCENT : T.FG_DIM)
+              .border({
+                width: 1,
+                color: this.presetName == p.name ? T.ACCENT_DIM : T.LINE_SOFT
+              })
+              .borderRadius(13)
+              .onClick(() => {
+                this.pickPreset(p);
+              })
+          }, (p: EqPreset) => p.name)
+          Button('重置平坦')
+            .fontSize(10)
+            .height(26)
+            .margin({ right: 8, top: 6 })
+            .backgroundColor(T.GHOST_BG)
+            .fontColor(T.FG_DIM)
+            .borderRadius(13)
+            .onClick(() => {
+              this.resetFlat();
+            })
+          Button('存为自定义')
+            .fontSize(10)
+            .height(26)
+            .margin({ top: 6 })
+            .backgroundColor(T.CHIP_ON_BG)
+            .fontColor(T.ACCENT)
+            .borderRadius(13)
+            .enabled(this.nativeReady)
+            .onClick(() => {
+              this.saveCustom();
+            })
+        }
+        .width('100%')
+
+        Row() {
+          Text('频率响应')
+            .fontSize(10)
+            .fontColor(T.FG_MUTE)
+          Blank()
+          Text('±12 dB')
+            .fontSize(9)
+            .fontColor(T.FG_MUTE)
+        }
+        .width('100%')
+
+        Canvas(this.curveCtx)
+          .width('100%')
+          .height(96)
+          .backgroundColor(T.DOCK_BG)
+          .borderRadius(8)
+          .border({ width: 1, color: T.LINE_SOFT })
+          .onReady(() => {
+            this.drawCurve();
+          })
+
+        Row() {
+          Scroll() {
+            Row() {
+              ForEach(EqPresets.BANDS_HZ, (hz: number, i: number) => {
+                this.bandColumn(i);
+              }, (hz: number, i: number) => `${hz}-${i}`)
+            }
+            .alignItems(VerticalAlign.Top)
+            .padding({ left: 4, right: 4, top: 8, bottom: 6 })
+          }
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .layoutWeight(1)
+          .height(BAR_H + 44)
+        }
+        .width('100%')
+        .padding({ top: 4, bottom: 4 })
+        .backgroundColor(T.DOCK_BG)
+        .borderRadius(T.R_CARD)
+        .border({ width: 1, color: T.LINE_SOFT })
+
+        Text('拖动柱体上下移动调节增益；关闭开关后 PCM 直通不经过 DSP。')
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+        Text(this.selfTestText)
+          .fontSize(9)
+          .fontColor(T.FG_MUTE)
+      }
+      .width('100%')
+      .padding(14)
+      .backgroundColor(T.PANEL_B3)
+      .borderRadius(T.R_CARD)
+      .border({ width: 1, color: T.LINE_SOFT })
+      .margin({ top: 12 })
+      .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .justifyContent(FlexAlign.Center)
     }
     .width('100%')
     .height('100%')
-    .padding({ left: 24, right: 24, top: 18, bottom: 12 })
-    .backgroundColor('#111114')
+    .padding({ left: 18, right: 18, top: 12, bottom: 10 })
+    .backgroundColor(T.BASE)
     .alignItems(HorizontalAlign.Start)
   }
 }

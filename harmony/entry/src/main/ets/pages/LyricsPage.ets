@@ -1,18 +1,19 @@
+// 歌词：深空底 + 居中滚动，当前行强调色加粗（桌面底部歌词栏的全屏形态）。
 import { router } from '@kit.ArkUI';
 import { Track } from '../model/Track';
 import { Db } from '../db/Db';
 import { LyricsService, LyricsResult, LyricLine } from '../lyrics/LyricsService';
-
-const ACCENT = '#E8B04B';
+import { T } from '../theme/Tokens';
+import { AppLog } from '../utils/AppLog';
 
 @Entry
 @Component
 struct LyricsPage {
-  @State track: Track | undefined = undefined;
-  @State result: LyricsResult = new LyricsResult();
-  @State currentIndex: number = 0;
-  @State message: string = '';
-  @State busy: boolean = false;
+  @State private track: Track | undefined = undefined;
+  @State private result: LyricsResult = new LyricsResult();
+  @State private currentIndex: number = 0;
+  @State private message: string = '';
+  @State private busy: boolean = false;
   @StorageLink('npPos') npPos: number = 0;
   private listScroller: Scroller = new Scroller();
 
@@ -48,6 +49,7 @@ struct LyricsPage {
     this.message = force ? '正在联网获取歌词…' : '正在载入歌词…';
     this.result = await LyricsService.load(this.track, force);
     this.message = `来源：${this.result.source} · ${this.result.lines.length} 行`;
+    AppLog.info(`歌词页：${this.message}`);
     this.updateIndex();
     this.busy = false;
   }
@@ -74,51 +76,102 @@ struct LyricsPage {
 
   build() {
     Column() {
-      Row() {
-        Text('歌词').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#F5F5F7')
+      Row({ space: 12 }) {
+        Column({ space: 2 }) {
+          Text('歌词')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(T.FG)
+          Text(this.track ? `${this.track.title} · ${this.track.artist}` : '未找到曲目')
+            .fontSize(10)
+            .fontColor(T.FG_MUTE)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .alignItems(HorizontalAlign.Start)
         Blank()
+        Text(this.message)
+          .fontSize(10)
+          .fontColor(T.ACCENT)
+          .maxLines(1)
         if (this.track) {
-          Button('联网刷新').fontSize(11).height(28).backgroundColor('#26221A').fontColor(ACCENT)
-            .enabled(!this.busy).onClick(() => { this.load(true); })
+          Button('联网刷新')
+            .height(30)
+            .fontSize(10)
+            .fontColor(T.ACCENT)
+            .backgroundColor(T.CHIP_ON_BG)
+            .border({ width: 1, color: T.ACCENT_DIM })
+            .borderRadius(8)
+            .enabled(!this.busy)
+            .onClick(() => {
+              this.load(true);
+            })
         }
-        Button('返回').fontSize(12).height(28).backgroundColor('#2A2A30').fontColor('#F0F0F2')
-          .onClick(() => { router.back(); })
+        Button('返回')
+          .height(30)
+          .fontSize(11)
+          .fontColor(T.FG)
+          .backgroundColor(T.GHOST_BG)
+          .border({ width: 1, color: T.LINE_SOFT })
+          .borderRadius(8)
+          .onClick(() => {
+            router.back();
+          })
       }
-        .width('100%')
+      .width('100%')
 
-      if (this.track) {
-        Text(`${this.track.title}｜${this.track.artist}`).fontSize(12).fontColor('#8A8A92')
-          .maxLines(1).margin({ top: 6 })
-      }
-      Text(this.message).fontSize(10).fontColor(ACCENT).margin({ top: 4 })
-        .visibility(this.message == '' ? Visibility.None : Visibility.Visible)
-
-      if (this.result.lines.length > 0) {
-        List({ scroller: this.listScroller, space: 10 }) {
-          ForEach(this.result.lines, (line: LyricLine, i: number) => {
-            ListItem() {
-              Text(line.text)
-                .fontSize(i == this.currentIndex ? 18 : 14)
-                .fontColor(i == this.currentIndex ? ACCENT : '#8A8A92')
-                .width('100%').textAlign(TextAlign.Center)
-                .padding({ top: 6, bottom: 6 })
-            }
-          }, (line: LyricLine, i: number) => `${line.timeMs}-${i}`)
-        }
-          .width('100%').layoutWeight(1).margin({ top: 12 })
+      Column() {
+        if (this.result.lines.length > 0) {
+          List({ scroller: this.listScroller, space: 8 }) {
+            ForEach(this.result.lines, (line: LyricLine, i: number) => {
+              ListItem() {
+                Text(line.text)
+                  .fontSize(i == this.currentIndex ? 16 : 12)
+                  .fontWeight(i == this.currentIndex ? FontWeight.Medium : FontWeight.Normal)
+                  .fontColor(i == this.currentIndex ? T.ACCENT : T.FG_MUTE)
+                  .width('100%')
+                  .textAlign(TextAlign.Center)
+                  .padding({ top: 5, bottom: 5 })
+              }
+            }, (line: LyricLine, i: number) => `${line.timeMs}-${i}`)
+          }
+          .width('100%')
+          .layoutWeight(1)
           .scrollBar(BarState.Off)
-      } else {
-        Column() {
-          Text('暂无歌词').fontSize(16).fontColor('#8A8A92')
-          Text('可点「联网刷新」从 lrclib 获取；同目录 .lrc 会自动作为离线降级')
-            .fontSize(11).fontColor('#6E6E76').textAlign(TextAlign.Center).margin({ top: 8 })
+          .padding({ left: 120, right: 120, top: 10, bottom: 10 })
+        } else {
+          Column({ space: 8 }) {
+            Text('♪')
+              .fontSize(34)
+              .fontColor(T.FG_MUTE)
+            Text('暂无歌词')
+              .fontSize(14)
+              .fontColor(T.FG_DIM)
+            Text('可点「联网刷新」从 lrclib 获取；同目录 .lrc 会自动作为离线降级')
+              .fontSize(10)
+              .fontColor(T.FG_MUTE)
+              .textAlign(TextAlign.Center)
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
         }
-          .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
       }
+      .width('100%')
+      .layoutWeight(1)
+      .margin({ top: 10 })
+      .backgroundColor(T.DOCK_BG)
+      .borderRadius(T.R_CARD)
+      .border({ width: 1, color: T.LINE_SOFT })
+      .alignItems(HorizontalAlign.Start)
     }
-      .width('100%').height('100%')
-      .padding({ left: 24, right: 24, top: 18, bottom: 12 })
-      .backgroundColor('#111114').alignItems(HorizontalAlign.Start)
-      .onAreaChange((oldArea: Area, newArea: Area) => { this.updateIndex(); })
+    .width('100%')
+    .height('100%')
+    .padding({ left: 18, right: 18, top: 12, bottom: 10 })
+    .backgroundColor(T.BASE)
+    .alignItems(HorizontalAlign.Start)
+    .onAreaChange((oldArea: Area, newArea: Area) => {
+      this.updateIndex();
+    })
   }
 }

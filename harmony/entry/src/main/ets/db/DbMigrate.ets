@@ -1,9 +1,10 @@
 import { relationalStore } from '@kit.ArkData';
 import { BusinessError } from '@ohos.base';
 
-// 数据层迁移：v1（tracks）→ v2（tracks 增列 + search_blob + 索引）
+// 数据层迁移：v1（tracks）→ v2（tracks 增列 + search_blob + 索引）→ v3（鉴定/匹配字段）
+// → v4（albumartist / disc_no）→ v5（CUE 预间隙起点）
 // 可重入：按 settings.schema_version / PRAGMA user_version 判定，成功后旧表保留为 tracks_v1_backup。
-const TARGET_VERSION: number = 2;
+const TARGET_VERSION: number = 5;
 
 const SQL_TRACKS_V2 = `CREATE TABLE IF NOT EXISTS tracks_v2 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +58,25 @@ const SQL_INDEXES: string[] = [
   'CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album)',
   'CREATE INDEX IF NOT EXISTS idx_tracks_search ON tracks(search_blob)',
   'CREATE INDEX IF NOT EXISTS idx_tracks_health ON tracks(health_status)',
-  'CREATE INDEX IF NOT EXISTS idx_tracks_cue ON tracks(cue_path)'
+  'CREATE INDEX IF NOT EXISTS idx_tracks_cue ON tracks(cue_path)',
+  'CREATE INDEX IF NOT EXISTS idx_tracks_verdict ON tracks(verdict)'
+];
+
+const SQL_V3_COLUMNS: string[] = [
+  "ALTER TABLE tracks ADD COLUMN verdict TEXT DEFAULT ''",
+  'ALTER TABLE tracks ADD COLUMN verdict_confidence REAL DEFAULT 0',
+  "ALTER TABLE tracks ADD COLUMN verdict_reason TEXT DEFAULT ''",
+  'ALTER TABLE tracks ADD COLUMN analyzed_at INTEGER DEFAULT 0',
+  'ALTER TABLE tracks ADD COLUMN match_confidence REAL DEFAULT 0'
+];
+
+const SQL_V4_COLUMNS: string[] = [
+  "ALTER TABLE tracks ADD COLUMN albumartist TEXT DEFAULT ''",
+  'ALTER TABLE tracks ADD COLUMN disc_no INTEGER DEFAULT 0'
+];
+
+const SQL_V5_COLUMNS: string[] = [
+  'ALTER TABLE tracks ADD COLUMN cue_pregap_ms INTEGER DEFAULT 0'
 ];
 
 async function tableExists(store: relationalStore.RdbStore, name: string): Promise<boolean> {
@@ -172,6 +191,33 @@ export class DbMigrate {
       } catch (e) {
         const err = e as BusinessError;
         console.error(`DbMigrate index fail: ${err.message}`);
+      }
+    }
+    if (ver < 3) {
+      for (const sql of SQL_V3_COLUMNS) {
+        try {
+          await store.executeSql(sql);
+        } catch (e) {
+          // 列已存在：可重入迁移
+        }
+      }
+    }
+    if (ver < 4) {
+      for (const sql of SQL_V4_COLUMNS) {
+        try {
+          await store.executeSql(sql);
+        } catch (e) {
+          // 列已存在：可重入迁移
+        }
+      }
+    }
+    if (ver < 5) {
+      for (const sql of SQL_V5_COLUMNS) {
+        try {
+          await store.executeSql(sql);
+        } catch (e) {
+          // 列已存在：可重入迁移
+        }
       }
     }
     await markVersion(store);

@@ -11,14 +11,17 @@ export class Meta {
   title: string = '';
   artist: string = '';
   album: string = '';
+  albumartist: string = '';
   genre: string = '';
   year: string = '';
   trackNo: number = 0;
+  discNo: number = 0;
   durationMs: number = 0;
   sampleRate: number = 0;
   channels: number = 0;
   bitDepth: number = 0;
   bitrateKbps: number = 0;
+  healthHint: string = '';
 }
 
 class Reader {
@@ -152,6 +155,8 @@ function parseVorbisComment(vc: Uint8Array, m: Meta): void {
       m.artist = val;
     } else if (key == 'ALBUM') {
       m.album = val;
+    } else if (key == 'ALBUMARTIST' || key == 'ALBUM ARTIST') {
+      m.albumartist = val;
     } else if (key == 'GENRE') {
       m.genre = val;
     } else if (key == 'DATE' || key == 'YEAR') {
@@ -159,6 +164,8 @@ function parseVorbisComment(vc: Uint8Array, m: Meta): void {
       m.year = ym ? ym[0] : val;
     } else if (key == 'TRACKNUMBER') {
       m.trackNo = toInt(val);
+    } else if (key == 'DISCNUMBER' || key == 'DISC') {
+      m.discNo = toInt(val.split('/')[0]);
     }
   }
 }
@@ -330,14 +337,16 @@ function parseMp3(r: Reader, size: number, m: Meta): void {
         if (fsize <= 0 || fsize > 16777216 || pos + 10 + fsize > tagEnd + 16) {
           break;
         }
-        if (id == 'TIT2' || id == 'TPE1' || id == 'TALB' || id == 'TCON' ||
-          id == 'TYER' || id == 'TDRC' || id == 'TRCK') {
+        if (id == 'TIT2' || id == 'TPE1' || id == 'TPE2' || id == 'TALB' || id == 'TCON' ||
+          id == 'TYER' || id == 'TDRC' || id == 'TRCK' || id == 'TPOS') {
           const body = r.read(fsize, pos + 10);
           const txt = decodeId3Text(body);
           if (id == 'TIT2') {
             m.title = txt;
           } else if (id == 'TPE1') {
             m.artist = txt;
+          } else if (id == 'TPE2') {
+            m.albumartist = txt;
           } else if (id == 'TALB') {
             m.album = txt;
           } else if (id == 'TCON') {
@@ -345,6 +354,8 @@ function parseMp3(r: Reader, size: number, m: Meta): void {
           } else if (id == 'TYER' || id == 'TDRC') {
             const ym = txt.match(/\d{4}/);
             m.year = ym ? ym[0] : txt;
+          } else if (id == 'TPOS') {
+            m.discNo = toInt(txt.split('/')[0]);
           } else {
             m.trackNo = toInt(txt.split('/')[0]);
           }
@@ -391,12 +402,15 @@ function parseWav(r: Reader, size: number, m: Meta): void {
         m.bitDepth = u16le(f, 14);
         byteRate = u32le(f, 8);
       }
+    } else if (cid == 'ID3 ' || cid == 'id3 ') {
+      // WAV 的标签写成 RIFF 内的 ID3 块（桌面版同样支持）
+      readId3At(r, pos + 8, size, m);
     } else if (cid == 'data') {
       if (byteRate > 0) {
         m.durationMs = Math.round(clen * 1000 / byteRate);
         m.bitrateKbps = Math.round(byteRate * 8 / 1000);
       }
-      break;
+      // 继续往后扫：标签可能写在 data 之后的 ID3 块里
     }
     pos += 8 + clen + (clen & 1);
   }
@@ -412,9 +426,11 @@ const BOX_ILST = cc('ilst');
 const BOX_DATA = cc('data');
 const TAG_NAM = cc('©nam');
 const TAG_ART = cc('©ART');
+const TAG_AART = cc('aART');
 const TAG_ALB = cc('©alb');
 const TAG_DAY = cc('©day');
 const TAG_GEN = cc('©gen');
+const TAG_DISK = cc('disk');
 
 function parseMp4TagData(r: Reader, boxStart: number, boxEnd: number, m: Meta, tagType: number): void {
   let pos = boxStart;
@@ -430,11 +446,20 @@ function parseMp4TagData(r: Reader, boxStart: number, boxEnd: number, m: Meta, t
     }
     if (btype == BOX_DATA && bsize >= 16) {
       const body = r.read(bsize - 16, pos + 16);
+      if (tagType == TAG_DISK) {
+        // disk 是二进制：reserved(2) + disc(2) + total(2)
+        if (body.length >= 4) {
+          m.discNo = (body[2] << 8) | body[3];
+        }
+        return;
+      }
       const txt = cleanTag(dec('utf-8', body, 0, body.length));
       if (tagType == TAG_NAM) {
         m.title = txt;
       } else if (tagType == TAG_ART) {
         m.artist = txt;
+      } else if (tagType == TAG_AART) {
+        m.albumartist = txt;
       } else if (tagType == TAG_ALB) {
         m.album = txt;
       } else if (tagType == TAG_DAY) {
@@ -498,6 +523,151 @@ function parseMp4(r: Reader, size: number, m: Meta): void {
   walkMp4(r, 0, size, 0, m);
 }
 
+// ---------------- DSF / DFF ----------------
+
+function u64le(a: Uint8Array, o: number): number {
+  if (o + 8 > a.length) {
+    return 0;
+  }
+  const lo = u32le(a, o);
+  const hi = u32le(a, o + 4);
+  return hi * 4294967296 + lo;
+}
+
+function readId3At(r: Reader, tagStart: number, size: number, m: Meta): void {
+  if (tagStart <= 0 || tagStart + 10 > size) {
+    return;
+  }
+  const h = r.read(10, tagStart);
+  if (h.length < 10 || ascii(h, 0, 3) != 'ID3') {
+    return;
+  }
+  const major = h[3];
+  const tagSize = syncsafe(h, 6);
+  const tagEnd = tagStart + 10 + tagSize;
+  let pos = tagStart + 10;
+  while (pos + 10 <= tagEnd && pos + 10 <= size) {
+    const fh = r.read(10, pos);
+    if (fh.length < 10) {
+      break;
+    }
+    const id = ascii(fh, 0, 4);
+    if (!/^[A-Z0-9]{4}$/.test(id)) {
+      break;
+    }
+    const fsize = major >= 4 ? syncsafe(fh, 4) : u32be(fh, 4);
+    if (fsize <= 0 || fsize > 16777216 || pos + 10 + fsize > tagEnd + 16) {
+      break;
+    }
+    if (id == 'TIT2' || id == 'TPE1' || id == 'TPE2' || id == 'TALB' || id == 'TCON' ||
+      id == 'TYER' || id == 'TDRC' || id == 'TRCK' || id == 'TPOS') {
+      const body = r.read(fsize, pos + 10);
+      const txt = decodeId3Text(body);
+      if (id == 'TIT2') {
+        m.title = txt;
+      } else if (id == 'TPE1') {
+        m.artist = txt;
+      } else if (id == 'TPE2') {
+        m.albumartist = txt;
+      } else if (id == 'TALB') {
+        m.album = txt;
+      } else if (id == 'TCON') {
+        m.genre = txt;
+      } else if (id == 'TYER' || id == 'TDRC') {
+        const ym = txt.match(/\d{4}/);
+        m.year = ym ? ym[0] : txt;
+      } else if (id == 'TPOS') {
+        m.discNo = toInt(txt.split('/')[0]);
+      } else {
+        m.trackNo = toInt(txt.split('/')[0]);
+      }
+    }
+    pos = pos + 10 + fsize;
+  }
+}
+
+function parseDsf(r: Reader, size: number, m: Meta): void {
+  const h = r.read(92, 0);
+  if (h.length < 92 || ascii(h, 0, 4) != 'DSD ') {
+    return;
+  }
+  const metadataPtr = u64le(h, 20);
+  if (ascii(h, 28, 4) == 'fmt ') {
+    m.channels = u32le(h, 52);
+    m.sampleRate = u32le(h, 56);
+    const bits = u32le(h, 60);
+    m.bitDepth = bits > 0 ? bits : 1;
+    const sampleCount = u64le(h, 64);
+    if (m.sampleRate > 0 && sampleCount > 0) {
+      m.durationMs = Math.round(sampleCount * 1000 / m.sampleRate);
+    }
+    if (m.bitrateKbps == 0 && m.sampleRate > 0 && m.channels > 0) {
+      m.bitrateKbps = Math.round(m.sampleRate * m.channels / 1000);
+    }
+  }
+  if (metadataPtr > 0) {
+    readId3At(r, metadataPtr, size, m);
+  }
+}
+
+function parseDff(r: Reader, size: number, m: Meta): void {
+  const h = r.read(16, 0);
+  if (h.length < 16 || ascii(h, 0, 4) != 'FRM8') {
+    return;
+  }
+  let pos = 12;
+  while (pos + 12 <= size) {
+    const ch = r.read(12, pos);
+    if (ch.length < 12) {
+      break;
+    }
+    const id = ascii(ch, 0, 4);
+    const len = u64be(ch, 4);
+    if (len <= 0 || pos + 12 + len > size + 16) {
+      break;
+    }
+    if (id == 'PROP') {
+      const prop = r.read(Math.min(len, 4096), pos + 12);
+      if (prop.length >= 4 && ascii(prop, 0, 4) == 'SND ') {
+        let p = 4;
+        while (p + 12 <= prop.length) {
+          const sid = ascii(prop, p, 4);
+          const slen = u64be(prop, p + 4);
+          if (slen < 0 || p + 12 + slen > prop.length) {
+            break;
+          }
+          if (sid == 'FS  ' && slen >= 4) {
+            m.sampleRate = u32be(prop, p + 12);
+          } else if (sid == 'CHNL' && slen >= 2) {
+            m.channels = (prop[p + 12] << 8) | prop[p + 13];
+          } else if (sid == 'CMPR' && slen >= 4) {
+            const comp = ascii(prop, p + 12, 4);
+            if (comp != 'DSD ') {
+              m.healthHint = `DFF 压缩格式 ${comp} 暂不支持解码`;
+            }
+          }
+          p += 12 + slen + (slen % 2);
+        }
+      }
+    } else if (id == 'DSD ') {
+      if (m.sampleRate > 0 && m.channels > 0) {
+        m.durationMs = Math.round(len * 8 * 1000 / (m.sampleRate * m.channels));
+      }
+      break;
+    } else if (id == 'DST ') {
+      m.healthHint = 'DFF DST 压缩暂不支持解码';
+      break;
+    }
+    pos += 12 + len + (len % 2);
+  }
+  if (m.sampleRate > 0) {
+    m.bitDepth = 1;
+    if (m.bitrateKbps == 0 && m.channels > 0) {
+      m.bitrateKbps = Math.round(m.sampleRate * m.channels / 1000);
+    }
+  }
+}
+
 // ---------------- 入口 ----------------
 
 // ---------------- 内嵌封面 ----------------
@@ -543,14 +713,14 @@ function flacPicture(r: Reader, size: number): PictureBytes | undefined {
 }
 
 // MP3：ID3 里的 APIC 帧
-function mp3Picture(r: Reader, size: number): PictureBytes | undefined {
-  const head = r.read(10, 0);
+function id3PictureAt(r: Reader, tagStart: number, size: number): PictureBytes | undefined {
+  const head = r.read(10, tagStart);
   if (head.length < 10 || ascii(head, 0, 3) != 'ID3') {
     return undefined;
   }
   const major = head[3];
-  const tagEnd = Math.min(size, 10 + syncsafe(head, 6));
-  let pos = 10;
+  const tagEnd = Math.min(size, tagStart + 10 + syncsafe(head, 6));
+  let pos = tagStart + 10;
   while (pos + 10 <= tagEnd) {
     const fh = r.read(10, pos);
     if (fh.length < 10 || !/^[A-Z0-9]{4}$/.test(ascii(fh, 0, 4))) {
@@ -594,6 +764,32 @@ function mp3Picture(r: Reader, size: number): PictureBytes | undefined {
   return undefined;
 }
 
+function mp3Picture(r: Reader, size: number): PictureBytes | undefined {
+  return id3PictureAt(r, 0, size);
+}
+
+// WAV：RIFF 内 ID3 chunk 的 APIC
+function wavPicture(r: Reader, size: number): PictureBytes | undefined {
+  const h = r.read(12, 0);
+  if (h.length < 12 || ascii(h, 0, 4) != 'RIFF' || ascii(h, 8, 4) != 'WAVE') {
+    return undefined;
+  }
+  let pos = 12;
+  while (pos + 8 <= size) {
+    const ch = r.read(8, pos);
+    if (ch.length < 8) {
+      break;
+    }
+    const cid = ascii(ch, 0, 4);
+    const clen = u32le(ch, 4);
+    if (cid == 'ID3 ' || cid == 'id3 ') {
+      return id3PictureAt(r, pos + 8, size);
+    }
+    pos += 8 + clen + (clen & 1);
+  }
+  return undefined;
+}
+
 export class TagParser {
   static parse(f: fs.File, ext: string, size: number): Meta {
     const m = new Meta();
@@ -607,6 +803,10 @@ export class TagParser {
         parseWav(r, size, m);
       } else if (ext == '.m4a' || ext == '.mp4' || ext == '.aac') {
         parseMp4(r, size, m);
+      } else if (ext == '.dsf') {
+        parseDsf(r, size, m);
+      } else if (ext == '.dff') {
+        parseDff(r, size, m);
       }
     } catch (e) {
       // 解析失败时返回已取得的 partial 结果
@@ -623,6 +823,9 @@ export class TagParser {
       }
       if (ext == '.mp3') {
         return mp3Picture(r, size);
+      }
+      if (ext == '.wav') {
+        return wavPicture(r, size);
       }
     } catch (e) {
       // 忽略：当作没有内嵌封面

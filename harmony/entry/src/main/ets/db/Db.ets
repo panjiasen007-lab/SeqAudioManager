@@ -82,9 +82,11 @@ export class Db {
       'title': t.title,
       'artist': t.artist,
       'album': t.album,
+      'albumartist': t.albumartist,
       'genre': t.genre,
       'year': t.year,
       'track_no': t.trackNo,
+      'disc_no': t.discNo,
       'duration_ms': t.durationMs,
       'sample_rate': t.sampleRate,
       'channels': t.channels,
@@ -98,6 +100,7 @@ export class Db {
       'cue_track_no': t.cueTrackNo,
       'cue_start_ms': t.cueStartMs,
       'cue_end_ms': t.cueEndMs,
+      'cue_pregap_ms': t.cuePregapMs,
       'replay_gain': t.replayGain,
       'health_status': t.healthStatus,
       'health_detail': t.healthDetail,
@@ -105,7 +108,12 @@ export class Db {
       'lyrics': t.lyrics,
       'cover_blob_path': t.coverBlobPath,
       'meta_source': t.metaSource,
-      'meta_checked_at': t.metaCheckedAt
+      'meta_checked_at': t.metaCheckedAt,
+      'verdict': t.verdict,
+      'verdict_confidence': t.verdictConfidence,
+      'verdict_reason': t.verdictReason,
+      'analyzed_at': t.analyzedAt,
+      'match_confidence': t.matchConfidence
     };
     if (t.id > 0) {
       b['id'] = t.id;
@@ -122,9 +130,11 @@ export class Db {
     t.title = readStr(rs, 'title');
     t.artist = readStr(rs, 'artist');
     t.album = readStr(rs, 'album');
+    t.albumartist = readStr(rs, 'albumartist');
     t.genre = readStr(rs, 'genre');
     t.year = readStr(rs, 'year');
     t.trackNo = readLong(rs, 'track_no');
+    t.discNo = readLong(rs, 'disc_no');
     t.durationMs = readLong(rs, 'duration_ms');
     t.sampleRate = readLong(rs, 'sample_rate');
     t.channels = readLong(rs, 'channels');
@@ -137,6 +147,7 @@ export class Db {
     t.cueTrackNo = readLong(rs, 'cue_track_no');
     t.cueStartMs = readLong(rs, 'cue_start_ms');
     t.cueEndMs = readLong(rs, 'cue_end_ms');
+    t.cuePregapMs = readLong(rs, 'cue_pregap_ms');
     t.replayGain = readDouble(rs, 'replay_gain');
     t.healthStatus = readStr(rs, 'health_status') || 'ok';
     t.healthDetail = readStr(rs, 'health_detail');
@@ -145,17 +156,24 @@ export class Db {
     t.coverBlobPath = readStr(rs, 'cover_blob_path');
     t.metaSource = readStr(rs, 'meta_source');
     t.metaCheckedAt = readLong(rs, 'meta_checked_at');
+    t.verdict = readStr(rs, 'verdict');
+    t.verdictConfidence = readDouble(rs, 'verdict_confidence');
+    t.verdictReason = readStr(rs, 'verdict_reason');
+    t.analyzedAt = readLong(rs, 'analyzed_at');
+    t.matchConfidence = readDouble(rs, 'match_confidence');
     return t;
   }
 
   private static argsOf(t: Track, withId: boolean): Array<relationalStore.ValueType> {
     refreshSearchBlob(t);
     const args: Array<relationalStore.ValueType> = [
-      t.path, t.fileName, t.ext, t.title, t.artist, t.album, t.genre, t.year, t.trackNo,
+      t.path, t.fileName, t.ext, t.title, t.artist, t.album, t.albumartist, t.genre, t.year,
+      t.trackNo, t.discNo,
       t.durationMs, t.sampleRate, t.channels, t.bitDepth, t.bitrateKbps, t.sizeBytes, t.mtimeMs,
-      t.cuePath, t.isCueChild, t.cueTrackNo, t.cueStartMs, t.cueEndMs, t.replayGain,
+      t.cuePath, t.isCueChild, t.cueTrackNo, t.cueStartMs, t.cueEndMs, t.cuePregapMs, t.replayGain,
       t.healthStatus, t.healthDetail, t.searchBlob, t.lyrics, t.coverBlobPath,
-      t.metaSource, t.metaCheckedAt
+      t.metaSource, t.metaCheckedAt, t.verdict, t.verdictConfidence, t.verdictReason,
+      t.analyzedAt, t.matchConfidence
     ];
     if (withId) {
       args.push(t.id);
@@ -166,10 +184,11 @@ export class Db {
   }
 
   private static readonly INSERT_COLS: string =
-    `path, file_name, ext, title, artist, album, genre, year, track_no,
+    `path, file_name, ext, title, artist, album, albumartist, genre, year, track_no, disc_no,
      duration_ms, sample_rate, channels, bit_depth, bitrate_kbps, size_bytes, mtime_ms,
-     cue_path, is_cue_child, cue_track_no, cue_start_ms, cue_end_ms, replay_gain,
+     cue_path, is_cue_child, cue_track_no, cue_start_ms, cue_end_ms, cue_pregap_ms, replay_gain,
      health_status, health_detail, search_blob, lyrics, cover_blob_path, meta_source, meta_checked_at,
+     verdict, verdict_confidence, verdict_reason, analyzed_at, match_confidence,
      added_at_ms`;
 
   // 批量写入（path 唯一，冲突则替换）；返回实际写入条数
@@ -365,6 +384,48 @@ export class Db {
       return;
     }
     await store.executeSql('DELETE FROM tracks');
+  }
+
+  // 仅从曲库移除记录，不删除磁盘文件（桌面版「移除」的鸿蒙对应实现）
+  static async deleteTrack(id: number): Promise<void> {
+    const store = Db.store;
+    if (!store || id <= 0) {
+      return;
+    }
+    try {
+      await store.executeSql('DELETE FROM tracks WHERE id = ?', [id]);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.deleteTrack fail: ${err.message}`);
+    }
+  }
+
+  static async deleteTracks(ids: number[]): Promise<void> {
+    const store = Db.store;
+    if (!store || ids.length == 0) {
+      return;
+    }
+    const marks = ids.map(() => '?').join(',');
+    try {
+      await store.executeSql(`DELETE FROM tracks WHERE id IN (${marks})`, ids);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.deleteTracks fail: ${err.message}`);
+    }
+  }
+
+  // 清理 CUE 母文件时同步移除其逻辑轨
+  static async deleteTracksByCuePath(cuePath: string): Promise<void> {
+    const store = Db.store;
+    if (!store || cuePath == '') {
+      return;
+    }
+    try {
+      await store.executeSql('DELETE FROM tracks WHERE cue_path = ?', [cuePath]);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.deleteTracksByCuePath fail: ${err.message}`);
+    }
   }
 
   static async setLyrics(id: number, lyrics: string): Promise<void> {

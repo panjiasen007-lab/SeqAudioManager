@@ -362,6 +362,38 @@ export class PlayerEngine {
     this.emit();
   }
 
+  // 「下一首播放」：插到当前曲目之后；队列为空时视作起播
+  insertNext(track: Track): void {
+    if (this.queue.length == 0) {
+      this.queue = [track];
+      this.index = 0;
+    } else {
+      const at = this.index >= 0 ? this.index + 1 : 0;
+      this.queue.splice(at, 0, track);
+      if (this.index < 0) {
+        this.index = 0;
+      }
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 「加入队列」：追加到队尾
+  enqueue(track: Track): void {
+    if (this.queue.length == 0) {
+      this.queue = [track];
+      this.index = 0;
+    } else {
+      this.queue.push(track);
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
   playIndex(i: number): void {
     if (i < 0 || i >= this.queue.length) {
       return;

@@ -11,9 +11,11 @@ export class TagPatch {
   title: string = '';
   artist: string = '';
   album: string = '';
+  albumartist: string = '';
   genre: string = '';
   year: string = '';
   trackNo: number = 0;
+  discNo: number = 0;
 }
 
 export class WriteResult {
@@ -287,9 +289,11 @@ function writeFlac(dstFd: number, r: RAF, size: number, p: TagPatch,
   if (p.title != '') desired.set('TITLE', p.title);
   if (p.artist != '') desired.set('ARTIST', p.artist);
   if (p.album != '') desired.set('ALBUM', p.album);
+  if (p.albumartist != '') desired.set('ALBUMARTIST', p.albumartist);
   if (p.genre != '') desired.set('GENRE', p.genre);
   if (p.year != '') desired.set('DATE', p.year);
   if (p.trackNo > 0) desired.set('TRACKNUMBER', `${p.trackNo}`);
+  if (p.discNo > 0) desired.set('DISCNUMBER', `${p.discNo}`);
 
   const vc = blocks.find((b: FlacBlock) => b.type == 4);
   const pic = blocks.find((b: FlacBlock) => b.type == 6);
@@ -410,6 +414,66 @@ function buildId3v1(p: TagPatch): Uint8Array {
   return b;
 }
 
+function mergeId3Frames(frames: Id3Frame[], p: TagPatch,
+  cover?: Uint8Array, mime: string = 'image/jpeg'): void {
+  const desired = new Map<string, string>();
+  if (p.title != '') desired.set('TIT2', p.title);
+  if (p.artist != '') desired.set('TPE1', p.artist);
+  if (p.albumartist != '') desired.set('TPE2', p.albumartist);
+  if (p.album != '') desired.set('TALB', p.album);
+  if (p.genre != '') desired.set('TCON', p.genre);
+  if (p.year != '') desired.set('TYER', p.year);
+  if (p.trackNo > 0) desired.set('TRCK', `${p.trackNo}`);
+  if (p.discNo > 0) desired.set('TPOS', `${p.discNo}`);
+  const idMap = ['TIT2', 'TPE1', 'TPE2', 'TALB', 'TCON', 'TYER', 'TRCK', 'TPOS'];
+  for (const id of idMap) {
+    const text = desired.get(id);
+    if (text == undefined) {
+      continue;
+    }
+    let found = false;
+    for (const f of frames) {
+      if (f.id == id) {
+        f.body = encodeId3(text);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      frames.push({ id: id, body: encodeId3(text) });
+    }
+  }
+  if (cover && cover.length > 0) {
+    const apic = concat([
+      new Uint8Array([3]), bytesOf(mime), new Uint8Array([0, 3, 0]), cover
+    ]);
+    let foundApic = false;
+    for (const f of frames) {
+      if (f.id == 'APIC') {
+        f.body = apic;
+        foundApic = true;
+        break;
+      }
+    }
+    if (!foundApic) {
+      frames.push({ id: 'APIC', body: apic });
+    }
+  }
+}
+
+function buildId3TagBytes(frames: Id3Frame[]): Uint8Array {
+  const frameParts: Uint8Array[] = [];
+  let tagBodyLen = 0;
+  for (const f of frames) {
+    const h = concat([bytesOf(f.id), u32be(f.body.length), new Uint8Array([0, 0])]);
+    frameParts.push(h);
+    frameParts.push(f.body);
+    tagBodyLen += h.length + f.body.length;
+  }
+  // ID3v2 头固定 10 字节：'ID3' + 版本(2) + 标志(1) + syncsafe 长度(4)
+  return concat([bytesOf('ID3'), new Uint8Array([3, 0, 0]), syncsafe(tagBodyLen), concat(frameParts)]);
+}
+
 function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch,
   cover?: Uint8Array, mime: string = 'image/jpeg'): void {
   let audioStart = 0;
@@ -434,57 +498,8 @@ function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch,
       pos += 10 + fsize;
     }
   }
-  const desired = new Map<string, string>();
-  if (p.title != '') desired.set('TIT2', p.title);
-  if (p.artist != '') desired.set('TPE1', p.artist);
-  if (p.album != '') desired.set('TALB', p.album);
-  if (p.genre != '') desired.set('TCON', p.genre);
-  if (p.year != '') desired.set('TYER', p.year);
-  if (p.trackNo > 0) desired.set('TRCK', `${p.trackNo}`);
-  const idMap = ['TIT2', 'TPE1', 'TALB', 'TCON', 'TYER', 'TRCK'];
-  for (const id of idMap) {
-    const text = desired.get(id);
-    if (text == undefined) {
-      continue;
-    }
-    let found = false;
-    for (const f of frames) {
-      if (f.id == id) {
-        f.body = encodeId3(text);
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      frames.push({ id: id, body: encodeId3(text) });
-    }
-  }
-  if (cover) {
-    const apic = concat([
-      new Uint8Array([3]), bytesOf(mime), new Uint8Array([0, 3, 0]), cover
-    ]);
-    let foundApic = false;
-    for (const f of frames) {
-      if (f.id == 'APIC') {
-        f.body = apic;
-        foundApic = true;
-        break;
-      }
-    }
-    if (!foundApic) {
-      frames.push({ id: 'APIC', body: apic });
-    }
-  }
-  const frameParts: Uint8Array[] = [];
-  let tagBodyLen = 0;
-  for (const f of frames) {
-    const h = concat([bytesOf(f.id), u32be(f.body.length), new Uint8Array([0, 0])]);
-    frameParts.push(h);
-    frameParts.push(f.body);
-    tagBodyLen += h.length + f.body.length;
-  }
-  // ID3v2 头固定 10 字节：'ID3' + 版本(2) + 标志(1) + syncsafe 长度(4)
-  const id3 = concat([bytesOf('ID3'), new Uint8Array([3, 0, 0]), syncsafe(tagBodyLen), concat(frameParts)]);
+  mergeId3Frames(frames, p, cover, mime);
+  const id3 = buildId3TagBytes(frames);
   const tail = r.read(Math.max(0, size - 128), 128);
   const hasId3v1 = ascii(tail, 0, 3) == 'TAG';
   const audioEnd = hasId3v1 ? size - 128 : size;
@@ -503,6 +518,86 @@ function writeMp3(dstFd: number, r: RAF, size: number, p: TagPatch,
     v1[125] = p.trackNo > 0 && p.trackNo < 256 ? p.trackNo : old[125];
     v1.set(old.subarray(126, 128), 126);
     writeBytes(dstFd, v1);
+  }
+}
+
+// ---------------- WAV（ID3 chunk） ----------------
+
+interface WavChunk {
+  id: string;
+  dataStart: number;
+  dataLen: number;
+}
+
+// 与桌面版一致：WAV 的标签写成 RIFF 内的 ID3 块，不碰 fmt/data。
+function writeWav(dstFd: number, r: RAF, size: number, p: TagPatch,
+  cover?: Uint8Array, mime: string = 'image/jpeg'): void {
+  const head = r.read(0, 12);
+  if (head.length < 12 || ascii(head, 0, 4) != 'RIFF' || ascii(head, 8, 4) != 'WAVE') {
+    throw new Error('不是合法的 WAV 文件');
+  }
+  const declared = readLe32(head, 4) + 8;
+  const end = Math.min(size, declared > 12 ? declared : size);
+  const chunks: WavChunk[] = [];
+  let tagStart = -1;
+  let tagLen = 0;
+  let pos = 12;
+  while (pos + 8 <= end) {
+    const h = r.read(pos, 8);
+    if (h.length < 8) {
+      break;
+    }
+    const cid = ascii(h, 0, 4);
+    const clen = readLe32(h, 4);
+    const dataStart = pos + 8;
+    const dataLen = Math.min(clen, Math.max(0, end - dataStart));
+    if (cid == 'ID3 ' || cid == 'id3 ') {
+      tagStart = dataStart;
+      tagLen = dataLen;
+    } else {
+      chunks.push({ id: cid, dataStart: dataStart, dataLen: dataLen });
+    }
+    pos = dataStart + clen + (clen & 1);
+  }
+  const frames: Id3Frame[] = [];
+  if (tagStart >= 0 && tagLen >= 10) {
+    const th = r.read(tagStart, 10);
+    if (ascii(th, 0, 3) == 'ID3') {
+      const major = th[3];
+      const tagEnd = Math.min(tagStart + 10 + readSyncsafe(th, 6), size);
+      let fp = tagStart + 10;
+      while (fp + 10 <= tagEnd) {
+        const fh = r.read(fp, 10);
+        const id = ascii(fh, 0, 4);
+        if (!/^[A-Z0-9]{4}$/.test(id)) {
+          break;
+        }
+        const fsize = major >= 4 ? readSyncsafe(fh, 4) : readBe32(fh, 4);
+        if (fsize <= 0 || fsize > 16777216 || fp + 10 + fsize > tagEnd + 8) {
+          break;
+        }
+        frames.push({ id: id, body: r.read(fp + 10, fsize) });
+        fp += 10 + fsize;
+      }
+    }
+  }
+  mergeId3Frames(frames, p, cover, mime);
+  const id3 = buildId3TagBytes(frames);
+  let total = 12 + 8 + id3.length + (id3.length & 1);
+  for (const c of chunks) {
+    total += 8 + c.dataLen + (c.dataLen & 1);
+  }
+  writeBytes(dstFd, concat([bytesOf('RIFF'), u32le(total - 8), bytesOf('WAVE')]));
+  for (const c of chunks) {
+    writeBytes(dstFd, concat([bytesOf(c.id), u32le(c.dataLen)]));
+    copyRange(r, dstFd, c.dataStart, c.dataStart + c.dataLen, []);
+    if ((c.dataLen & 1) != 0) {
+      writeBytes(dstFd, new Uint8Array(1));
+    }
+  }
+  writeBytes(dstFd, concat([bytesOf('ID3 '), u32le(id3.length), id3]));
+  if ((id3.length & 1) != 0) {
+    writeBytes(dstFd, new Uint8Array(1));
   }
 }
 
@@ -542,9 +637,20 @@ function findAtom(r: RAF, start: number, end: number, type: number): Mp4Atom | u
 
 function buildIlstChild(name: string, text: string): Uint8Array {
   const textBytes = bytesOf(text);
-  const data = concat([new Uint8Array(16), textBytes]);
+  // data box：8 字节 version/flags/locale（文本类型=1）+ UTF-8 正文
+  const data = concat([new Uint8Array([0, 0, 0, 1, 0, 0, 0, 0]), textBytes]);
   const inner = concat([u32be(data.length), bytesOf('data'), data]);
   return concat([u32be(inner.length + 8), bytesOf(name), inner]);
+}
+
+function buildIlstDisk(disc: number): Uint8Array {
+  // data box：8 字节头 + reserved(2) + disc(2) + total(2)
+  const data = concat([
+    new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0]),
+    new Uint8Array([0, 0, (disc >>> 8) & 0xff, disc & 0xff, 0, 0])
+  ]);
+  const inner = concat([u32be(data.length), bytesOf('data'), data]);
+  return concat([u32be(inner.length + 8), bytesOf('disk'), inner]);
 }
 
 function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch,
@@ -572,7 +678,7 @@ function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch,
   // 保留非文本原子（封面等），替换/追加文本原子
   const keep: Uint8Array[] = [];
   let pos = ilst.start + 8;
-  const names = ['©nam', '©ART', '©alb', '©day', '©gen', 'covr'];
+  const names = ['©nam', '©ART', 'aART', '©alb', '©day', '©gen', 'covr'];
   while (pos + 8 <= ilstEnd) {
     const h = r.read(pos, 8);
     const childSize = readBe32(h, 0);
@@ -585,15 +691,18 @@ function writeM4a(dstFd: number, r: RAF, size: number, p: TagPatch,
     }
     pos += childSize;
   }
-  const values: string[] = [p.title, p.artist, p.album, p.year, p.genre];
+  const values: string[] = [p.title, p.artist, p.albumartist, p.album, p.year, p.genre];
   const children: Uint8Array[] = [];
-  for (let i = 0; i < names.length; i++) {
+  for (let i = 0; i < values.length; i++) {
     if (values[i] != '') {
       children.push(buildIlstChild(names[i], values[i]));
     }
   }
   for (const b of keep) {
     children.push(b);
+  }
+  if (p.discNo > 0) {
+    children.push(buildIlstDisk(p.discNo));
   }
   if (cover) {
     const dataType: number = mime == 'image/png' ? 14 : 13;
@@ -623,10 +732,31 @@ function extOf(path: string): string {
 }
 
 export class TagWriter {
+  static hasBackup(path: string): boolean {
+    try {
+      fs.statSync(`${path}.bak`);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 撤销最近一次标签写回：把 .bak 复制回原文件（保留 .bak 本身）
+  static restoreBackup(path: string): boolean {
+    const bak = `${path}.bak`;
+    try {
+      fs.statSync(bak);
+      fs.copyFileSync(bak, path);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   static async write(path: string, patch: TagPatch): Promise<WriteResult> {
     const res = new WriteResult();
     const ext = extOf(path);
-    if (ext != '.flac' && ext != '.mp3' && ext != '.m4a') {
+    if (ext != '.flac' && ext != '.mp3' && ext != '.m4a' && ext != '.wav') {
       res.message = `不支持写入的格式：${ext}`;
       return res;
     }
@@ -650,6 +780,8 @@ export class TagWriter {
         writeFlac(dstFile.fd, r, st.size, patch);
       } else if (ext == '.mp3') {
         writeMp3(dstFile.fd, r, st.size, patch);
+      } else if (ext == '.wav') {
+        writeWav(dstFile.fd, r, st.size, patch);
       } else {
         writeM4a(dstFile.fd, r, st.size, patch);
       }
@@ -672,6 +804,10 @@ export class TagWriter {
         check(patch.title, after.title);
         check(patch.artist, after.artist);
         check(patch.album, after.album);
+        check(patch.albumartist, after.albumartist);
+        if (patch.discNo > 0 && after.discNo != patch.discNo) {
+          throw new Error(`写后碟号回读不一致：期望 ${patch.discNo}，实际 ${after.discNo}`);
+        }
         if (patch.year != '') {
           const wantYear = patch.year.match(/\d{4}/);
           const gotYear = after.year.match(/\d{4}/);
@@ -737,7 +873,7 @@ export class TagWriter {
   static async embedCover(path: string, coverPath: string): Promise<WriteResult> {
     const res = new WriteResult();
     const ext = extOf(path);
-    if (ext != '.flac' && ext != '.mp3' && ext != '.m4a') {
+    if (ext != '.flac' && ext != '.mp3' && ext != '.m4a' && ext != '.wav') {
       res.message = `不支持写入的格式：${ext}`;
       return res;
     }
@@ -777,13 +913,17 @@ export class TagWriter {
       patch.title = before.title;
       patch.artist = before.artist;
       patch.album = before.album;
+      patch.albumartist = before.albumartist;
       patch.genre = before.genre;
       patch.year = before.year;
       patch.trackNo = before.trackNo;
+      patch.discNo = before.discNo;
       if (ext == '.flac') {
         writeFlac(dstFile.fd, r, st.size, patch, cover, mime);
       } else if (ext == '.mp3') {
         writeMp3(dstFile.fd, r, st.size, patch, cover, mime);
+      } else if (ext == '.wav') {
+        writeWav(dstFile.fd, r, st.size, patch, cover, mime);
       } else {
         writeM4a(dstFile.fd, r, st.size, patch, cover, mime);
       }

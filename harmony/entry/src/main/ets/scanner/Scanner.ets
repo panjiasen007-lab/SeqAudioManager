@@ -15,8 +15,18 @@ export class ScanResult {
   updated: number = 0;
   skipped: number = 0;
   failed: number = 0;
+  removed: number = 0;
   costMs: number = 0;
   issues: string[] = [];
+}
+
+function fileExists(path: string): boolean {
+  try {
+    fs.statSync(path);
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 export class ScanController {
@@ -43,6 +53,25 @@ interface ParsedBatch {
   failed: string[];
 }
 
+// SACD ISO：桌面版依赖随包的 sacd_extract，鸿蒙端暂无该工具，
+// 这里只登记为「待处理」并给出明确说明，避免被当成损坏音频。
+function makeIsoTrack(p: string, size: number, mtimeMs: number): Track {
+  const t = emptyTrack();
+  t.path = p;
+  t.fileName = p.substring(p.lastIndexOf('/') + 1);
+  t.ext = '.iso';
+  t.title = t.fileName.replace(/\.iso$/i, '');
+  t.sampleRate = 2822400;
+  t.bitDepth = 1;
+  t.channels = 2;
+  t.healthStatus = 'warn';
+  t.healthDetail = 'SACD ISO：鸿蒙端暂无 sacd_extract，无法解析曲目或导出 DSF（可先用桌面版导出）';
+  t.sizeBytes = size;
+  t.mtimeMs = mtimeMs;
+  refreshSearchBlob(t);
+  return t;
+}
+
 // 纯函数：解析一批文件；在 TaskPool 工作线程或主线程均可执行
 function parseChunk(files: string[], knownPaths: string[], knownTimes: number[]): ParsedBatch {
   const out: ParsedBatch = { tracks: [], skipped: 0, failed: [] };
@@ -67,6 +96,10 @@ function parseChunk(files: string[], knownPaths: string[], knownTimes: number[])
           break;
         }
       }
+      if (ext == '.iso') {
+        out.tracks.push(makeIsoTrack(p, st.size, mtimeMs));
+        continue;
+      }
       let meta = new Meta();
       const f = fs.openSync(p, fs.OpenMode.READ_ONLY);
       try {
@@ -85,14 +118,20 @@ function parseChunk(files: string[], knownPaths: string[], knownTimes: number[])
       t.title = meta.title != '' ? meta.title : t.fileName.replace(ext, '');
       t.artist = meta.artist;
       t.album = meta.album;
+      t.albumartist = meta.albumartist;
       t.genre = meta.genre;
       t.year = meta.year;
       t.trackNo = meta.trackNo;
+      t.discNo = meta.discNo;
       t.durationMs = meta.durationMs;
       t.sampleRate = meta.sampleRate;
       t.channels = meta.channels;
       t.bitDepth = meta.bitDepth;
       t.bitrateKbps = meta.bitrateKbps;
+      if (meta.healthHint != '') {
+        t.healthStatus = 'warn';
+        t.healthDetail = meta.healthHint;
+      }
       t.sizeBytes = st.size;
       t.mtimeMs = mtimeMs;
       refreshSearchBlob(t);
@@ -128,6 +167,24 @@ function parseChunkConcurrent(files: string[], knownPaths: string[], knownTimes:
           break;
         }
       }
+      if (ext == '.iso') {
+        // @Concurrent 只能使用导入符号/局部变量，这里内联构造
+        const iso = emptyTrack();
+        iso.path = p;
+        iso.fileName = p.substring(p.lastIndexOf('/') + 1);
+        iso.ext = '.iso';
+        iso.title = iso.fileName.replace(/\.iso$/i, '');
+        iso.sampleRate = 2822400;
+        iso.bitDepth = 1;
+        iso.channels = 2;
+        iso.healthStatus = 'warn';
+        iso.healthDetail = 'SACD ISO：鸿蒙端暂无 sacd_extract，无法解析曲目或导出 DSF（可先用桌面版导出）';
+        iso.sizeBytes = st.size;
+        iso.mtimeMs = mtimeMs;
+        refreshSearchBlob(iso);
+        out.tracks.push(iso);
+        continue;
+      }
       let meta = new Meta();
       const f = fs.openSync(p, fs.OpenMode.READ_ONLY);
       try {
@@ -146,14 +203,20 @@ function parseChunkConcurrent(files: string[], knownPaths: string[], knownTimes:
       t.title = meta.title != '' ? meta.title : t.fileName.replace(ext, '');
       t.artist = meta.artist;
       t.album = meta.album;
+      t.albumartist = meta.albumartist;
       t.genre = meta.genre;
       t.year = meta.year;
       t.trackNo = meta.trackNo;
+      t.discNo = meta.discNo;
       t.durationMs = meta.durationMs;
       t.sampleRate = meta.sampleRate;
       t.channels = meta.channels;
       t.bitDepth = meta.bitDepth;
       t.bitrateKbps = meta.bitrateKbps;
+      if (meta.healthHint != '') {
+        t.healthStatus = 'warn';
+        t.healthDetail = meta.healthHint;
+      }
       t.sizeBytes = st.size;
       t.mtimeMs = mtimeMs;
       refreshSearchBlob(t);
@@ -249,6 +312,35 @@ export class Scanner {
     await Db.purgeBadPaths();
     const files = Scanner.collectFiles(roots);
     res.files = files.length;
+    // 清理扫描范围内已被删除的文件记录（CUE 子轨由 rebuildCues 重建，不在此处理）
+    try {
+      const present = new Set<string>(files);
+      const tracked = await Db.listTracks('');
+      const stale: number[] = [];
+      for (const t of tracked) {
+        if (t.isCueChild == 1 || present.has(t.path)) {
+          continue;
+        }
+        let underRoot = false;
+        for (const root of roots) {
+          const prefix = root.endsWith('/') ? root : `${root}/`;
+          if (t.path.startsWith(prefix)) {
+            underRoot = true;
+            break;
+          }
+        }
+        if (underRoot && !fileExists(t.path)) {
+          stale.push(t.id);
+        }
+      }
+      if (stale.length > 0) {
+        await Db.deleteTracks(stale);
+        res.removed = stale.length;
+        console.info(`scan prune: removed ${stale.length} missing tracks`);
+      }
+    } catch (e) {
+      // 清理失败不影响本次扫描
+    }
     const known = await Db.pathMtimes();
     const knownPaths: string[] = [];
     const knownTimes: number[] = [];

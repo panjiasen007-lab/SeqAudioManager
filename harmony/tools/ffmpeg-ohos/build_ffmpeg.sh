@@ -56,8 +56,10 @@ rm -f "$SRC"/ffbuild/config.mak "$SRC"/config.h "$SRC"/config_components.h 2>/de
   --disable-everything \
   --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
   --enable-protocol=file \
-  --enable-demuxer=flac,mp3,wav,mov,aac,ape \
-  --enable-decoder=flac,mp3,aac,alac,ape,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
+  --enable-demuxer=flac,mp3,wav,mov,aac,ape,dsf \
+  --enable-decoder=flac,mp3,aac,alac,ape,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar \
+  --enable-encoder=flac,pcm_s16le,pcm_s24le \
+  --enable-muxer=flac,wav \
   --enable-parser=mpegaudio,flac,aac \
   --extra-cflags="--target=$TRIPLE -D__MUSL__ -fPIC -O2 -fno-stack-protector" \
   --extra-ldflags="--target=$TRIPLE -fuse-ld=lld"

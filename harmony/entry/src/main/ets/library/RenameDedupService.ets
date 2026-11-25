@@ -1,6 +1,6 @@
 import fs from '@ohos.file.fs';
 import { BusinessError } from '@ohos.base';
-import { Track, emptyTrack } from '../model/Track';
+import { Track, emptyTrack, refreshSearchBlob } from '../model/Track';
 import { Db } from '../db/Db';
 import { PlayerEngine } from '../player/PlayerEngine';
 
@@ -54,12 +54,13 @@ function norm(s: string): string {
 function cloneTrack(t: Track): Track {
   const c = emptyTrack();
   c.id = t.id; c.path = t.path; c.fileName = t.fileName; c.ext = t.ext;
-  c.title = t.title; c.artist = t.artist; c.album = t.album; c.genre = t.genre; c.year = t.year;
-  c.trackNo = t.trackNo; c.durationMs = t.durationMs; c.sampleRate = t.sampleRate;
+  c.title = t.title; c.artist = t.artist; c.album = t.album; c.albumartist = t.albumartist;
+  c.genre = t.genre; c.year = t.year;
+  c.trackNo = t.trackNo; c.discNo = t.discNo; c.durationMs = t.durationMs; c.sampleRate = t.sampleRate;
   c.channels = t.channels; c.bitDepth = t.bitDepth; c.bitrateKbps = t.bitrateKbps;
   c.sizeBytes = t.sizeBytes; c.mtimeMs = t.mtimeMs; c.cuePath = t.cuePath;
   c.isCueChild = t.isCueChild; c.cueTrackNo = t.cueTrackNo; c.cueStartMs = t.cueStartMs;
-  c.cueEndMs = t.cueEndMs; c.replayGain = t.replayGain; c.healthStatus = t.healthStatus;
+  c.cueEndMs = t.cueEndMs; c.cuePregapMs = t.cuePregapMs; c.replayGain = t.replayGain; c.healthStatus = t.healthStatus;
   c.healthDetail = t.healthDetail; c.searchBlob = t.searchBlob; c.lyrics = t.lyrics;
   c.coverBlobPath = t.coverBlobPath; c.metaSource = t.metaSource; c.metaCheckedAt = t.metaCheckedAt;
   return c;
@@ -92,13 +93,27 @@ export class RenameDedupService {
       }
       const ext = extOf(t.path);
       const trackStr = t.trackNo > 0 ? (t.trackNo < 10 ? `0${t.trackNo}` : `${t.trackNo}`) : '';
+      // 英文与中文变量都支持（桌面版模板默认是中文写法）
       let name = template
         .replace(/\{title\}/g, t.title)
         .replace(/\{artist\}/g, t.artist)
         .replace(/\{album\}/g, t.album)
+        .replace(/\{albumartist\}/g, t.albumartist != '' ? t.albumartist : t.artist)
         .replace(/\{year\}/g, t.year)
         .replace(/\{track\}/g, trackStr)
-        .replace(/\{index\}/g, `${i + 1}`);
+        .replace(/\{disc\}/g, t.discNo > 0 ? `${t.discNo}` : '')
+        .replace(/\{index\}/g, `${i + 1}`)
+        .replace(/\{歌名\}/g, t.title)
+        .replace(/\{标题\}/g, t.title)
+        .replace(/\{歌手\}/g, t.artist)
+        .replace(/\{艺术家\}/g, t.artist)
+        .replace(/\{专辑\}/g, t.album)
+        .replace(/\{专辑艺术家\}/g, t.albumartist != '' ? t.albumartist : t.artist)
+        .replace(/\{年份\}/g, t.year)
+        .replace(/\{年代\}/g, t.year)
+        .replace(/\{曲目\}/g, trackStr)
+        .replace(/\{轨号\}/g, trackStr)
+        .replace(/\{碟号\}/g, t.discNo > 0 ? `${t.discNo}` : '');
       // 变量为空时只留值不留分隔符，否则会生成 "- - 03_sine_48k.wav" 这类残名
       name = name.replace(/\s*-\s*-\s*/g, ' - ').replace(/^[\s-]+/, '').replace(/[\s-]+$/, '');
       name = sanitize(name);
@@ -160,9 +175,21 @@ export class RenameDedupService {
       }
       try {
         fs.renameSync(item.oldPath, item.newPath);
+        // 同名 .lrc 跟着音频一起改名，避免歌词掉队
+        const oldLrc = `${item.oldPath.substring(0, item.oldPath.lastIndexOf('.'))}.lrc`;
+        const newLrc = `${item.newPath.substring(0, item.newPath.lastIndexOf('.'))}.lrc`;
+        try {
+          if (oldLrc != newLrc && RenameDedupService.fileExists(oldLrc) &&
+            !RenameDedupService.fileExists(newLrc)) {
+            fs.renameSync(oldLrc, newLrc);
+          }
+        } catch (e) {
+          // 歌词侧车失败不影响音频改名
+        }
         const updated = cloneTrack(before);
         updated.path = item.newPath;
         updated.fileName = item.newName;
+        refreshSearchBlob(updated);
         if (!(await Db.updateTrack(updated))) {
           throw new Error('数据库更新失败');
         }

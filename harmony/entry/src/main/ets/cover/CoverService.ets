@@ -50,6 +50,31 @@ export class CoverApplyResult {
   cachePath: string = '';
 }
 
+export class CoverExportReport {
+  total: number = 0;
+  exported: number = 0;
+  skipped: number = 0;
+  folders: number = 0;
+  dir: string = '';
+  errors: string[] = [];
+}
+
+function pad2n(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+function safeFile(text: string): string {
+  let out = text.trim();
+  for (const ch of ['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+    out = out.split(ch).join('_');
+  }
+  out = out.replace(/\s+/g, ' ').trim();
+  if (out == '') {
+    out = 'cover';
+  }
+  return out.length > 80 ? out.substring(0, 80) : out;
+}
+
 function bigArtwork(url: string): string {
   return url.replace('100x100bb', '600x600bb').replace('100x100', '600x600');
 }
@@ -153,9 +178,11 @@ export class CoverService {
         updated.title = track.title;
         updated.artist = track.artist;
         updated.album = track.album;
+        updated.albumartist = track.albumartist;
         updated.genre = track.genre;
         updated.year = track.year;
         updated.trackNo = track.trackNo;
+        updated.discNo = track.discNo;
         updated.durationMs = track.durationMs;
         updated.sampleRate = track.sampleRate;
         updated.channels = track.channels;
@@ -168,6 +195,7 @@ export class CoverService {
         updated.cueTrackNo = track.cueTrackNo;
         updated.cueStartMs = track.cueStartMs;
         updated.cueEndMs = track.cueEndMs;
+        updated.cuePregapMs = track.cuePregapMs;
         updated.replayGain = track.replayGain;
         updated.healthStatus = track.healthStatus;
         updated.healthDetail = track.healthDetail;
@@ -221,9 +249,11 @@ export class CoverService {
         updated.title = track.title;
         updated.artist = track.artist;
         updated.album = track.album;
+        updated.albumartist = track.albumartist;
         updated.genre = track.genre;
         updated.year = track.year;
         updated.trackNo = track.trackNo;
+        updated.discNo = track.discNo;
         updated.durationMs = track.durationMs;
         updated.sampleRate = track.sampleRate;
         updated.channels = track.channels;
@@ -236,6 +266,7 @@ export class CoverService {
         updated.cueTrackNo = track.cueTrackNo;
         updated.cueStartMs = track.cueStartMs;
         updated.cueEndMs = track.cueEndMs;
+        updated.cuePregapMs = track.cuePregapMs;
         updated.replayGain = track.replayGain;
         updated.healthStatus = track.healthStatus;
         updated.healthDetail = track.healthDetail;
@@ -257,7 +288,7 @@ export class CoverService {
 
   // 兜底：文件里已经内嵌了封面（比如清空曲库后重扫、换设备重扫），直接从文件抽出来补缓存
   static async ensureCover(ctx: common.UIAbilityContext, track: Track): Promise<string> {
-    if (track.ext != '.flac' && track.ext != '.mp3') {
+    if (track.ext != '.flac' && track.ext != '.mp3' && track.ext != '.wav') {
       console.info(`ensureCover: skip ext=${track.ext}`);
       return '';
     }
@@ -296,6 +327,123 @@ export class CoverService {
       const err = e as BusinessError;
       console.error(`ensureCover: fail ${err.message}`);
       return '';
+    }
+  }
+
+  private static copyFile(src: string, dst: string): void {
+    fs.copyFileSync(src, dst);
+  }
+
+  private static async coverSource(ctx: common.UIAbilityContext, t: Track): Promise<string> {
+    if (t.coverBlobPath != '') {
+      try {
+        fs.statSync(t.coverBlobPath);
+        return t.coverBlobPath;
+      } catch (e) {
+        // 缓存丢失，继续尝试内嵌封面
+      }
+    }
+    return CoverService.ensureCover(ctx, t);
+  }
+
+  // 批量导出封面：Exports/Covers/NN - 歌手 - 专辑.jpg
+  static async exportCovers(ctx: common.UIAbilityContext,
+    tracks: Track[]): Promise<CoverExportReport> {
+    const rep = new CoverExportReport();
+    rep.total = tracks.length;
+    const dir = `${ctx.filesDir}/Exports/Covers`;
+    rep.dir = dir;
+    try {
+      fs.mkdirSync(dir, true);
+    } catch (e) {
+      // 已存在
+    }
+    let index = 0;
+    for (const t of tracks) {
+      if (t.isCueChild == 1) {
+        rep.skipped++;
+        continue;
+      }
+      index++;
+      const src = await CoverService.coverSource(ctx, t);
+      if (src == '') {
+        rep.skipped++;
+        continue;
+      }
+      const ext = src.toLowerCase().endsWith('.png') ? '.png' : '.jpg';
+      const base = `${pad2n(index)} - ${safeFile(t.artist == '' ? '未知歌手' : t.artist)} - ` +
+        `${safeFile(t.album != '' ? t.album : (t.title != '' ? t.title : t.fileName))}`;
+      let dst = `${dir}/${base}${ext}`;
+      let n = 1;
+      while (CoverService.fileExists(dst)) {
+        dst = `${dir}/${base} (${n})${ext}`;
+        n++;
+      }
+      try {
+        CoverService.copyFile(src, dst);
+        rep.exported++;
+      } catch (e) {
+        const err = e as BusinessError;
+        rep.errors.push(`${t.fileName}：${err.message}`);
+      }
+    }
+    return rep;
+  }
+
+  // 生成文件夹封面：每个目录写一张 cover.jpg/png，供其他播放器/文件管理器识别
+  static async exportFolderCovers(ctx: common.UIAbilityContext,
+    tracks: Track[]): Promise<CoverExportReport> {
+    const rep = new CoverExportReport();
+    rep.total = tracks.length;
+    const sources = new Map<string, string>();
+    const dirs = new Set<string>();
+    const tried = new Set<string>();
+    for (const t of tracks) {
+      if (t.isCueChild == 1) {
+        continue;
+      }
+      const slash = t.path.lastIndexOf('/');
+      if (slash <= 0) {
+        continue;
+      }
+      const dir = t.path.substring(0, slash);
+      dirs.add(dir);
+      if (sources.has(dir) || tried.has(dir)) {
+        continue;
+      }
+      tried.add(dir);
+      const src = await CoverService.coverSource(ctx, t);
+      if (src != '') {
+        sources.set(dir, src);
+      }
+    }
+    rep.total = dirs.size;
+    for (const dir of sources.keys()) {
+      const src = sources.get(dir);
+      if (src == undefined) {
+        continue;
+      }
+      const ext = src.toLowerCase().endsWith('.png') ? '.png' : '.jpg';
+      const dst = `${dir}/cover${ext}`;
+      try {
+        CoverService.copyFile(src, dst);
+        rep.exported++;
+        rep.folders++;
+      } catch (e) {
+        const err = e as BusinessError;
+        rep.errors.push(`${dir}：${err.message}`);
+      }
+    }
+    rep.skipped = Math.max(0, dirs.size - rep.folders);
+    return rep;
+  }
+
+  private static fileExists(path: string): boolean {
+    try {
+      fs.statSync(path);
+      return true;
+    } catch (e) {
+      return false;
     }
   }
 }

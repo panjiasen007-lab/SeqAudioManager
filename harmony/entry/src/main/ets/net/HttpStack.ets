@@ -23,15 +23,17 @@ export class HttpStack {
     }
   }
 
-  private static async once(url: string, type: http.HttpDataType): Promise<Object> {
+  private static async once(url: string, type: http.HttpDataType,
+    headers?: Record<string, string>, timeoutMs: number = TIMEOUT_MS): Promise<Object> {
     await HttpStack.acquire();
     const req = http.createHttp();
     try {
       const resp: http.HttpResponse = await req.request(url, {
         method: http.RequestMethod.GET,
         expectDataType: type,
-        connectTimeout: TIMEOUT_MS,
-        readTimeout: TIMEOUT_MS
+        connectTimeout: timeoutMs,
+        readTimeout: timeoutMs,
+        header: headers
       });
       if (resp.responseCode < 200 || resp.responseCode >= 300) {
         throw new Error(`HTTP ${resp.responseCode}`);
@@ -43,11 +45,12 @@ export class HttpStack {
     }
   }
 
-  private static async withRetry(url: string, type: http.HttpDataType): Promise<Object> {
+  private static async withRetry(url: string, type: http.HttpDataType,
+    headers?: Record<string, string>, timeoutMs: number = TIMEOUT_MS): Promise<Object> {
     try {
-      return await HttpStack.once(url, type);
+      return await HttpStack.once(url, type, headers, timeoutMs);
     } catch (e) {
-      return await HttpStack.once(url, type);
+      return await HttpStack.once(url, type, headers, timeoutMs);
     }
   }
 
@@ -56,8 +59,21 @@ export class HttpStack {
     return r as string;
   }
 
+  static async getTextEx(url: string, headers?: Record<string, string>,
+    timeoutMs: number = TIMEOUT_MS): Promise<string> {
+    const r = await HttpStack.withRetry(url, http.HttpDataType.STRING, headers, timeoutMs);
+    return r as string;
+  }
+
   static async getBytes(url: string): Promise<Uint8Array> {
     const r = await HttpStack.withRetry(url, http.HttpDataType.ARRAY_BUFFER);
+    const ab = r as ArrayBuffer;
+    return new Uint8Array(ab);
+  }
+
+  static async getBytesEx(url: string, headers?: Record<string, string>,
+    timeoutMs: number = TIMEOUT_MS): Promise<Uint8Array> {
+    const r = await HttpStack.withRetry(url, http.HttpDataType.ARRAY_BUFFER, headers, timeoutMs);
     const ab = r as ArrayBuffer;
     return new Uint8Array(ab);
   }

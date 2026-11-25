@@ -3,6 +3,7 @@
 #include "napi/native_api.h"
 
 #include "audio_engine.h"
+#include "audio_analysis.h"
 
 namespace {
 
@@ -158,6 +159,41 @@ napi_value IsOpen(napi_env env, napi_callback_info info) {
   return out;
 }
 
+napi_value Analyze(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value args[1] = {nullptr};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc < 1) {
+    napi_value out = nullptr;
+    napi_create_string_utf8(env, "{\"ok\":false,\"error\":\"缺少路径\"}", NAPI_AUTO_LENGTH, &out);
+    return out;
+  }
+  std::string path = ReadString(env, args[0]);
+  std::string json = AudioAnalysis::Analyze(path);
+  napi_value out = nullptr;
+  napi_create_string_utf8(env, json.c_str(), json.size(), &out);
+  return out;
+}
+
+napi_value ExportSegment(napi_env env, napi_callback_info info) {
+  size_t argc = 6;
+  napi_value args[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc < 6) {
+    return Int32Result(env, -1);
+  }
+  std::string src = ReadString(env, args[0]);
+  int64_t startMs = 0;
+  int64_t durationMs = 0;
+  int32_t bitDepth = 16;
+  napi_get_value_int64(env, args[1], &startMs);
+  napi_get_value_int64(env, args[2], &durationMs);
+  std::string format = ReadString(env, args[3]);
+  napi_get_value_int32(env, args[4], &bitDepth);
+  std::string dst = ReadString(env, args[5]);
+  return Int32Result(env, AudioAnalysis::ExportSegment(src, startMs, durationMs, format, bitDepth, dst));
+}
+
 } // namespace
 
 EXTERN_C_START
@@ -177,6 +213,8 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"takeInterrupt", nullptr, TakeInterrupt, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"info", nullptr, InfoJson, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"isOpen", nullptr, IsOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"analyze", nullptr, Analyze, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"exportSegment", nullptr, ExportSegment, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
   return exports;

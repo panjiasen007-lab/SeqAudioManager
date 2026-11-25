@@ -38,8 +38,14 @@ export class CueIndexer {
           }
           continue;
         }
+        if (parent.ext.toLowerCase() == '.iso') {
+          // SACD ISO 的曲目表来自 sacd_extract，当前平台无法生成逻辑轨
+          continue;
+        }
         for (const ct of file.tracks) {
-          const end = ct.endMs > ct.startMs ? ct.endMs : Math.max(0, parent.durationMs - ct.startMs);
+          // 最后一轨 endMs=0：用父文件总时长兜底（父时长是文件绝对时长，不能再减起点）
+          const fallbackEnd = parent.durationMs > ct.startMs ? parent.durationMs : ct.startMs;
+          const end = ct.endMs > ct.startMs ? ct.endMs : fallbackEnd;
           const t = emptyTrack();
           t.path = `${parent.path}#cue/${name}/${ct.no}`;
           t.fileName = parent.fileName;
@@ -47,9 +53,11 @@ export class CueIndexer {
           t.title = ct.title != '' ? `${ct.no}. ${ct.title}` : `${ct.no}. ${parent.title}`;
           t.artist = ct.performer != '' ? ct.performer : parent.artist;
           t.album = sheet.album != '' ? sheet.album : parent.album;
+          t.albumartist = parent.albumartist;
           t.genre = parent.genre;
           t.year = parent.year;
           t.trackNo = ct.no;
+          t.discNo = parent.discNo;
           t.durationMs = Math.max(0, end - ct.startMs);
           t.sampleRate = parent.sampleRate;
           t.channels = parent.channels;
@@ -62,6 +70,7 @@ export class CueIndexer {
           t.cueTrackNo = ct.no;
           t.cueStartMs = ct.startMs;
           t.cueEndMs = end;
+          t.cuePregapMs = ct.pregapMs;
           t.healthStatus = parent.healthStatus;
           refreshSearchBlob(t);
           batch.push(t);
