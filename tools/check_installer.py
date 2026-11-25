@@ -15,7 +15,7 @@ import time
 import winreg
 from pathlib import Path
 
-ROOT = Path("D:/SeqAudio Manager")
+ROOT = Path("D:/SeqAudioManager")
 SETUP = ROOT / "dist" / "音序管家-v1.5.3-x86-x64-Setup.exe"
 KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\SeqAudioManager"
 REPORT = Path(tempfile.gettempdir()) / "seqaudio_install.json"
