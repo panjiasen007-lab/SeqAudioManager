@@ -422,6 +422,14 @@ struct Index {
           .onClick(() => {
             this.showRoots = !this.showRoots;
           })
+        Button('健康')
+          .fontSize(13)
+          .height(34)
+          .backgroundColor('#2A2A30')
+          .fontColor('#F0F0F2')
+          .onClick(() => {
+            router.pushUrl({ url: 'pages/HealthPage' });
+          })
       }
         .width('100%')
 
