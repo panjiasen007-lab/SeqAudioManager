@@ -64,7 +64,7 @@ export class SessionStore {
       snapshot.queuePaths = engine.queue.map((t) => t.path);
       const cur = engine.current();
       snapshot.lastTrackPath = cur ? cur.path : '';
-      snapshot.lastPositionMs = Math.max(0, Math.round(engine.positionMs));
+      snapshot.lastPositionMs = Math.max(0, Math.round(engine.logicalPos()));
     }
     snapshot.playMode = engine.mode;
     snapshot.volume = engine.volume;

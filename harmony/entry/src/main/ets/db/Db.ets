@@ -320,6 +320,38 @@ export class Db {
     await store.executeSql('DELETE FROM tracks');
   }
 
+  static async deleteCueChildren(): Promise<void> {
+    const store = Db.store;
+    if (!store) {
+      return;
+    }
+    try {
+      await store.executeSql('DELETE FROM tracks WHERE is_cue_child = 1');
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.deleteCueChildren fail: ${err.message}`);
+    }
+  }
+
+  static async findTrackByFileName(name: string): Promise<Track | undefined> {
+    const store = Db.store;
+    if (!store) {
+      return undefined;
+    }
+    try {
+      const rs = await store.querySql(
+        'SELECT * FROM tracks WHERE is_cue_child = 0 AND lower(file_name) = lower(?) LIMIT 1', [name]);
+      let out: Track | undefined = undefined;
+      if (rs.goToNextRow()) {
+        out = Db.rowToTrack(rs);
+      }
+      rs.close();
+      return out;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   static async deleteTracksUnderRoot(root: string): Promise<void> {
     const store = Db.store;
     if (!store) {

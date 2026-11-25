@@ -1,11 +1,13 @@
 import { router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@ohos.base';
 import fs from '@ohos.file.fs';
 import picker from '@ohos.file.picker';
 import { Track } from '../model/Track';
 import { Db, Stats } from '../db/Db';
 import { Scanner, ScanController, ScanRoots } from '../scanner/Scanner';
 import { ImportManager, ImportReport } from '../import/ImportManager';
+import { CueIndexer } from '../cue/CueIndexer';
 import { PlayerEngine, PlayMode } from '../player/PlayerEngine';
 import { MiniPlayer } from '../components/MiniPlayer';
 import { SessionStore } from '../session/SessionStore';
@@ -59,6 +61,7 @@ struct Index {
     } else {
       await this.refresh();
     }
+    await this.rebuildCues();
     await this.restoreSession(session.queuePaths, session.lastTrackPath, session.lastPositionMs);
     SessionStore.startAutoSave(this.engine);
   }
@@ -90,24 +93,32 @@ struct Index {
   // 首次启动：把内置示例曲目复制进沙箱 Music，保证开箱即有内容可扫可播
   private async seedSamplesIfNeeded(ctx: common.UIAbilityContext): Promise<void> {
     const musicDir = `${ctx.filesDir}/Music`;
-    let existing: string[] = [];
+    console.info(`seedSamples: start dir=${musicDir}`);
     try {
-      existing = fs.listFileSync(musicDir);
-    } catch (e) {
-      existing = [];
-    }
-    if (existing.length > 0) {
-      return;
-    }
-    try {
-      fs.mkdirSync(musicDir, true);
-      const names: string[] = ['01_yehangxing.flac', '02_chenguang.mp3', '03_sine_48k.wav'];
+      try {
+        fs.mkdirSync(musicDir, true);
+      } catch (e) {
+        // 目录已存在：继续检查缺失的示例文件
+      }
+      const names: string[] = ['01_yehangxing.flac', '02_chenguang.mp3', '03_sine_48k.wav', 'sample.cue'];
+      let copied = 0;
       for (const n of names) {
+        try {
+          fs.statSync(`${musicDir}/${n}`);
+          continue;
+        } catch (e) {
+          // 缺失的示例文件补拷
+        }
         let bytes = new Uint8Array(0);
         try {
-          bytes = ctx.resourceManager.getRawFileContentSync(`rawfile/${n}`);
+          try {
+            bytes = ctx.resourceManager.getRawFileContentSync(`rawfile/${n}`);
+          } catch (e) {
+            bytes = ctx.resourceManager.getRawFileContentSync(n);
+          }
         } catch (e) {
-          bytes = ctx.resourceManager.getRawFileContentSync(n);
+          console.error(`seedSamples: 读取 ${n} 失败：${(e as BusinessError).message}`);
+          continue;
         }
         const ab = new ArrayBuffer(bytes.byteLength);
         new Uint8Array(ab).set(bytes);
@@ -117,9 +128,14 @@ struct Index {
         } finally {
           fs.closeSync(f);
         }
+        copied++;
       }
-      this.toastMsg('已载入 3 首内置示例曲目');
+      if (copied > 0) {
+        this.toastMsg(`已载入 ${copied} 个内置示例文件`);
+      }
+      console.info(`seedSamples: copied=${copied} dir=${musicDir} files=${fs.listFileSync(musicDir).join(',')}`);
     } catch (e) {
+      console.error(`seedSamples: 失败 ${(e as BusinessError).message}`);
       // 示例载入失败不影响正常使用
     }
   }
@@ -130,6 +146,21 @@ struct Index {
       this.stats = await Db.stats();
     } catch (e) {
       // 数据库未就绪时忽略
+    }
+  }
+
+  private async rebuildCues(): Promise<void> {
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const roots = await ScanRoots.load(ctx);
+      const res = await CueIndexer.rebuild(roots);
+      console.info(`CueIndexer: roots=${roots.join(',')} files=${res.cueFiles} children=${res.children} unmatched=${res.unmatched.join(',')}`);
+      if (res.children > 0) {
+        await this.refresh();
+        this.toastMsg(`CUE 已索引：${res.cueFiles} 个文件 · ${res.children} 个逻辑轨`);
+      }
+    } catch (e) {
+      // CUE 索引失败不影响普通曲目播放
     }
   }
 
@@ -185,7 +216,8 @@ struct Index {
   }
 
   private openEditor(t: Track): void {
-    AppStorage.setOrCreate('seqaudio_edit_paths', JSON.stringify([t.path]));
+    const physical = t.isCueChild == 1 ? t.cuePath : t.path;
+    AppStorage.setOrCreate('seqaudio_edit_paths', JSON.stringify([physical]));
     router.pushUrl({ url: 'pages/TrackEditPage' });
   }
 
@@ -203,6 +235,7 @@ struct Index {
       const res = await Scanner.scan(this.roots, this.scanCtrl, (done: number, total: number, cur: string) => {
         this.scanText = total > 0 ? `扫描中 ${done}/${total}：${cur}` : '正在收集文件…';
       });
+      await this.rebuildCues();
       await this.refresh();
       const issueText = res.failed > 0 ? ` · 失败明细 ${res.issues.slice(0, 3).join(' / ')}` : '';
       this.toastMsg(`扫描完成：新增 ${res.added} · 更新 ${res.updated} · 跳过 ${res.skipped} · 失败 ${res.failed}（${res.costMs}ms）${issueText}`);

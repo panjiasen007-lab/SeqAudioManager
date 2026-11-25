@@ -73,6 +73,7 @@ export class PlayerEngine {
   volume: number = 1.0;
   // 会话恢复时待定位的进度（首次加载完成后 seek）
   private pendingSeekMs: number = 0;
+  private cueEndHandled: boolean = false;
 
   private listeners: (() => void)[] = [];
   // 由 Index 注入：关键事件立即持久化会话（避免 PlayerEngine 与 SessionStore 循环依赖）
@@ -98,8 +99,8 @@ export class PlayerEngine {
       }
     }
     AppStorage.setOrCreate('npPlaying', this.playing);
-    AppStorage.setOrCreate('npPos', this.positionMs);
-    AppStorage.setOrCreate('npDur', this.durationMs);
+    AppStorage.setOrCreate('npPos', this.logicalPos());
+    AppStorage.setOrCreate('npDur', this.logicalDur());
     AppStorage.setOrCreate('npIdx', this.index);
     const t = this.current();
     AppStorage.setOrCreate('npTitle', t ? t.title : '');
@@ -111,6 +112,24 @@ export class PlayerEngine {
       return this.queue[this.index];
     }
     return undefined;
+  }
+
+  // CUE 逻辑轨：内部进度用物理文件绝对时间，UI 用逻辑轨相对时间
+  logicalPos(): number {
+    const t = this.current();
+    if (t && t.isCueChild == 1) {
+      return Math.max(0, this.positionMs - t.cueStartMs);
+    }
+    return this.positionMs;
+  }
+
+  private logicalDur(): number {
+    const t = this.current();
+    if (t && t.isCueChild == 1) {
+      const end = t.cueEndMs > t.cueStartMs ? t.cueEndMs : t.durationMs;
+      return Math.max(0, end - t.cueStartMs);
+    }
+    return this.durationMs;
   }
 
   private async ensurePlayer(): Promise<media.AVPlayer> {
@@ -137,7 +156,13 @@ export class PlayerEngine {
     });
     av.on('timeUpdate', (t: number) => {
       eng.positionMs = t;
-      AppStorage.setOrCreate('npPos', t);
+      AppStorage.setOrCreate('npPos', eng.logicalPos());
+      const cur = eng.current();
+      if (cur && cur.isCueChild == 1 && cur.cueEndMs > cur.cueStartMs &&
+        t >= cur.cueEndMs && !eng.cueEndHandled) {
+        eng.cueEndHandled = true;
+        eng.nextByUser();
+      }
       for (const l of eng.listeners) {
         try {
           l();
@@ -183,8 +208,10 @@ export class PlayerEngine {
     const av = await this.ensurePlayer();
     this.closeFd();
     try {
-      const f = fs.openSync(t.path, fs.OpenMode.READ_ONLY);
+      const physical = t.isCueChild == 1 && t.cuePath != '' ? t.cuePath : t.path;
+      const f = fs.openSync(physical, fs.OpenMode.READ_ONLY);
       this.fd = f.fd;
+      this.cueEndHandled = false;
       await av.reset();
       // 等 reset→initialized（设置 fdSrc 后异步迁移），再 prepare
       const ready = this.setupStateWaiter('initialized');
@@ -199,7 +226,15 @@ export class PlayerEngine {
       await av.prepare();
       await prepared;
       await av.setVolume(this.volume);
-      if (this.pendingSeekMs > 0) {
+      if (t.isCueChild == 1) {
+        const logical = Math.max(0, this.pendingSeekMs);
+        const logicalMax = this.logicalDur();
+        const target = t.cueStartMs + Math.min(logical, logicalMax > 0 ? logicalMax - 50 : logical);
+        av.seek(Math.max(0, Math.round(target)), media.SeekMode.SEEK_PREV_SYNC);
+        this.positionMs = Math.max(0, Math.round(target));
+        this.pendingSeekMs = 0;
+        this.emit();
+      } else if (this.pendingSeekMs > 0) {
         const target = Math.min(this.pendingSeekMs,
           this.durationMs > 0 ? this.durationMs - 50 : this.pendingSeekMs);
         av.seek(Math.max(0, target), media.SeekMode.SEEK_PREV_SYNC);
@@ -226,8 +261,8 @@ export class PlayerEngine {
     this.queue = tracks.slice();
     this.index = startIndex >= 0 && startIndex < this.queue.length ? startIndex : -1;
     this.pendingSeekMs = Math.max(0, Math.round(positionMs));
-    this.positionMs = this.pendingSeekMs;
     const cur = this.current();
+    this.positionMs = cur && cur.isCueChild == 1 ? cur.cueStartMs + this.pendingSeekMs : this.pendingSeekMs;
     this.durationMs = cur ? cur.durationMs : 0;
     this.emit();
   }
@@ -268,9 +303,17 @@ export class PlayerEngine {
     if (!av) {
       return;
     }
-    const clamped = Math.max(0, Math.min(ms, this.durationMs > 0 ? this.durationMs - 50 : ms));
-    this.positionMs = clamped;
-    av.seek(clamped, media.SeekMode.SEEK_PREV_SYNC);
+    const cur = this.current();
+    let target = ms;
+    if (cur && cur.isCueChild == 1) {
+      const maxLogical = this.logicalDur();
+      const logical = Math.max(0, Math.min(ms, maxLogical > 0 ? maxLogical - 50 : ms));
+      target = cur.cueStartMs + logical;
+    } else {
+      target = Math.max(0, Math.min(ms, this.durationMs > 0 ? this.durationMs - 50 : ms));
+    }
+    this.positionMs = Math.round(target);
+    av.seek(Math.round(target), media.SeekMode.SEEK_PREV_SYNC);
     this.emit();
     if (this.onSessionDirty) {
       this.onSessionDirty(true);
