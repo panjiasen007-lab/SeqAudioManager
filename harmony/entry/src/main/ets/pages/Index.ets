@@ -4,50 +4,14 @@ import fs from '@ohos.file.fs';
 import picker from '@ohos.file.picker';
 import { Track } from '../model/Track';
 import { Db, Stats } from '../db/Db';
-import { Scanner } from '../scanner/Scanner';
+import { Scanner, ScanController, ScanRoots } from '../scanner/Scanner';
+import { ImportManager, ImportReport } from '../import/ImportManager';
 import { PlayerEngine, PlayMode } from '../player/PlayerEngine';
 import { MiniPlayer } from '../components/MiniPlayer';
 import { SessionStore } from '../session/SessionStore';
 import { fmtDuration, fmtSize, fmtSpec } from '../utils/Util';
 
 const ACCENT = '#E8B04B';
-
-// 把选择器选中的文件复制进应用沙箱（选择器 URI 可直接 open）
-async function copyUriToFile(uri: string, destDir: string): Promise<boolean> {
-  try {
-    const name = decodeURIComponent(uri.substring(uri.lastIndexOf('/') + 1));
-    if (name == '') {
-      return false;
-    }
-    const dest = destDir.endsWith('/') ? destDir + name : `${destDir}/${name}`;
-    const src = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-    const dst = fs.openSync(dest, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-    const buf = new ArrayBuffer(1048576);
-    try {
-      let n = 0;
-      do {
-        n = fs.readSync(src.fd, buf, { offset: 0, length: 1048576 });
-        if (n > 0) {
-          fs.writeSync(dst.fd, buf, { offset: 0, length: n });
-        }
-      } while (n > 0);
-    } finally {
-      try {
-        fs.closeSync(src);
-      } catch (e) {
-        // ignore
-      }
-      try {
-        fs.closeSync(dst);
-      } catch (e) {
-        // ignore
-      }
-    }
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
 
 @Entry
 @Component
@@ -58,8 +22,14 @@ struct Index {
   @State scanning: boolean = false;
   @State scanText: string = '';
   @State toast: string = '';
+  @State roots: string[] = [];
+  @State newRoot: string = '';
+  @State showRoots: boolean = false;
+  @State scanPaused: boolean = false;
+  @State failedUris: string[] = [];
   @StorageLink('npIdx') npIdx: number = -1;
   private engine: PlayerEngine = PlayerEngine.get();
+  private scanCtrl: ScanController = new ScanController();
 
   aboutToAppear(): void {
     this.initAsync();
@@ -72,6 +42,7 @@ struct Index {
   private async initAsync(): Promise<void> {
     const ctx = getContext(this) as common.UIAbilityContext;
     await Db.init(ctx);
+    this.roots = await ScanRoots.load(ctx);
     const session = await SessionStore.load();
     this.engine.setMode(session.playMode as PlayMode);
     this.engine.setVolume(session.volume);
@@ -217,31 +188,55 @@ struct Index {
     if (this.scanning) {
       return;
     }
+    const ctx = getContext(this) as common.UIAbilityContext;
+    this.roots = await ScanRoots.load(ctx);
+    this.scanCtrl = new ScanController();
+    this.scanPaused = false;
     this.scanning = true;
     this.scanText = '正在收集文件…';
     try {
-      const ctx = getContext(this) as common.UIAbilityContext;
-      let roots: string[] = [`${ctx.filesDir}/Music`];
-      const saved = await Db.getSetting('scan_roots', '');
-      if (saved != '') {
-        try {
-          const arr = JSON.parse(saved) as string[];
-          if (arr.length > 0) {
-            roots = arr;
-          }
-        } catch (e) {
-          // 配置损坏则用默认根
-        }
-      }
-      const res = await Scanner.scan(roots, (done: number, total: number, cur: string) => {
+      const res = await Scanner.scan(this.roots, this.scanCtrl, (done: number, total: number, cur: string) => {
         this.scanText = total > 0 ? `扫描中 ${done}/${total}：${cur}` : '正在收集文件…';
       });
       await this.refresh();
-      this.toastMsg(`扫描完成：新增 ${res.added} · 更新 ${res.updated} · 跳过 ${res.skipped} · 失败 ${res.failed}（${res.costMs}ms）`);
+      const issueText = res.failed > 0 ? ` · 失败明细 ${res.issues.slice(0, 3).join(' / ')}` : '';
+      this.toastMsg(`扫描完成：新增 ${res.added} · 更新 ${res.updated} · 跳过 ${res.skipped} · 失败 ${res.failed}（${res.costMs}ms）${issueText}`);
     } catch (e) {
       this.toastMsg('扫描失败，请查看日志');
     }
     this.scanning = false;
+  }
+
+  private toggleScanPause(): void {
+    if (!this.scanning) {
+      return;
+    }
+    if (this.scanCtrl.paused) {
+      this.scanCtrl.resume();
+      this.scanPaused = false;
+    } else {
+      this.scanCtrl.pause();
+      this.scanPaused = true;
+    }
+  }
+
+  private cancelScan(): void {
+    if (!this.scanning) {
+      return;
+    }
+    this.scanCtrl.cancel();
+    this.scanPaused = false;
+  }
+
+  private async addRoot(): Promise<void> {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    this.roots = await ScanRoots.add(ctx, this.newRoot);
+    this.newRoot = '';
+  }
+
+  private async removeRoot(root: string): Promise<void> {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    this.roots = await ScanRoots.remove(ctx, root, false);
   }
 
   private async importFiles(): Promise<void> {
@@ -249,27 +244,24 @@ struct Index {
     try {
       const avp = new picker.AudioViewPicker();
       const opts = new picker.AudioSelectOptions();
-      opts.maxSelectNumber = 100;
+      opts.maxSelectNumber = 1000;
       const uris = await avp.select(opts);
       if (!uris || uris.length == 0) {
         return;
       }
-      const musicDir = `${ctx.filesDir}/Music`;
-      try {
-        fs.mkdirSync(musicDir, true);
-      } catch (e) {
-        // 目录已存在
-      }
-      let ok = 0;
-      for (const uri of uris) {
-        if (await copyUriToFile(uri, musicDir)) {
-          ok++;
-        }
-      }
-      this.toastMsg(`导入完成 ${ok}/${uris.length}，开始扫描…`);
-      await this.startScan();
+      await this.importUris(uris);
     } catch (e) {
       // 用户取消选择：静默返回
+    }
+  }
+
+  private async importUris(uris: string[]): Promise<void> {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const rep: ImportReport = await ImportManager.importFiles(uris, `${ctx.filesDir}/Music`, false);
+    this.failedUris = rep.failed;
+    this.toastMsg(`导入 ${rep.ok}/${rep.total} · 跳过重复 ${rep.skipped} · 失败 ${rep.failed.length}`);
+    if (rep.ok > 0) {
+      await this.startScan();
     }
   }
 
@@ -351,7 +343,7 @@ struct Index {
             .fontSize(24)
             .fontWeight(FontWeight.Bold)
             .fontColor('#F5F5F7')
-          Text('HarmonyOS PC · v1.0')
+          Text('HarmonyOS PC · v1.1-dev')
             .fontSize(11)
             .fontColor('#8A8A92')
         }
@@ -375,6 +367,14 @@ struct Index {
           .fontColor('#F0F0F2')
           .onClick(() => {
             this.importFiles();
+          })
+        Button('目录')
+          .fontSize(13)
+          .height(34)
+          .backgroundColor('#2A2A30')
+          .fontColor('#F0F0F2')
+          .onClick(() => {
+            this.showRoots = !this.showRoots;
           })
       }
         .width('100%')
@@ -405,14 +405,72 @@ struct Index {
         .width('100%')
         .margin({ top: 14 })
 
+      // 扫描根目录管理
+      if (this.showRoots) {
+        Column({ space: 8 }) {
+          Text('扫描根目录（绝对路径，支持多个）')
+            .fontSize(12).fontColor('#8A8A92')
+          Row({ space: 8 }) {
+            TextInput({ placeholder: '例如 /storage/users/.../Music', text: this.newRoot })
+              .height(32).fontSize(12).backgroundColor('#1E1E22').borderRadius(6)
+              .layoutWeight(1)
+              .onChange((v: string) => {
+                this.newRoot = v;
+              })
+            Button('添加').fontSize(12).height(30).backgroundColor('#26221A').fontColor(ACCENT)
+              .onClick(() => {
+                this.addRoot();
+              })
+          }
+            .width('100%')
+          ForEach(this.roots, (r: string) => {
+            Row({ space: 8 }) {
+              Text(r).fontSize(11).fontColor('#B8B8C0').layoutWeight(1).maxLines(1)
+              Button('移除').fontSize(11).height(26).backgroundColor('#2A2A30').fontColor('#F0F0F2')
+                .onClick(() => {
+                  this.removeRoot(r);
+                })
+            }
+              .width('100%')
+          }, (r: string) => r)
+        }
+          .width('100%')
+          .padding(10)
+          .margin({ top: 8 })
+          .backgroundColor('#1A1A1E')
+          .borderRadius(8)
+          .alignItems(HorizontalAlign.Start)
+      }
+
       // 扫描进度
       Row({ space: 8 }) {
         LoadingProgress().width(18).height(18).color(ACCENT)
-        Text(this.scanText).fontSize(12).fontColor('#B8B8C0').maxLines(1)
+        Text(this.scanText).fontSize(12).fontColor('#B8B8C0').maxLines(1).layoutWeight(1)
+        Button(this.scanPaused ? '继续' : '暂停').fontSize(11).height(26)
+          .backgroundColor('#26221A').fontColor(ACCENT)
+          .onClick(() => {
+            this.toggleScanPause();
+          })
+        Button('取消').fontSize(11).height(26)
+          .backgroundColor('#2A2A30').fontColor('#F0F0F2')
+          .onClick(() => {
+            this.cancelScan();
+          })
       }
         .width('100%')
         .margin({ top: 10 })
         .visibility(this.scanning ? Visibility.Visible : Visibility.None)
+
+      if (this.failedUris.length > 0) {
+        Button(`重试导入失败项（${this.failedUris.length}）`)
+          .fontSize(11).height(28).backgroundColor('#26221A').fontColor(ACCENT)
+          .margin({ top: 6 })
+          .onClick(() => {
+            const retry = this.failedUris.slice();
+            this.failedUris = [];
+            this.importUris(retry);
+          })
+      }
 
       // 提示
       Text(this.toast)

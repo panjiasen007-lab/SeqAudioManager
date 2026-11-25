@@ -137,23 +137,12 @@ export class Db {
     if (!store || tracks.length == 0) {
       return 0;
     }
+    // 每批 30 首（900 个占位符），兼容 SQLite 变量数上限
     const marks: string[] = [];
-    const args: Array<relationalStore.ValueType> = [];
-    for (const t of tracks) {
-      let mark = '(';
-      for (let k = 0; k < 30; k++) {
-        if (k > 0) {
-          mark += ',';
-        }
-        mark += '?';
-      }
-      marks.push(mark + ')');
-      const one = Db.argsOf(t, false);
-      for (const v of one) {
-        args.push(v);
-      }
+    for (let k = 0; k < 30; k++) {
+      marks.push('?');
     }
-    const sql = `INSERT INTO tracks (${Db.INSERT_COLS}) VALUES ${marks.join(',')}
+    const sql = `INSERT INTO tracks (${Db.INSERT_COLS}) VALUES (${marks.join(',')})
       ON CONFLICT(path) DO UPDATE SET
        file_name=excluded.file_name, ext=excluded.ext, title=excluded.title, artist=excluded.artist,
        album=excluded.album, genre=excluded.genre, year=excluded.year, track_no=excluded.track_no,
@@ -165,14 +154,25 @@ export class Db {
        health_detail=excluded.health_detail, search_blob=excluded.search_blob, lyrics=excluded.lyrics,
        cover_blob_path=excluded.cover_blob_path, meta_source=excluded.meta_source,
        meta_checked_at=excluded.meta_checked_at`;
-    try {
-      await store.executeSql(sql, args);
-      return tracks.length;
-    } catch (e) {
-      const err = e as BusinessError;
-      console.error(`Db.upsertTracks fail: ${err.message}`);
-      return 0;
+    let written = 0;
+    for (let i = 0; i < tracks.length; i += 30) {
+      const part = tracks.slice(i, i + 30);
+      const args: Array<relationalStore.ValueType> = [];
+      for (const t of part) {
+        const one = Db.argsOf(t, false);
+        for (const v of one) {
+          args.push(v);
+        }
+      }
+      try {
+        await store.executeSql(sql, args);
+        written += part.length;
+      } catch (e) {
+        const err = e as BusinessError;
+        console.error(`Db.upsertTracks fail: ${err.message}`);
+      }
     }
+    return written;
   }
 
   // 按 id 全量更新（标签编辑/健康管理用）
@@ -318,6 +318,20 @@ export class Db {
       return;
     }
     await store.executeSql('DELETE FROM tracks');
+  }
+
+  static async deleteTracksUnderRoot(root: string): Promise<void> {
+    const store = Db.store;
+    if (!store) {
+      return;
+    }
+    const prefix = root.endsWith('/') ? root : `${root}/`;
+    try {
+      await store.executeSql('DELETE FROM tracks WHERE path LIKE ?', [`${prefix}%`]);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.deleteTracksUnderRoot fail: ${err.message}`);
+    }
   }
 
   static async getSetting(key: string, defVal: string): Promise<string> {
