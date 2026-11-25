@@ -10,6 +10,9 @@ export interface NativeInfo {
   outRate: number;
   outChannels: number;
   outBits: number;
+  eq: boolean;
+  eqBands: number;
+  fadeMs: number;
 }
 
 const NATIVE_EXTS: string[] = ['.flac', '.mp3', '.m4a', '.aac', '.wav', '.ape'];
@@ -18,6 +21,9 @@ const NATIVE_EXTS: string[] = ['.flac', '.mp3', '.m4a', '.aac', '.wav', '.ape'];
 export class NativePlayer {
   static available: boolean = true;
   private static opened: boolean = false;
+  // EQ 在原生单例内跨曲目保持，这里同时缓存一份供 UI 与重开时对齐
+  private static eqOn: boolean = false;
+  private static eqGains: number[] = [];
 
   static supports(path: string): boolean {
     if (!NativePlayer.available) {
@@ -40,6 +46,9 @@ export class NativePlayer {
     NativePlayer.opened = r == 0;
     if (!NativePlayer.opened) {
       NativePlayer.available = false;
+    } else if (NativePlayer.eqOn || NativePlayer.eqGains.length > 0) {
+      // 原生层已按上次设置重建 DSP，这里再做一次幂等对齐，防止多处调用顺序不一致
+      NativePlayer.setEq(NativePlayer.eqOn, NativePlayer.eqGains);
     }
     return r;
   }
@@ -85,6 +94,36 @@ export class NativePlayer {
     }
   }
 
+  // EQ 设置：控件一改就下发，原生层在渲染回调内生效（≤1 个回调，约 10–20ms）
+  // 注意：@State 数组在 ArkUI 内是代理对象，NAPI 侧按普通数组读元素会拿到空数组，
+  // 必须先复制成普通 number[] 再跨语言传递。
+  static setEq(enabled: boolean, gains: number[]): void {
+    const plain: number[] = [];
+    for (let i = 0; i < gains.length; i++) {
+      plain.push(gains[i]);
+    }
+    NativePlayer.eqOn = enabled;
+    NativePlayer.eqGains = plain;
+    try {
+      core.setEq(enabled, plain);
+    } catch (e) {
+      // 原生库不可用：AVPlayer 降级路径没有 EQ
+    }
+  }
+
+  static eqEnabled(): boolean {
+    return NativePlayer.eqOn;
+  }
+
+  // DSP 数值自检（1kHz +12dB 与限幅上限），返回 JSON 字符串；失败返回空串
+  static selfTest(): string {
+    try {
+      return core.selfTest();
+    } catch (e) {
+      return '';
+    }
+  }
+
   static position(): number {
     if (!NativePlayer.opened) {
       return 0;
@@ -109,7 +148,8 @@ export class NativePlayer {
   static info(): NativeInfo {
     const out: NativeInfo = {
       codec: '', sampleRate: 0, channels: 0, bits: 0,
-      durationMs: 0, outRate: 0, outChannels: 0, outBits: 0
+      durationMs: 0, outRate: 0, outChannels: 0, outBits: 0,
+      eq: false, eqBands: 0, fadeMs: 0
     };
     if (!NativePlayer.opened) {
       return out;
@@ -124,6 +164,9 @@ export class NativePlayer {
       out.outRate = raw.outRate;
       out.outChannels = raw.outChannels;
       out.outBits = raw.outBits;
+      out.eq = raw.eq;
+      out.eqBands = raw.eqBands;
+      out.fadeMs = raw.fadeMs;
     } catch (e) {
       // 解析失败保持默认值
     }

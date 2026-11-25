@@ -20,7 +20,9 @@ extern "C" {
 #include "ohaudio/native_audiorenderer.h"
 #include "ohaudio/native_audiostreambuilder.h"
 
-// 解码 -> 重采样 -> 环形缓冲 -> OH_AudioRenderer 直通输出
+#include "dsp_chain.h"
+
+// 解码 -> 重采样 -> 环形缓冲 -> (EQ/限幅/渐变) -> OH_AudioRenderer 直通输出
 class AudioEngine {
 public:
   static AudioEngine &Get();
@@ -32,6 +34,8 @@ public:
   int32_t Stop();
   int32_t Seek(int64_t ms);
   int32_t SetVolume(float volume);
+  // EQ 设置在一次播放会话内保持；重新 Open 后自动重新应用
+  int32_t SetEq(bool enabled, const float *gainsDb, int count);
   int64_t PositionMs() const;
   int64_t DurationMs() const;
   int32_t TakeInterrupt(); // 返回并清空一次中断提示（0 无，1 恢复，2 暂停，3 停止）
@@ -97,6 +101,12 @@ private:
   std::atomic<int64_t> seekReqMs_{-1};
   std::atomic<int32_t> interruptHint_{0};
   std::atomic<float> volume_{1.0f};
+
+  // ---- DSP（EQ / 限幅 / 渐变）----
+  DspChain dsp_;
+  mutable std::mutex eqMtx_;
+  bool eqEnabled_ = false;
+  float eqGains_[DspChain::kMaxBands] = {};
 
   std::mutex ctrlMtx_; // 串行化 Open/Close/Seek
 };

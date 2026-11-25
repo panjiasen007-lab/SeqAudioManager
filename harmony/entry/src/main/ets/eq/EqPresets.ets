@@ -98,4 +98,46 @@ export class EqPresets {
     await EqPresets.save(state);
     return state;
   }
+
+  // 名称里带 "自定义" 的预设：用户自己调好后保存的一组增益
+  static readonly CUSTOM_NAME: string = '自定义';
+
+  static async customPreset(): Promise<EqPreset | undefined> {
+    const raw = await Db.getSetting('eq_custom_json', '');
+    if (raw == '') {
+      return undefined;
+    }
+    try {
+      const arr = JSON.parse(raw) as number[];
+      if (arr.length != EqPresets.BANDS_HZ.length) {
+        return undefined;
+      }
+      const p = new EqPreset();
+      p.name = EqPresets.CUSTOM_NAME;
+      for (const v of arr) {
+        p.gains.push(EqPresets.clamp(v));
+      }
+      return p;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  static async saveCustom(gains: number[]): Promise<void> {
+    const out: number[] = [];
+    for (let i = 0; i < EqPresets.BANDS_HZ.length; i++) {
+      out.push(EqPresets.clamp(i < gains.length ? gains[i] : 0));
+    }
+    await Db.setSetting('eq_custom_json', JSON.stringify(out));
+  }
+
+  // 内置预设在前，自定义预设殿后（存在时才追加）
+  static async allPresets(): Promise<EqPreset[]> {
+    const out = EqPresets.presets();
+    const custom = await EqPresets.customPreset();
+    if (custom) {
+      out.push(custom);
+    }
+    return out;
+  }
 }

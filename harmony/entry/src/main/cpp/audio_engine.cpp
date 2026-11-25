@@ -152,6 +152,19 @@ int32_t AudioEngine::PrepareDecoder(const std::string &path) {
 }
 
 int32_t AudioEngine::PrepareRenderer() {
+  // 输出参数已确定，先按实际输出格式准备 DSP 链并应用当前 EQ
+  dsp_.Prepare(outRate_, outChannels_, outBytesPerSample_);
+  {
+    float gains[DspChain::kMaxBands];
+    bool enabled = false;
+    {
+      std::lock_guard<std::mutex> lk(eqMtx_);
+      enabled = eqEnabled_;
+      memcpy(gains, eqGains_, sizeof(gains));
+    }
+    dsp_.SetEq(enabled, gains, DspChain::kMaxBands);
+  }
+
   OH_AudioStream_Result r = OH_AudioStreamBuilder_Create(&builder_, AUDIOSTREAM_TYPE_RENDERER);
   if (r != AUDIOSTREAM_SUCCESS || builder_ == nullptr) {
     return -1000 - static_cast<int32_t>(r);
@@ -232,6 +245,7 @@ int32_t AudioEngine::Start() {
   if (resumeMs >= 0) {
     seekReqMs_.store(resumeMs);
   }
+  dsp_.FadeIn(); // 起播/续播从 0 淡入，消除首帧爆音
   OH_AudioStream_Result r = OH_AudioRenderer_Start(renderer_);
   if (r != AUDIOSTREAM_SUCCESS) {
     return -2 - static_cast<int32_t>(r);
@@ -244,6 +258,13 @@ int32_t AudioEngine::Start() {
 int32_t AudioEngine::Pause() {
   if (renderer_ == nullptr) {
     return -1;
+  }
+  // 先做 ~120ms 淡出再暂停渲染器，避免暂停瞬间的满幅截断爆音
+  if (playing_.load()) {
+    dsp_.FadeOut();
+    for (int i = 0; i < 60 && !dsp_.FadeOutDone(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
   }
   OH_AudioStream_Result r = OH_AudioRenderer_Pause(renderer_);
   playing_.store(false);
@@ -275,7 +296,24 @@ int32_t AudioEngine::Seek(int64_t ms) {
     return -1;
   }
   seekReqMs_.store(ms < 0 ? 0 : ms);
+  dsp_.RequestReset(); // 清滤波器历史，避免跳转后拖尾
   ringCv_.notify_all();
+  return 0;
+}
+
+int32_t AudioEngine::SetEq(bool enabled, const float *gainsDb, int count) {
+  float gains[DspChain::kMaxBands];
+  for (int i = 0; i < DspChain::kMaxBands; ++i) {
+    gains[i] = (gainsDb != nullptr && i < count) ? gainsDb[i] : 0.0f;
+  }
+  {
+    std::lock_guard<std::mutex> lk(eqMtx_);
+    eqEnabled_ = enabled;
+    memcpy(eqGains_, gains, sizeof(gains));
+  }
+  dsp_.SetEq(enabled, gains, DspChain::kMaxBands);
+  OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, LOG_TAG,
+               "eq %{public}s bands=%{public}d", enabled ? "on" : "off", dsp_.ActiveBands());
   return 0;
 }
 
@@ -303,13 +341,20 @@ int32_t AudioEngine::TakeInterrupt() {
 }
 
 std::string AudioEngine::InfoJson() const {
-  char buf[512];
+  bool eqOn = false;
+  {
+    std::lock_guard<std::mutex> lk(eqMtx_);
+    eqOn = eqEnabled_;
+  }
+  char buf[640];
   int n = snprintf(buf, sizeof(buf),
                    "{\"codec\":\"%s\",\"sampleRate\":%d,\"channels\":%d,\"bits\":%d,"
-                   "\"durationMs\":%lld,\"outRate\":%d,\"outChannels\":%d,\"outBits\":%d}",
+                   "\"durationMs\":%lld,\"outRate\":%d,\"outChannels\":%d,\"outBits\":%d,"
+                   "\"eq\":%s,\"eqBands\":%d,\"fadeMs\":%d}",
                    codecName_.c_str(), srcRate_, srcChannels_, srcBits_,
                    static_cast<long long>(durationMs_), outRate_, outChannels_,
-                   outBytesPerSample_ * 8);
+                   outBytesPerSample_ * 8, eqOn ? "true" : "false", dsp_.ActiveBands(),
+                   dsp_.FadeMs());
   if (n <= 0) {
     return std::string("{}");
   }
@@ -471,6 +516,10 @@ OH_AudioData_Callback_Result AudioEngine::RenderTo(void *audioData, int32_t audi
     memset(out + n, 0, static_cast<size_t>(audioDataSize - n));
   }
   const int frameBytes = FrameBytesOf(outChannels_, outBytesPerSample_);
+  if (n > 0 && frameBytes > 0) {
+    // EQ/限幅/渐变在渲染回调内完成：参数改动下一个回调即生效（~10–20ms）
+    dsp_.Process(out, n / frameBytes);
+  }
   if (frameBytes > 0) {
     playedFrames_.fetch_add(n / frameBytes);
   }

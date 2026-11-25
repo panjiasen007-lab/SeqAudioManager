@@ -23,7 +23,8 @@ include_directories(${ROOT}/prebuilt/include)
 
 add_library(seqaudio_core SHARED
   napi_init.cpp
-  audio_engine.cpp)
+  audio_engine.cpp
+  dsp_chain.cpp)
 
 target_link_libraries(seqaudio_core PUBLIC
   ${FF_LIB_DIR}/libavformat.a

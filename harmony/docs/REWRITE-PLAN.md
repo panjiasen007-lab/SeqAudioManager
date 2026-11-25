@@ -5,7 +5,7 @@
 | 文档版本 | v1.1 |
 | 日期 | 2026-11-25 |
 | 编制 | software-seqaudio-harmony 团队：许清楚（产品经理 / PRD）、高见远（架构师 / 方案与任务分解）、齐活林（交付总监 / 汇编） |
-| 状态 | **M2 推进中** —— M1（T01–T05）已完成并推送（`harmony-v1.1.0`）；M2 已完成 T10 / T09 / T08、T07 预设数据层与 **T06 Native 内核**（自建 FFmpeg 7.1.1 交叉编译 + OH_AudioRenderer 直通，模拟器实测 16bit/44.1k 与 24bit/96k 直通）；T07 DSP 接入待做 |
+| 状态 | **M2 推进中** —— M1（T01–T05）已完成并推送（`harmony-v1.1.0`）；M2 已完成 T10 / T09 / T08 / **T06 Native 内核** / **T07 EQ 与防爆音**（31 段 biquad + soft-limiter + 淡入淡出已在渲染回调内接通，模拟器自检 1kHz +12dB 实测 12.00dB、限幅峰值 0.9885、关闭/全平均逐字节直通）；余 M2 收尾回归 |
 | 目标分支 | `harmony-pc`（当前基线 v1.0，提交 52f5c6a，已在 2in1 模拟器验证） |
 
 ---
@@ -308,19 +308,21 @@ ets/pages/Index.ets                # 曲库页接入以上能力
 ```
 cpp/CMakeLists.txt                           # Native 构建脚本，按 OHOS_ARCH 选 prebuilt/<arch>
 cpp/napi_init.cpp                            # NAPI 模块 seqaudio_core：open/start/pause/stop/seek/setVolume/position/duration/info
-cpp/audio_engine.cpp/.h                      # 解码线程 + swr 重采样 + 环形缓冲 + OH_AudioRenderer 直通 + 焦点中断
+cpp/audio_engine.cpp/.h                      # 解码线程 + swr 重采样 + 环形缓冲 + OH_AudioRenderer 直通 + 焦点中断 + DSP 挂载
+cpp/dsp_chain.cpp/.h                         # 31 段 peaking biquad 级联 + soft-limiter（-0.1dBFS 上限）+ 120ms 淡入淡出（T07）
 cpp/prebuilt/include/lib{avcodec,avformat,avutil,swresample}   # 裁剪版 FFmpeg 头文件
 cpp/prebuilt/<x86_64|aarch64>/lib/*.a        # 裁剪版 FFmpeg 静态库（构建脚本见 tools/ffmpeg-ohos）
 cpp/types/libseqaudio_core/                  # .so 的 d.ts 与 oh-package 描述
 ets/player/NativePlayer.ets                  # Native 内核 ArkTS 封装与格式自述
 ets/player/PlayerEngine.ets                  # 原生优先、AVPlayer 兜底，100ms 进度轮询（T06）
-ets/player/EqPresets.ets                     # EQ 预设（T07，DSP 待接）
+ets/eq/EqPresets.ets                         # EQ 预设与自定义持久化（T07）
+ets/pages/EqPage.ets                         # 31 段图形均衡器界面（T07）
 ets/lyrics/LyricsService.ets                 # 歌词获取/解析/缓存（T08）
 ets/lyrics/LyricsPage.ets                    # 歌词显示（T08）
 ets/cover/CoverService.ets                   # 封面搜索/嵌入（T09）
 ets/library/RenameDedupService.ets           # 批量重命名/去重（T10）
 tools/ffmpeg-ohos/                           # FFmpeg 交叉编译脚本与合规说明
-# 防爆音：DSP 链内 soft-limiter + fade（T07 未接入）
+# 防爆音：soft-limiter 与 fade 已在 dsp_chain 内实现，EQ 关闭或全 0dB 时整链直通（bit-perfect）
 ```
 
 ### 6.3 M3（v2.0，T11–T15）

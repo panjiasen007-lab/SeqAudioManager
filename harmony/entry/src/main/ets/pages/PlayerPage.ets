@@ -1,5 +1,6 @@
 import { router } from '@kit.ArkUI';
 import { PlayerEngine, MODE_NAMES, PlayMode } from '../player/PlayerEngine';
+import { NativePlayer } from '../player/NativePlayer';
 import { fmtDuration, fmtSpec, fmtSize } from '../utils/Util';
 import { Db } from '../db/Db';
 
@@ -16,11 +17,17 @@ struct PlayerPage {
   @State modeIdx: number = 1;
   @State vol: number = 100;
   @State toast: string = '';
+  @State eqOn: boolean = false;
   private engine: PlayerEngine = PlayerEngine.get();
 
   aboutToAppear(): void {
     this.modeIdx = this.engine.mode as number;
     this.vol = Math.round(this.engine.volume * 100);
+    this.eqOn = NativePlayer.eqEnabled();
+  }
+
+  onPageShow(): void {
+    this.eqOn = NativePlayer.eqEnabled();
   }
 
   private toastMsg(msg: string): void {
@@ -75,6 +82,13 @@ struct PlayerPage {
               AppStorage.setOrCreate('seqaudio_lyrics_path', JSON.stringify([cur.path]));
               router.pushUrl({ url: 'pages/LyricsPage' });
             }
+          })
+        Text('EQ')
+          .fontSize(13)
+          .fontColor(this.eqOn ? ACCENT : '#8A8A92')
+          .margin({ left: 14 })
+          .onClick(() => {
+            router.pushUrl({ url: 'pages/EqPage' });
           })
         Text(MODE_NAMES[this.modeIdx])
           .fontSize(13)

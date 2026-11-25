@@ -6,6 +6,7 @@
     "pages/HealthPage",
     "pages/LibraryToolsPage",
     "pages/CoverPage",
-    "pages/LyricsPage"
+    "pages/LyricsPage",
+    "pages/EqPage"
   ]
 }

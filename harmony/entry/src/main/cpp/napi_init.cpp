@@ -88,6 +88,46 @@ napi_value SetVolume(napi_env env, napi_callback_info info) {
   return Int32Result(env, AudioEngine::Get().SetVolume(static_cast<float>(v)));
 }
 
+napi_value SetEq(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2] = {nullptr, nullptr};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc < 2) {
+    return Int32Result(env, -1);
+  }
+  bool enabled = false;
+  napi_get_value_bool(env, args[0], &enabled);
+
+  bool isArray = false;
+  napi_is_array(env, args[1], &isArray);
+  float gains[DspChain::kMaxBands] = {};
+  uint32_t count = 0;
+  if (isArray) {
+    uint32_t len = 0;
+    napi_get_array_length(env, args[1], &len);
+    count = len < static_cast<uint32_t>(DspChain::kMaxBands) ? len
+                                                             : static_cast<uint32_t>(DspChain::kMaxBands);
+    for (uint32_t i = 0; i < count; ++i) {
+      napi_value el = nullptr;
+      double v = 0.0;
+      if (napi_get_element(env, args[1], i, &el) == napi_ok) {
+        napi_get_value_double(env, el, &v);
+      }
+      gains[i] = static_cast<float>(v);
+    }
+  }
+  return Int32Result(env, AudioEngine::Get().SetEq(enabled, gains, static_cast<int>(count)));
+}
+
+napi_value SelfTest(napi_env env, napi_callback_info info) {
+  (void)info;
+  char buf[256] = {0};
+  DspChain::SelfTest(buf, static_cast<int>(sizeof(buf)));
+  napi_value out = nullptr;
+  napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &out);
+  return out;
+}
+
 napi_value Position(napi_env env, napi_callback_info info) {
   (void)info;
   return Int64Result(env, AudioEngine::Get().PositionMs());
@@ -130,6 +170,8 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"release", nullptr, Release, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"seek", nullptr, Seek, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"setVolume", nullptr, SetVolume, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"setEq", nullptr, SetEq, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"selfTest", nullptr, SelfTest, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"position", nullptr, Position, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"duration", nullptr, Duration, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"takeInterrupt", nullptr, TakeInterrupt, nullptr, nullptr, nullptr, napi_default, nullptr},

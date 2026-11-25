@@ -9,6 +9,8 @@ import { Scanner, ScanController, ScanRoots } from '../scanner/Scanner';
 import { ImportManager, ImportReport } from '../import/ImportManager';
 import { CueIndexer } from '../cue/CueIndexer';
 import { PlayerEngine, PlayMode } from '../player/PlayerEngine';
+import { NativePlayer } from '../player/NativePlayer';
+import { EqPresets } from '../eq/EqPresets';
 import { MiniPlayer } from '../components/MiniPlayer';
 import { SessionStore } from '../session/SessionStore';
 import { fmtDuration, fmtSize, fmtSpec } from '../utils/Util';
@@ -45,6 +47,14 @@ struct Index {
   private async initAsync(): Promise<void> {
     const ctx = getContext(this) as common.UIAbilityContext;
     await Db.init(ctx);
+    // 启动即把 EQ 设置下发给原生单例：首曲开播时按同一组参数重建 DSP 链
+    const eq = await EqPresets.load();
+    NativePlayer.setEq(eq.enabled, eq.gains);
+    // 启动自检：把编译进包内的 DSP 数值结果打到日志（1kHz +12dB / 限幅 / 直通）
+    const dspReport = NativePlayer.selfTest();
+    if (dspReport != '') {
+      console.info(`dsp selftest ${dspReport}`);
+    }
     this.roots = await ScanRoots.load(ctx);
     const session = await SessionStore.load();
     this.engine.setMode(session.playMode as PlayMode);
