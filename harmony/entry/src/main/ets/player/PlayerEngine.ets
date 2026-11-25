@@ -200,6 +200,7 @@ export class PlayerEngine {
     this.nativeMode = true;
     const dur = NativePlayer.duration();
     this.durationMs = dur > 0 ? dur : t.durationMs;
+    console.info(`native open ${physical} dur=${dur} dbDur=${t.durationMs} info=${JSON.stringify(NativePlayer.info())}`);
     const startMs = Math.max(0, this.pendingSeekMs);
     this.pendingSeekMs = 0;
     const begin = t.isCueChild == 1 ? t.cueStartMs + startMs : startMs;
@@ -240,6 +241,9 @@ export class PlayerEngine {
       }
     });
     av.on('timeUpdate', (t: number) => {
+      if (eng.nativeMode) {
+        return; // 原生内核接管时忽略残留 AVPlayer 事件
+      }
       eng.positionMs = t;
       AppStorage.setOrCreate('npPos', eng.logicalPos());
       const cur = eng.current();
@@ -257,6 +261,9 @@ export class PlayerEngine {
       }
     });
     av.on('durationUpdate', (d: number) => {
+      if (eng.nativeMode) {
+        return;
+      }
       eng.durationMs = d;
       AppStorage.setOrCreate('npDur', d);
     });
