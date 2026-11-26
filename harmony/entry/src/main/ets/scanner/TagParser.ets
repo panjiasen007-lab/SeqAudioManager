@@ -63,6 +63,20 @@ function u64be(a: Uint8Array, o: number): number {
   return u32be(a, o) * 4294967296 + u32be(a, o + 4);
 }
 
+function u16be(a: Uint8Array, o: number): number {
+  return ((a[o] << 8) | a[o + 1]) & 0xffff;
+}
+
+// AIFF 的 80 位 IEEE 扩展精度采样率
+function ext80be(a: Uint8Array, o: number): number {
+  const se = ((a[o] & 0x7f) << 8) | a[o + 1];
+  if (se == 0) {
+    return 0;
+  }
+  const mant = u32be(a, o + 2) * 4294967296 + u32be(a, o + 6);
+  return mant * Math.pow(2, se - 16383 - 63);
+}
+
 function syncsafe(a: Uint8Array, o: number): number {
   return ((a[o] & 0x7f) << 21) | ((a[o + 1] & 0x7f) << 14) | ((a[o + 2] & 0x7f) << 7) | (a[o + 3] & 0x7f);
 }
@@ -416,10 +430,261 @@ function parseWav(r: Reader, size: number, m: Meta): void {
   }
 }
 
+// ---------------- AIFF / AIFC ----------------
+
+function parseAiff(r: Reader, size: number, m: Meta): void {
+  const h = r.read(12, 0);
+  if (h.length < 12 || ascii(h, 0, 4) != 'FORM') {
+    return;
+  }
+  const form = ascii(h, 8, 4);
+  if (form != 'AIFF' && form != 'AIFC') {
+    return;
+  }
+  let pos = 12;
+  while (pos + 8 <= size) {
+    const ch = r.read(8, pos);
+    if (ch.length < 8) {
+      break;
+    }
+    const cid = ascii(ch, 0, 4);
+    const clen = u32be(ch, 4);
+    if (cid == 'COMM' && clen >= 18) {
+      const c = r.read(Math.min(clen, 64), pos + 8);
+      if (c.length >= 18) {
+        m.channels = u16be(c, 0);
+        const frames = u32be(c, 2);
+        m.bitDepth = u16be(c, 6);
+        const rate = ext80be(c, 8);
+        if (rate > 0) {
+          m.sampleRate = Math.round(rate);
+          m.durationMs = Math.round(frames * 1000 / rate);
+        }
+      }
+    } else if (cid == 'ID3 ' || cid == 'id3 ') {
+      readId3At(r, pos + 8, size, m);
+    }
+    pos += 8 + clen + (clen & 1);
+  }
+  if (m.bitrateKbps <= 0 && m.durationMs > 0) {
+    m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+  }
+}
+
+// ---------------- TTA ----------------
+
+function parseTta(r: Reader, size: number, m: Meta): void {
+  const h = r.read(22, 0);
+  if (h.length < 22 || ascii(h, 0, 4) != 'TTA1') {
+    return;
+  }
+  m.channels = u16le(h, 6);
+  m.bitDepth = u16le(h, 8);
+  const rate = u32le(h, 10);
+  const samples = u32le(h, 14);
+  if (rate > 0) {
+    m.sampleRate = rate;
+    m.durationMs = Math.round(samples * 1000 / rate);
+  }
+  if (m.durationMs > 0) {
+    m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+  }
+  parseApeTag(r, size, m);
+}
+
+// ---------------- WavPack ----------------
+
+const WV_RATES: number[] = [6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100,
+  48000, 64000, 88200, 96000, 192000];
+
+function parseWv(r: Reader, size: number, m: Meta): void {
+  const h = r.read(32, 0);
+  if (h.length < 32 || ascii(h, 0, 4) != 'wvpk') {
+    return;
+  }
+  const totalSamples = u32le(h, 12);
+  const flags = u32le(h, 24);
+  const bytesPerSample = (flags & 3) + 1;
+  const mono = (flags & 4) != 0;
+  const rateIdx = (flags >>> 23) & 0x0f;
+  const rate = rateIdx < WV_RATES.length ? WV_RATES[rateIdx] : 0;
+  m.channels = mono ? 1 : 2;
+  m.bitDepth = bytesPerSample * 8;
+  m.sampleRate = rate;
+  if (totalSamples > 0 && totalSamples != 0xffffffff && rate > 0) {
+    m.durationMs = Math.round(totalSamples * 1000 / rate);
+  }
+  if (m.durationMs > 0) {
+    m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+  }
+  parseApeTag(r, size, m);
+}
+
+// ---------------- Ogg（Vorbis / Opus） ----------------
+
+function oggLastGranule(r: Reader, size: number): number {
+  const len = Math.min(65536, size);
+  if (len < 27) {
+    return 0;
+  }
+  const tail = r.read(len, size - len);
+  for (let i = tail.length - 14; i >= 0; i--) {
+    if (tail[i] == 0x4f && tail[i + 1] == 0x67 && tail[i + 2] == 0x67 && tail[i + 3] == 0x53) {
+      return u64le(tail, i + 6);
+    }
+  }
+  return 0;
+}
+
+// 顺序读出前若干个完整 Ogg 包（跨页续包按 lacing 拼接）
+function oggPackets(r: Reader, size: number, maxPackets: number): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  let pos = 0;
+  let partial: number[] = [];
+  let pageGuard = 0;
+  while (pos + 27 <= size && out.length < maxPackets && pageGuard++ < 64) {
+    const head = r.read(27, pos);
+    if (head.length < 27 || ascii(head, 0, 4) != 'OggS') {
+      break;
+    }
+    const segCount = head[26];
+    const lacing = r.read(segCount, pos + 27);
+    if (lacing.length < segCount) {
+      break;
+    }
+    let dataLen = 0;
+    for (let i = 0; i < segCount; i++) {
+      dataLen += lacing[i];
+    }
+    const page = r.read(dataLen, pos + 27 + segCount);
+    let off = 0;
+    for (let i = 0; i < segCount && out.length < maxPackets; i++) {
+      const l = lacing[i];
+      for (let j = 0; j < l && off + j < page.length; j++) {
+        partial.push(page[off + j]);
+      }
+      off += l;
+      if (l < 255) {
+        out.push(new Uint8Array(partial));
+        partial = [];
+      }
+    }
+    pos += 27 + segCount + dataLen;
+  }
+  return out;
+}
+
+function parseOgg(r: Reader, size: number, m: Meta): void {
+  const head = r.read(64, 0);
+  if (head.length < 28 || ascii(head, 0, 4) != 'OggS') {
+    return;
+  }
+  const pkts = oggPackets(r, size, 3);
+  if (pkts.length < 1) {
+    return;
+  }
+  const pkt = pkts[0];
+  if (pkt.length >= 30 && pkt[0] == 0x01 && ascii(pkt, 1, 6) == 'vorbis') {
+    m.channels = pkt[11];
+    const rate = u32le(pkt, 12);
+    const nominal = u32le(pkt, 20);
+    m.sampleRate = rate;
+    if (nominal > 0) {
+      m.bitrateKbps = Math.round(nominal / 1000);
+    }
+    if (pkts.length >= 2 && pkts[1].length > 7 && ascii(pkts[1], 1, 6) == 'vorbis') {
+      parseVorbisComment(pkts[1].subarray(7), m);
+    }
+    const granule = oggLastGranule(r, size);
+    if (granule > 0 && rate > 0) {
+      m.durationMs = Math.round(granule * 1000 / rate);
+    }
+  } else if (pkt.length >= 19 && ascii(pkt, 0, 8) == 'OpusHead') {
+    m.channels = pkt[9];
+    const preSkip = u16le(pkt, 10);
+    const inputRate = u32le(pkt, 12);
+    m.sampleRate = inputRate > 0 ? inputRate : 48000;
+    if (pkts.length >= 2 && pkts[1].length >= 8 && ascii(pkts[1], 0, 8) == 'OpusTags') {
+      parseVorbisComment(pkts[1].subarray(8), m);
+    }
+    const granule = oggLastGranule(r, size);
+    if (granule > preSkip) {
+      m.durationMs = Math.round((granule - preSkip) * 1000 / 48000);
+    }
+  } else {
+    return;
+  }
+  if (m.bitrateKbps <= 0 && m.durationMs > 0) {
+    m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+  }
+}
+
+// ---------------- TAK ----------------
+
+// TAK 的 STREAMINFO 是 LSB-first 位流
+function bitsLE(a: Uint8Array, bitPos: number, count: number): number {
+  let v = 0;
+  for (let i = 0; i < count; i++) {
+    const p = bitPos + i;
+    const byte = p >> 3;
+    if (byte >= a.length) {
+      break;
+    }
+    v += ((a[byte] >> (p & 7)) & 1) * Math.pow(2, i);
+  }
+  return v;
+}
+
+function parseTak(r: Reader, size: number, m: Meta): void {
+  const h = r.read(8, 0);
+  if (h.length < 8 || ascii(h, 0, 4) != 'tBaK') {
+    return;
+  }
+  let pos = 4;
+  let guard = 0;
+  while (pos + 4 <= size && guard++ < 64) {
+    const bh = r.read(4, pos);
+    if (bh.length < 4) {
+      break;
+    }
+    const type = bh[0] & 0x7f;
+    const blockSize = bh[1] + (bh[2] << 8) + (bh[3] << 16);
+    if (type == 0 || blockSize <= 0) {
+      break;
+    }
+    // STREAMINFO：blockSize 含末尾 3 字节 CRC
+    if (type == 1 && blockSize > 3) {
+      const data = r.read(Math.min(blockSize - 3, 64), pos + 4);
+      if (data.length >= 10) {
+        const samples = bitsLE(data, 14, 35);
+        const rate = bitsLE(data, 52, 18) + 6000;
+        const bps = bitsLE(data, 70, 5) + 8;
+        const channels = bitsLE(data, 75, 4) + 1;
+        m.sampleRate = rate;
+        m.bitDepth = bps;
+        m.channels = channels;
+        if (rate > 0 && samples > 0) {
+          m.durationMs = Math.round(samples * 1000 / rate);
+        }
+      }
+    }
+    pos += 4 + blockSize;
+  }
+  if (m.durationMs > 0) {
+    m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+  }
+  parseApeTag(r, size, m);
+}
+
 // ---------------- M4A / MP4 ----------------
 
 const BOX_MOOV = cc('moov');
 const BOX_MVHD = cc('mvhd');
+const BOX_TRAK = cc('trak');
+const BOX_MDIA = cc('mdia');
+const BOX_MINF = cc('minf');
+const BOX_STBL = cc('stbl');
+const BOX_STSD = cc('stsd');
 const BOX_UDTA = cc('udta');
 const BOX_META = cc('meta');
 const BOX_ILST = cc('ilst');
@@ -474,8 +739,69 @@ function parseMp4TagData(r: Reader, boxStart: number, boxEnd: number, m: Meta, t
   }
 }
 
+// stsd：取第一个音频 sample entry 的声道 / 位深 / 采样率。
+// ALAC 的真实位深与采样率在嵌套的 alac magic cookie 里，需要覆盖 sample entry 的字段。
+function parseStsd(r: Reader, start: number, end: number, m: Meta): void {
+  if (m.sampleRate > 0 || start + 44 > end) {
+    return;
+  }
+  const entryStart = start + 8; // version/flags + entry_count
+  const eh = r.read(36, entryStart);
+  if (eh.length < 36) {
+    return;
+  }
+  const entrySize = u32be(eh, 0);
+  const fmt = ascii(eh, 4, 4);
+  if (fmt != 'mp4a' && fmt != 'alac' && fmt != 'aac ' && fmt != 'Opus' && fmt != 'fLaC') {
+    return;
+  }
+  const channels = u16be(eh, 24);
+  const sampleBits = u16be(eh, 26);
+  const rate = u32be(eh, 32) / 65536;
+  if (channels > 0) {
+    m.channels = channels;
+  }
+  if (rate > 0 && rate < 1000000) {
+    m.sampleRate = Math.round(rate);
+  }
+  if (fmt == 'alac') {
+    m.bitDepth = sampleBits > 0 && sampleBits <= 32 ? sampleBits : 0;
+    let p = entryStart + 36;
+    const limit = entryStart + entrySize;
+    while (p + 12 <= limit) {
+      const bh = r.read(8, p);
+      const bs = u32be(bh, 0);
+      const bt = ascii(bh, 4, 4);
+      if (bs < 12) {
+        break;
+      }
+      if (bt == 'alac') {
+        const ck = r.read(24, p + 12); // 跳过 box 头 + version/flags
+        if (ck.length >= 24) {
+          const depth = ck[5];
+          const ch = ck[9];
+          const srate = u32be(ck, 20);
+          if (depth > 0 && depth <= 32) {
+            m.bitDepth = depth;
+          }
+          if (ch > 0) {
+            m.channels = ch;
+          }
+          if (srate > 0) {
+            m.sampleRate = srate;
+          }
+        }
+        break;
+      }
+      p += bs;
+    }
+  } else {
+    m.bitDepth = 0; // AAC / Opus 等有损编码不显示位深
+  }
+}
+
 function walkMp4(r: Reader, start: number, end: number, depth: number, m: Meta): void {
-  if (depth > 6) {
+  if (depth > 8) {
     return;
   }
   let pos = start;
@@ -493,8 +819,11 @@ function walkMp4(r: Reader, start: number, end: number, depth: number, m: Meta):
     const childEnd = pos + bsize;
     if (btype == TAG_NAM || btype == TAG_ART || btype == TAG_ALB || btype == TAG_DAY || btype == TAG_GEN) {
       parseMp4TagData(r, childStart, childEnd, m, btype);
-    } else if (btype == BOX_MOOV || btype == BOX_UDTA || btype == BOX_ILST) {
+    } else if (btype == BOX_MOOV || btype == BOX_UDTA || btype == BOX_ILST ||
+      btype == BOX_TRAK || btype == BOX_MDIA || btype == BOX_MINF || btype == BOX_STBL) {
       walkMp4(r, childStart, childEnd, depth + 1, m);
+    } else if (btype == BOX_STSD) {
+      parseStsd(r, childStart, childEnd, m);
     } else if (btype == BOX_META) {
       walkMp4(r, childStart + 4, childEnd, depth + 1, m); // 跳过 version/flags
     } else if (btype == BOX_MVHD) {
@@ -521,6 +850,9 @@ function walkMp4(r: Reader, start: number, end: number, depth: number, m: Meta):
 
 function parseMp4(r: Reader, size: number, m: Meta): void {
   walkMp4(r, 0, size, 0, m);
+  if (m.bitrateKbps <= 0 && m.durationMs > 0) {
+    m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+  }
 }
 
 // ---------------- DSF / DFF ----------------
@@ -790,6 +1122,131 @@ function wavPicture(r: Reader, size: number): PictureBytes | undefined {
   return undefined;
 }
 
+// ---------------- APE（Monkey's Audio）----------------
+
+function parseApeTag(r: Reader, size: number, m: Meta): void {
+  let end = size;
+  if (end >= 128) {
+    const id3 = r.read(3, end - 128);
+    if (ascii(id3, 0, 3) == 'TAG') {
+      end -= 128;
+    }
+  }
+  if (end < 32) {
+    return;
+  }
+  const footer = r.read(32, end - 32);
+  if (ascii(footer, 0, 8) != 'APETAGEX') {
+    return;
+  }
+  const tagSize = u32le(footer, 12);
+  const count = u32le(footer, 16);
+  const flags = u32le(footer, 20);
+  const hasHeader = (flags & 0x80000000) != 0;
+  // APEv2：tagSize 含 footer、不含 header。带 header 时起点仍是 end - tagSize，
+  // 若该处确实是 APETAGEX 头，再向后跳过 32 字节进入条目区。
+  let start = end - tagSize;
+  let dataLen = tagSize;
+  if (hasHeader && start + 32 <= end) {
+    const maybeHeader = r.read(8, start);
+    if (ascii(maybeHeader, 0, 8) == 'APETAGEX') {
+      start += 32;
+      dataLen -= 32;
+    }
+  }
+  if (start < 0 || dataLen <= 0 || tagSize > 8 * 1048576) {
+    return;
+  }
+  const data = r.read(dataLen, start);
+  let pos = 0;
+  for (let i = 0; i < count && pos + 9 <= data.length; i++) {
+    const vlen = u32le(data, pos);
+    const iflags = u32le(data, pos + 4);
+    pos += 8;
+    let keyEnd = pos;
+    while (keyEnd < data.length && data[keyEnd] != 0) {
+      keyEnd++;
+    }
+    const key = ascii(data, pos, keyEnd - pos).toLowerCase();
+    pos = keyEnd + 1;
+    if (pos + vlen > data.length) {
+      break;
+    }
+    const valueStart = pos;
+    pos += vlen;
+    if ((iflags & 6) != 0) {
+      // 二进制项（封面等）跳过
+      continue;
+    }
+    const text = cleanTag(dec('utf-8', data, valueStart, valueStart + vlen));
+    if (text == '') {
+      continue;
+    }
+    if (key == 'title') {
+      m.title = text;
+    } else if (key == 'artist') {
+      m.artist = text;
+    } else if (key == 'album') {
+      m.album = text;
+    } else if (key == 'album artist' || key == 'albumartist') {
+      m.albumartist = text;
+    } else if (key == 'genre') {
+      m.genre = text;
+    } else if (key == 'year' || key == 'date') {
+      m.year = text.length > 4 ? text.substring(0, 4) : text;
+    } else if (key == 'track') {
+      m.trackNo = toInt(text);
+    } else if (key == 'disc') {
+      m.discNo = toInt(text);
+    }
+  }
+}
+
+function parseApe(r: Reader, size: number, m: Meta): void {
+  const h = r.read(80, 0);
+  if (h.length < 40 || ascii(h, 0, 4) != 'MAC ') {
+    return;
+  }
+  const version = u16le(h, 4);
+  let sampleRate = 0;
+  let channels = 0;
+  let bits = 16;
+  let totalFrames = 0;
+  let blocksPerFrame = 0;
+  let finalFrameBlocks = 0;
+  if (version >= 3980 && h.length >= 76) {
+    blocksPerFrame = u32le(h, 56);
+    finalFrameBlocks = u32le(h, 60);
+    totalFrames = u32le(h, 64);
+    bits = u16le(h, 68);
+    channels = u16le(h, 70);
+    sampleRate = u32le(h, 72);
+  } else if (h.length >= 40) {
+    // 旧版 APE（<3.98）：固定 9216 样本/帧，无位深字段
+    channels = u16le(h, 10);
+    sampleRate = u32le(h, 12);
+    totalFrames = u32le(h, 24);
+    finalFrameBlocks = u32le(h, 28);
+    blocksPerFrame = 9216;
+    bits = 16;
+  }
+  if (bits <= 0) {
+    bits = 16;
+  }
+  m.sampleRate = sampleRate;
+  m.channels = channels;
+  m.bitDepth = bits;
+  if (sampleRate > 0 && blocksPerFrame > 0 && totalFrames > 0) {
+    const frames = totalFrames > 0 ? totalFrames : 1;
+    const samples = (frames - 1) * blocksPerFrame + finalFrameBlocks;
+    m.durationMs = Math.round(samples * 1000 / sampleRate);
+    if (m.durationMs > 0) {
+      m.bitrateKbps = Math.round(size * 8 / m.durationMs);
+    }
+  }
+  parseApeTag(r, size, m);
+}
+
 export class TagParser {
   static parse(f: fs.File, ext: string, size: number): Meta {
     const m = new Meta();
@@ -807,6 +1264,18 @@ export class TagParser {
         parseDsf(r, size, m);
       } else if (ext == '.dff') {
         parseDff(r, size, m);
+      } else if (ext == '.ape') {
+        parseApe(r, size, m);
+      } else if (ext == '.ogg' || ext == '.opus') {
+        parseOgg(r, size, m);
+      } else if (ext == '.aiff' || ext == '.aif') {
+        parseAiff(r, size, m);
+      } else if (ext == '.tta') {
+        parseTta(r, size, m);
+      } else if (ext == '.wv') {
+        parseWv(r, size, m);
+      } else if (ext == '.tak') {
+        parseTak(r, size, m);
       }
     } catch (e) {
       // 解析失败时返回已取得的 partial 结果

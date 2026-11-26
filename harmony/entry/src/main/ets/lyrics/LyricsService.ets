@@ -37,6 +37,9 @@ function stampMs(s: string): number {
 }
 
 export class LyricsService {
+  // 联网总开关（参数页）：关闭后只读缓存与本地 .lrc
+  static onlineEnabled: boolean = true;
+
   static parseLrc(text: string): LyricLine[] {
     const out: LyricLine[] = [];
     const lines = text.replace(/\r/g, '').split('\n');
@@ -141,7 +144,7 @@ export class LyricsService {
       await Db.setLyrics(track.id, local);
       return r;
     }
-    const online = await LyricsService.searchOnline(track);
+    const online = LyricsService.onlineEnabled ? await LyricsService.searchOnline(track) : new LyricsResult();
     if (online.lines.length > 0) {
       await Db.setLyrics(track.id, online.plain);
     }

@@ -260,8 +260,38 @@ export class Db {
     }
   }
 
-  static async getTrackById(id: number): Promise<Track | undefined> {
+  // 文件被标签/封面写入后：同一物理文件可能对应多条记录（CUE 子轨共享母文件），
+  // 统一刷新大小、mtime 与封面缓存路径，避免曲库仍显示旧值。
+  static async updateFileByPath(path: string, sizeBytes: number, mtimeMs: number,
+    coverPath: string): Promise<void> {
     const store = Db.store;
+    if (!store || path == '') {
+      return;
+    }
+    try {
+      if (coverPath != '') {
+        await store.executeSql(
+          'UPDATE tracks SET size_bytes = ?, mtime_ms = ?, cover_blob_path = ? WHERE path = ? OR cue_path = ?',
+          [sizeBytes, mtimeMs, coverPath, path, path]);
+        // CUE 子轨 path 形如 "<母文件>#cue/.../N"，再按前缀兜底一次
+        await store.executeSql(
+          'UPDATE tracks SET size_bytes = ?, mtime_ms = ?, cover_blob_path = ? WHERE path LIKE ?',
+          [sizeBytes, mtimeMs, coverPath, `${path}#cue/%`]);
+      } else {
+        await store.executeSql(
+          'UPDATE tracks SET size_bytes = ?, mtime_ms = ? WHERE path = ? OR cue_path = ?',
+          [sizeBytes, mtimeMs, path, path]);
+        await store.executeSql(
+          'UPDATE tracks SET size_bytes = ?, mtime_ms = ? WHERE path LIKE ?',
+          [sizeBytes, mtimeMs, `${path}#cue/%`]);
+      }
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`Db.updateFileByPath fail: ${err.message}`);
+    }
+  }
+
+  static async getTrackById(id: number): Promise<Track | undefined> {    const store = Db.store;
     if (!store) {
       return undefined;
     }
@@ -462,6 +492,25 @@ export class Db {
     try {
       const rs = await store.querySql(
         'SELECT * FROM tracks WHERE is_cue_child = 0 AND lower(file_name) = lower(?) LIMIT 1', [name]);
+      let out: Track | undefined = undefined;
+      if (rs.goToNextRow()) {
+        out = Db.rowToTrack(rs);
+      }
+      rs.close();
+      return out;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  static async findTrackByPath(path: string): Promise<Track | undefined> {
+    const store = Db.store;
+    if (!store) {
+      return undefined;
+    }
+    try {
+      const rs = await store.querySql(
+        'SELECT * FROM tracks WHERE is_cue_child = 0 AND path = ? LIMIT 1', [path]);
       let out: Track | undefined = undefined;
       if (rs.goToNextRow()) {
         out = Db.rowToTrack(rs);

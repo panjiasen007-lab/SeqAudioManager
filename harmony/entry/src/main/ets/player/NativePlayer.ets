@@ -15,7 +15,8 @@ export interface NativeInfo {
   fadeMs: number;
 }
 
-const NATIVE_EXTS: string[] = ['.flac', '.mp3', '.m4a', '.aac', '.wav', '.ape', '.dsf', '.dff'];
+const NATIVE_EXTS: string[] = ['.flac', '.mp3', '.m4a', '.aac', '.wav', '.ape', '.dsf', '.dff', '.iso',
+  '.ogg', '.opus', '.aiff', '.aif', '.tta', '.wv', '.tak'];
 
 // FFmpeg + OH_AudioRenderer 直通播放的薄封装；失败时由 PlayerEngine 回退 AVPlayer
 export class NativePlayer {

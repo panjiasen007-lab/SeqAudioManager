@@ -6,6 +6,8 @@
 
 #include <hilog/log.h>
 
+#include "audio_stream_select.h"
+
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0xD003
@@ -77,11 +79,11 @@ int32_t AudioEngine::PrepareDecoder(const std::string &path) {
   if (ret < 0) {
     return ret;
   }
-  ret = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-  if (ret < 0) {
-    return ret;
+  audioIdx_ = SelectAudioStream(fmt_);
+  if (audioIdx_ < 0) {
+    return audioIdx_;
   }
-  audioIdx_ = ret;
+  DiscardOtherAudioStreams(fmt_, audioIdx_);
   AVStream *st = fmt_->streams[audioIdx_];
   const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
   if (codec == nullptr) {

@@ -4,6 +4,7 @@
 
 #include "audio_engine.h"
 #include "audio_analysis.h"
+#include "dsd_export.h"
 
 namespace {
 
@@ -194,6 +195,22 @@ napi_value ExportSegment(napi_env env, napi_callback_info info) {
   return Int32Result(env, AudioAnalysis::ExportSegment(src, startMs, durationMs, format, bitDepth, dst));
 }
 
+napi_value ExportDsdSegment(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value args[4] = {nullptr, nullptr, nullptr, nullptr};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc < 4) {
+    return Int32Result(env, -1);
+  }
+  std::string src = ReadString(env, args[0]);
+  int64_t startMs = 0;
+  int64_t durationMs = 0;
+  napi_get_value_int64(env, args[1], &startMs);
+  napi_get_value_int64(env, args[2], &durationMs);
+  std::string dst = ReadString(env, args[3]);
+  return Int32Result(env, DsdExport::ExportSacdSegment(src, startMs, durationMs, dst));
+}
+
 } // namespace
 
 EXTERN_C_START
@@ -215,6 +232,7 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"isOpen", nullptr, IsOpen, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"analyze", nullptr, Analyze, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"exportSegment", nullptr, ExportSegment, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"exportDsdSegment", nullptr, ExportDsdSegment, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
   return exports;

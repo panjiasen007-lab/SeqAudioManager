@@ -28,7 +28,8 @@ export class HealthCheck {
     for (let i = 0; i < total; i++) {
       const t = tracks[i];
       onProgress(i + 1, total);
-      if (t.isCueChild == 1) {
+      if (t.isCueChild == 1 || t.ext.toLowerCase() == '.iso') {
+        // 逻辑轨共用源文件；SACD ISO 曲目表已在扫描阶段校验，不做标签体检
         continue;
       }
       const item = new HealthItem();
@@ -99,7 +100,7 @@ export class HealthCheck {
     const rep = new HealthReport();
     const tracks = await Db.listTracks('');
     for (const t of tracks) {
-      if (t.isCueChild == 1) {
+      if (t.isCueChild == 1 || t.ext.toLowerCase() == '.iso') {
         continue;
       }
       rep.checked++;

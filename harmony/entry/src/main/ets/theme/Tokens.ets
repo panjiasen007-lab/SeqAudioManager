@@ -77,10 +77,10 @@ export class T {
   static FONT: string = 'HarmonyOS Sans SC';
   static MONO: string = 'HarmonyOS Sans';
 
-  static R_CARD: number = 12;
-  static R_INPUT: number = 8;
-  static R_BTN: number = 8;
-  static R_BAR: number = 16;
+  static R_CARD: number = 14;
+  static R_INPUT: number = 9;
+  static R_BTN: number = 9;
+  static R_BAR: number = 14;
 
   static GAP: number = 8;
   static PAGE_PAD_H: number = 14;
@@ -94,7 +94,7 @@ export class T {
       return '警告';
     }
     if (t.isCueChild == 1) {
-      return 'CUE 子轨';
+      return t.ext == '.iso' ? 'SACD 子轨' : 'CUE 子轨';
     }
     return '完成';
   }

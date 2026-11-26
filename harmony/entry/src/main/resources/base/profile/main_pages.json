@@ -6,6 +6,7 @@
     "pages/LibraryToolsPage",
     "pages/CoverPage",
     "pages/LyricsPage",
-    "pages/EqPage"
+    "pages/EqPage",
+    "pages/MiniPlayer"
   ]
 }

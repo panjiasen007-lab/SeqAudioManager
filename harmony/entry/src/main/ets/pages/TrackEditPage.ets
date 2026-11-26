@@ -8,6 +8,7 @@ import { TagPatch, TagWriter, WriteResult } from '../tags/TagWriter';
 import { T } from '../theme/Tokens';
 import { SectionHeader } from '../components/DesktopUI';
 import { AppLog } from '../utils/AppLog';
+import { WindowUtil } from '../utils/WindowUtil';
 import { fmtSpec } from '../utils/Util';
 
 @Entry
@@ -302,7 +303,7 @@ struct TrackEditPage {
             .onClick(() => {
               AppStorage.setOrCreate('seqaudio_cover_path',
                 JSON.stringify([this.tracks[0].path]));
-              router.pushUrl({ url: 'pages/CoverPage' });
+              WindowUtil.openPage('pages/CoverPage', 780, 780);
             })
         }
         Button('返回')
@@ -313,7 +314,7 @@ struct TrackEditPage {
           .border({ width: 1, color: T.LINE_SOFT })
           .borderRadius(8)
           .onClick(() => {
-            router.back();
+            WindowUtil.closeSelf('pages/TrackEditPage');
           })
       }
       .width('100%')
@@ -476,7 +477,7 @@ struct TrackEditPage {
           .backgroundColor(T.GHOST_BG)
           .borderRadius(8)
           .onClick(() => {
-            router.back();
+            WindowUtil.closeSelf('pages/TrackEditPage');
           })
         Button(this.applying ? '写入中…' : '保存到列表')
           .height(32)

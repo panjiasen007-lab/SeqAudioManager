@@ -11,6 +11,14 @@
     {
       "name": "EntryAbility_label",
       "value": "音序管家"
+    },
+    {
+      "name": "MiniAbility_desc",
+      "value": "音序管家迷你播放器"
+    },
+    {
+      "name": "MiniAbility_label",
+      "value": "迷你播放器"
     }
   ]
 }

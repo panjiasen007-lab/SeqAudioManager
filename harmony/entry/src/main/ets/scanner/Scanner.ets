@@ -3,6 +3,7 @@ import { taskpool } from '@kit.ArkTS';
 import { common } from '@kit.AbilityKit';
 import { AUDIO_EXTS, Track, emptyTrack, refreshSearchBlob } from '../model/Track';
 import { TagParser, Meta } from './TagParser';
+import { SacdParser, SacdInfo } from './SacdParser';
 import { Db } from '../db/Db';
 
 const CONCURRENCY: number = 3;
@@ -53,27 +54,42 @@ interface ParsedBatch {
   failed: string[];
 }
 
-// SACD ISO：桌面版依赖随包的 sacd_extract，鸿蒙端暂无该工具，
-// 这里只登记为「待处理」并给出明确说明，避免被当成损坏音频。
-function makeIsoTrack(p: string, size: number, mtimeMs: number): Track {
-  const t = emptyTrack();
+// SACD ISO：解析 Master TOC / Area TOC 得到曲目表与专辑信息；
+// 音频解码由原生 FFmpeg 的 SACD demuxer 完成。
+function fillIsoTrack(t: Track, info: SacdInfo, p: string, size: number, mtimeMs: number): void {
   t.path = p;
   t.fileName = p.substring(p.lastIndexOf('/') + 1);
   t.ext = '.iso';
-  t.title = t.fileName.replace(/\.iso$/i, '');
+  t.title = info.album != '' ? info.album : t.fileName.replace(/\.iso$/i, '');
+  t.album = info.album;
+  t.artist = info.artist;
+  t.albumartist = info.artist;
+  t.year = info.year;
+  t.durationMs = info.totalMs;
   t.sampleRate = 2822400;
   t.bitDepth = 1;
-  t.channels = 2;
-  t.healthStatus = 'warn';
-  t.healthDetail = 'SACD ISO：鸿蒙端暂无 sacd_extract，无法解析曲目或导出 DSF（可先用桌面版导出）';
+  t.channels = info.channels > 0 ? info.channels : 2;
+  t.bitrateKbps = Math.round(t.sampleRate * t.channels / 1000);
   t.sizeBytes = size;
   t.mtimeMs = mtimeMs;
+  if (info.ok) {
+    const fmt = info.frameFormat == 0 ? 'DST' : 'DSD';
+    t.healthDetail = `SACD ISO · ${info.tracks.length} 轨 · ${info.area} · ${fmt}`;
+  } else {
+    t.healthStatus = 'warn';
+    t.healthDetail = `SACD ISO：${info.error}`;
+  }
   refreshSearchBlob(t);
+}
+
+function makeIsoTrack(p: string, size: number, mtimeMs: number): Track {
+  const t = emptyTrack();
+  fillIsoTrack(t, SacdParser.parseFile(p), p, size, mtimeMs);
   return t;
 }
 
 // 纯函数：解析一批文件；在 TaskPool 工作线程或主线程均可执行
-function parseChunk(files: string[], knownPaths: string[], knownTimes: number[]): ParsedBatch {
+function parseChunk(files: string[], knownPaths: string[], knownTimes: number[], minSec: number): ParsedBatch {
   const out: ParsedBatch = { tracks: [], skipped: 0, failed: [] };
   const known = new Map<string, number>();
   for (let i = 0; i < knownPaths.length && i < knownTimes.length; i++) {
@@ -111,6 +127,10 @@ function parseChunk(files: string[], knownPaths: string[], knownTimes: number[])
           // ignore
         }
       }
+      if (minSec > 0 && meta.durationMs > 0 && meta.durationMs < minSec * 1000) {
+        out.skipped++;
+        continue;
+      }
       const t = emptyTrack();
       t.path = p;
       t.fileName = p.substring(p.lastIndexOf('/') + 1);
@@ -144,7 +164,8 @@ function parseChunk(files: string[], knownPaths: string[], knownTimes: number[])
 }
 
 @Concurrent
-function parseChunkConcurrent(files: string[], knownPaths: string[], knownTimes: number[]): ParsedBatch {
+function parseChunkConcurrent(files: string[], knownPaths: string[], knownTimes: number[],
+  minSec: number): ParsedBatch {
   const out: ParsedBatch = { tracks: [], skipped: 0, failed: [] };
   const known = new Map<string, number>();
   for (let i = 0; i < knownPaths.length && i < knownTimes.length; i++) {
@@ -168,17 +189,29 @@ function parseChunkConcurrent(files: string[], knownPaths: string[], knownTimes:
         }
       }
       if (ext == '.iso') {
-        // @Concurrent 只能使用导入符号/局部变量，这里内联构造
+        // @Concurrent 内联：解析 SACD TOC，避免依赖非并发函数
+        const info = SacdParser.parseFile(p);
         const iso = emptyTrack();
         iso.path = p;
         iso.fileName = p.substring(p.lastIndexOf('/') + 1);
         iso.ext = '.iso';
-        iso.title = iso.fileName.replace(/\.iso$/i, '');
+        iso.title = info.album != '' ? info.album : iso.fileName.replace(/\.iso$/i, '');
+        iso.album = info.album;
+        iso.artist = info.artist;
+        iso.albumartist = info.artist;
+        iso.year = info.year;
+        iso.durationMs = info.totalMs;
         iso.sampleRate = 2822400;
         iso.bitDepth = 1;
-        iso.channels = 2;
-        iso.healthStatus = 'warn';
-        iso.healthDetail = 'SACD ISO：鸿蒙端暂无 sacd_extract，无法解析曲目或导出 DSF（可先用桌面版导出）';
+        iso.channels = info.channels > 0 ? info.channels : 2;
+        iso.bitrateKbps = Math.round(iso.sampleRate * iso.channels / 1000);
+        if (info.ok) {
+          const fmt = info.frameFormat == 0 ? 'DST' : 'DSD';
+          iso.healthDetail = `SACD ISO · ${info.tracks.length} 轨 · ${info.area} · ${fmt}`;
+        } else {
+          iso.healthStatus = 'warn';
+          iso.healthDetail = `SACD ISO：${info.error}`;
+        }
         iso.sizeBytes = st.size;
         iso.mtimeMs = mtimeMs;
         refreshSearchBlob(iso);
@@ -195,6 +228,10 @@ function parseChunkConcurrent(files: string[], knownPaths: string[], knownTimes:
         } catch (e) {
           // ignore
         }
+      }
+      if (minSec > 0 && meta.durationMs > 0 && meta.durationMs < minSec * 1000) {
+        out.skipped++;
+        continue;
       }
       const t = emptyTrack();
       t.path = p;
@@ -287,6 +324,9 @@ export class ScanRoots {
 }
 
 export class Scanner {
+  // 扫描最短时长过滤（秒）：0 表示不过滤，由参数页写入
+  static minDurationSec: number = 0;
+
   // 递归收集 roots 下所有音频文件
   private static collectFiles(roots: string[]): string[] {
     const out: string[] = [];
@@ -367,14 +407,15 @@ export class Scanner {
       try {
         const tasks: Promise<ParsedBatch>[] = [];
         for (const b of batches) {
-          tasks.push(taskpool.execute(parseChunkConcurrent, b, knownPaths, knownTimes) as Promise<ParsedBatch>);
+          tasks.push(taskpool.execute(parseChunkConcurrent, b, knownPaths, knownTimes,
+            Scanner.minDurationSec) as Promise<ParsedBatch>);
         }
         results = await Promise.all(tasks);
       } catch (e) {
         // TaskPool 不可用时主线程兜底，扫描不中断
         results = [];
         for (const b of batches) {
-          results.push(parseChunk(b, knownPaths, knownTimes));
+          results.push(parseChunk(b, knownPaths, knownTimes, Scanner.minDurationSec));
         }
       }
       for (const r of results) {

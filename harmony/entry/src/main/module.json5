@@ -14,6 +14,9 @@
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
+      },
+      {
+        "name": "ohos.permission.SET_WINDOW_TRANSPARENT"
       }
     ],
     "abilities": [
@@ -36,6 +39,17 @@
             ]
           }
         ]
+      },
+      {
+        "name": "MiniAbility",
+        "srcEntry": "./ets/miniability/MiniAbility.ets",
+        "description": "$string:MiniAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:MiniAbility_label",
+        "launchType": "singleton",
+        "exported": false,
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background"
       }
     ],
     "extensionAbilities": [

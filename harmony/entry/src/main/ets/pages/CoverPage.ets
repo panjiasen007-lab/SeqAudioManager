@@ -8,6 +8,7 @@ import { CoverService, CoverCandidate, CoverApplyResult } from '../cover/CoverSe
 import { T } from '../theme/Tokens';
 import { SectionHeader } from '../components/DesktopUI';
 import { AppLog } from '../utils/AppLog';
+import { WindowUtil } from '../utils/WindowUtil';
 import { fmtSpec } from '../utils/Util';
 
 @Entry
@@ -117,7 +118,7 @@ struct CoverPage {
           .border({ width: 1, color: T.LINE_SOFT })
           .borderRadius(8)
           .onClick(() => {
-            router.back();
+            WindowUtil.closeSelf('pages/CoverPage');
           })
       }
       .width('100%')

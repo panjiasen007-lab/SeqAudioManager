@@ -9,6 +9,7 @@ import {
 import { T } from '../theme/Tokens';
 import { SectionHeader } from '../components/DesktopUI';
 import { AppLog } from '../utils/AppLog';
+import { WindowUtil } from '../utils/WindowUtil';
 import { fmtDuration } from '../utils/Util';
 
 @Entry
@@ -21,9 +22,28 @@ struct LibraryToolsPage {
   @State private groups: DuplicateGroup[] = [];
   @State private reportText: string = '';
   @State private busy: boolean = false;
+  @State private scopeDir: string = '';
 
   aboutToAppear(): void {
+    const scoped = AppStorage.get<string>('seqaudio_rename_dir');
+    if (scoped != undefined && scoped != '') {
+      this.scopeDir = scoped;
+    }
+    AppStorage.setOrCreate('seqaudio_rename_dir', '');
     this.loadTracks();
+  }
+
+  private dirOf(path: string): string {
+    const i = path.lastIndexOf('/');
+    return i > 0 ? path.substring(0, i) : path;
+  }
+
+  private shortDir(): string {
+    if (this.scopeDir == '') {
+      return '全库';
+    }
+    const i = this.scopeDir.lastIndexOf('/');
+    return i >= 0 ? this.scopeDir.substring(i + 1) : this.scopeDir;
   }
 
   private async loadTracks(): Promise<void> {
@@ -35,7 +55,18 @@ struct LibraryToolsPage {
       }
     }
     this.cuePaths = cuePaths;
-    this.tracks = all.filter((t: Track) => t.isCueChild == 0);
+    let visible = all.filter((t: Track) => t.isCueChild == 0);
+    if (this.scopeDir != '') {
+      visible = visible.filter((t: Track) => this.dirOf(t.path) == this.scopeDir);
+    }
+    this.tracks = visible;
+  }
+
+  private resetScope(): void {
+    this.scopeDir = '';
+    this.previews = [];
+    this.reportText = '';
+    this.loadTracks();
   }
 
   private makePreview(): void {
@@ -129,7 +160,7 @@ struct LibraryToolsPage {
           .border({ width: 1, color: T.LINE_SOFT })
           .borderRadius(8)
           .onClick(() => {
-            router.back();
+            WindowUtil.closeSelf('pages/LibraryToolsPage');
           })
       }
       .width('100%')
@@ -137,6 +168,27 @@ struct LibraryToolsPage {
       Row({ space: 10 }) {
         Column({ space: 8 }) {
           this.cardHeader('批量重命名', '模板预览 · CUE 母文件保护', T.ACCENT)
+          Row({ space: 8 }) {
+            Text(this.scopeDir == '' ? '范围：全库' :
+              `范围：${this.shortDir()}（${this.tracks.length} 首）`)
+              .fontSize(9)
+              .fontColor(this.scopeDir == '' ? T.FG_MUTE : T.CYAN)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+            if (this.scopeDir != '') {
+              Button('改为全库')
+                .height(22)
+                .fontSize(9)
+                .fontColor(T.FG_DIM)
+                .backgroundColor(T.GHOST_BG)
+                .borderRadius(5)
+                .onClick(() => {
+                  this.resetScope();
+                })
+            }
+          }
+          .width('100%')
           Text('变量：{title} {artist} {album} {year} {track} {index}；留空字段自动跳过并折叠分隔符')
             .fontSize(9)
             .fontColor(T.FG_MUTE)

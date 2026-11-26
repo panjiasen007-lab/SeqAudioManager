@@ -27,6 +27,9 @@ export struct SettingsPanel {
   @State private useItunes: boolean = true;
   @State private useLrclib: boolean = true;
   @State private useCoverart: boolean = true;
+  @State private onlineEnabled: boolean = true;
+  @State private conflictMode: number = 2;
+  @State private minDurationSec: number = 0;
   @State private threshold: number = 62;
   @State private autoCover: boolean = true;
   @State private autoRename: boolean = false;
@@ -34,6 +37,15 @@ export struct SettingsPanel {
   @State private cleanupIncludeSuspect: boolean = true;
   @State private theme: string = '深空';
   @State private trimPregap: boolean = false;
+  @State private showAlbum: boolean = true;
+  @State private showFormat: boolean = true;
+  @State private showSpec: boolean = true;
+  @State private showConfidence: boolean = true;
+  @State private showDuration: boolean = true;
+  @State private showFileName: boolean = true;
+  @State private showYear: boolean = false;
+  @State private showKind: boolean = false;
+  @State private showSource: boolean = false;
   @State private dirty: boolean = false;
   @State private savedHint: string = '';
 
@@ -53,6 +65,9 @@ export struct SettingsPanel {
     this.useItunes = this.settings.useItunes;
     this.useLrclib = this.settings.useLrclib;
     this.useCoverart = this.settings.useCoverart;
+    this.onlineEnabled = this.settings.onlineEnabled;
+    this.conflictMode = this.settings.conflictMode;
+    this.minDurationSec = this.settings.minDurationSec;
     this.threshold = this.settings.threshold;
     this.autoCover = this.settings.autoCover;
     this.autoRename = this.settings.autoRename;
@@ -60,6 +75,15 @@ export struct SettingsPanel {
     this.cleanupIncludeSuspect = this.settings.cleanupIncludeSuspect;
     this.theme = this.settings.theme;
     this.trimPregap = this.settings.cueSplitTrimPregap;
+    this.showAlbum = this.settings.showAlbum;
+    this.showFormat = this.settings.showFormat;
+    this.showSpec = this.settings.showSpec;
+    this.showConfidence = this.settings.showConfidence;
+    this.showDuration = this.settings.showDuration;
+    this.showFileName = this.settings.showFileName;
+    this.showYear = this.settings.showYear;
+    this.showKind = this.settings.showKind;
+    this.showSource = this.settings.showSource;
     this.dirty = false;
     this.savedHint = '';
   }
@@ -82,6 +106,9 @@ export struct SettingsPanel {
     d.useItunes = this.useItunes;
     d.useLrclib = this.useLrclib;
     d.useCoverart = this.useCoverart;
+    d.onlineEnabled = this.onlineEnabled;
+    d.conflictMode = this.conflictMode;
+    d.minDurationSec = this.minDurationSec;
     d.threshold = this.threshold;
     d.autoCover = this.autoCover;
     d.autoRename = this.autoRename;
@@ -89,6 +116,15 @@ export struct SettingsPanel {
     d.cleanupIncludeSuspect = this.cleanupIncludeSuspect;
     d.theme = this.theme;
     d.cueSplitTrimPregap = this.trimPregap;
+    d.showAlbum = this.showAlbum;
+    d.showFormat = this.showFormat;
+    d.showSpec = this.showSpec;
+    d.showConfidence = this.showConfidence;
+    d.showDuration = this.showDuration;
+    d.showFileName = this.showFileName;
+    d.showYear = this.showYear;
+    d.showKind = this.showKind;
+    d.showSource = this.showSource;
     this.onSave(d);
     this.dirty = false;
     this.savedHint = '参数已保存并生效';
@@ -115,6 +151,9 @@ export struct SettingsPanel {
   }
 
   private toggleValue(key: string): boolean {
+    if (key == 'onlineEnabled') {
+      return this.onlineEnabled;
+    }
     if (key == 'backup') {
       return this.backup;
     }
@@ -148,11 +187,40 @@ export struct SettingsPanel {
     if (key == 'trimPregap') {
       return this.trimPregap;
     }
+    if (key == 'colAlbum') {
+      return this.showAlbum;
+    }
+    if (key == 'colFormat') {
+      return this.showFormat;
+    }
+    if (key == 'colSpec') {
+      return this.showSpec;
+    }
+    if (key == 'colConfidence') {
+      return this.showConfidence;
+    }
+    if (key == 'colDuration') {
+      return this.showDuration;
+    }
+    if (key == 'colFileName') {
+      return this.showFileName;
+    }
+    if (key == 'colYear') {
+      return this.showYear;
+    }
+    if (key == 'colKind') {
+      return this.showKind;
+    }
+    if (key == 'colSource') {
+      return this.showSource;
+    }
     return this.autoLyrics;
   }
 
   private setToggle(key: string, v: boolean): void {
-    if (key == 'backup') {
+    if (key == 'onlineEnabled') {
+      this.onlineEnabled = v;
+    } else if (key == 'backup') {
       this.backup = v;
     } else if (key == 'netmusic') {
       this.useNetmusic = v;
@@ -174,6 +242,24 @@ export struct SettingsPanel {
       this.autoRename = v;
     } else if (key == 'trimPregap') {
       this.trimPregap = v;
+    } else if (key == 'colAlbum') {
+      this.showAlbum = v;
+    } else if (key == 'colFormat') {
+      this.showFormat = v;
+    } else if (key == 'colSpec') {
+      this.showSpec = v;
+    } else if (key == 'colConfidence') {
+      this.showConfidence = v;
+    } else if (key == 'colDuration') {
+      this.showDuration = v;
+    } else if (key == 'colFileName') {
+      this.showFileName = v;
+    } else if (key == 'colYear') {
+      this.showYear = v;
+    } else if (key == 'colKind') {
+      this.showKind = v;
+    } else if (key == 'colSource') {
+      this.showSource = v;
     } else {
       this.autoLyrics = v;
     }
@@ -187,6 +273,9 @@ export struct SettingsPanel {
     if (key == 'threshold') {
       return this.threshold;
     }
+    if (key == 'minDuration') {
+      return this.minDurationSec;
+    }
     return this.volume;
   }
 
@@ -196,6 +285,8 @@ export struct SettingsPanel {
       this.onPreviewOpacity(v);
     } else if (key == 'threshold') {
       this.threshold = v;
+    } else if (key == 'minDuration') {
+      this.minDurationSec = v;
     } else {
       this.volume = v;
     }
@@ -217,6 +308,25 @@ export struct SettingsPanel {
     }
     .width('100%')
     .height(30)
+  }
+
+  @Builder
+  switchCell(label: string, key: string) {
+    Row() {
+      Text(label)
+        .fontSize(10)
+        .fontColor(T.FG_DIM)
+        .maxLines(1)
+        .layoutWeight(1)
+      Toggle({ type: ToggleType.Switch, isOn: this.toggleValue(key) })
+        .selectedColor(T.ACCENT)
+        .onChange((v: boolean) => {
+          this.setToggle(key, v);
+        })
+    }
+    .width('50%')
+    .height(30)
+    .padding({ right: 8 })
   }
 
   @Builder
@@ -256,6 +366,32 @@ export struct SettingsPanel {
     if (this.tab == 0) {
       Column({ space: 6 }) {
         this.cardTitle('联网匹配', '多源候选 + 置信度', T.CYAN)
+        this.switchRow('启用联网匹配与歌词下载', 'onlineEnabled')
+        Row() {
+          Text('已有标签')
+            .fontSize(11)
+            .fontColor(T.FG_DIM)
+            .layoutWeight(1)
+          Select([
+            { value: '不覆盖已有信息' },
+            { value: '强制覆盖' },
+            { value: '仅空白才填充' }
+          ])
+            .selected(this.conflictMode)
+            .value('仅空白才填充')
+            .width(180)
+            .height(30)
+            .font({ size: 10 })
+            .fontColor(T.FG_DIM)
+            .backgroundColor(T.INPUT)
+            .borderRadius(T.R_INPUT)
+            .onSelect((index: number) => {
+              this.conflictMode = index;
+              this.markDirty();
+            })
+        }
+        .width('100%')
+        .height(32)
         this.switchRow('网易云（中文覆盖优先）', 'netmusic')
         this.switchRow('QQ 音乐（兜底）', 'qqmusic')
         this.switchRow('MusicBrainz（海外/冷门）', 'musicbrainz')
@@ -346,6 +482,12 @@ export struct SettingsPanel {
           .fontColor(T.FG_MUTE)
           .lineHeight(16)
         Divider().color(T.LINE_SOFT)
+        this.sliderRow('最短时长过滤', 'minDuration', 0, 60, ' 秒')
+        Text('扫描时跳过短于该时长的音频（0 = 不过滤），用于过滤提示音/碎片文件。')
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+          .lineHeight(16)
+        Divider().color(T.LINE_SOFT)
         Text('支持写回：FLAC Vorbis Comment / MP3 ID3v2 / M4A ilst / WAV RIFF ID3；CUE 母文件只读。')
           .fontSize(10)
           .fontColor(T.FG_MUTE)
@@ -359,7 +501,25 @@ export struct SettingsPanel {
       .alignItems(HorizontalAlign.Start)
     } else if (this.tab == 3) {
       Column({ space: 9 }) {
-        this.cardTitle('外观', '11 套主题', T.PURPLE)
+        this.cardTitle('外观', '表格列与主题', T.PURPLE)
+        this.cardTitle('表格列', '保存后生效', T.CYAN)
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+          this.switchCell('显示专辑', 'colAlbum')
+          this.switchCell('显示格式', 'colFormat')
+          this.switchCell('显示规格', 'colSpec')
+          this.switchCell('显示匹配置信度', 'colConfidence')
+          this.switchCell('显示时长', 'colDuration')
+          this.switchCell('显示文件名', 'colFileName')
+          this.switchCell('显示年份', 'colYear')
+          this.switchCell('显示无损/有损', 'colKind')
+          this.switchCell('显示来源', 'colSource')
+        }
+        .width('100%')
+        Text('窄窗口下「专辑 / 置信度 / 文件名」仍会自动隐藏；歌名、歌手、鉴定结果始终显示。')
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+          .lineHeight(16)
+        Divider().color(T.LINE_SOFT)
         Row() {
           Text('主题')
             .fontSize(11)
@@ -399,7 +559,7 @@ export struct SettingsPanel {
           }, (name: string) => name)
         }
         .width('100%')
-        this.sliderRow('界面不透明度', 'opacity', 10, 100, '%')
+        this.sliderRow('界面不透明度', 'opacity', 25, 100, '%')
         Text('保存参数后应用主题并重建工作台；浅色主题（纸白 / 黑白极简）使用同色系浅底。')
           .fontSize(10)
           .fontColor(T.FG_MUTE)

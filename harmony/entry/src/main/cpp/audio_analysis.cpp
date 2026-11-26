@@ -24,6 +24,8 @@ extern "C" {
 #define LOG_DOMAIN 0xD003
 #define LOG_TAG "SeqAudioExport"
 
+#include "audio_stream_select.h"
+
 namespace {
 
 constexpr int kFftSize = 8192;
@@ -474,11 +476,11 @@ public:
     if (avformat_find_stream_info(fmt_, nullptr) < 0) {
       return false;
     }
-    ret = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    if (ret < 0) {
+    idx_ = SelectAudioStream(fmt_);
+    if (idx_ < 0) {
       return false;
     }
-    idx_ = ret;
+    DiscardOtherAudioStreams(fmt_, idx_);
     AVStream *st = fmt_->streams[idx_];
     const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
     if (codec == nullptr) {
@@ -954,10 +956,11 @@ int32_t AudioAnalysis::ExportSegment(const std::string &src, int64_t startMs, in
   if (avformat_find_stream_info(inFmt, nullptr) < 0) {
     return fail("stream_info");
   }
-  audioIdx = av_find_best_stream(inFmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+  audioIdx = SelectAudioStream(inFmt);
   if (audioIdx < 0) {
     return fail("no_audio_stream");
   }
+  DiscardOtherAudioStreams(inFmt, audioIdx);
   AVStream *inStream = inFmt->streams[audioIdx];
   const AVCodec *decoder = avcodec_find_decoder(inStream->codecpar->codec_id);
   if (decoder == nullptr) {
@@ -968,7 +971,11 @@ int32_t AudioAnalysis::ExportSegment(const std::string &src, int64_t startMs, in
       avcodec_open2(dec, decoder, nullptr) < 0) {
     return fail("decoder_open");
   }
-  const int outRate = dec->sample_rate > 0 ? dec->sample_rate : 44100;
+  int outRate = dec->sample_rate > 0 ? dec->sample_rate : 44100;
+  // SACD/DSD 解码输出 352.8kHz PCM；导出降到 176.4kHz，兼顾体积与 44.1kHz 整数族
+  if (IsDsdCodec(dec->codec_id) && outRate > 176400) {
+    outRate = 176400;
+  }
   const int channels = dec->ch_layout.nb_channels > 0 ? dec->ch_layout.nb_channels : 2;
 
   const AVSampleFormat outSampleFmt = bitDepth > 16 ? AV_SAMPLE_FMT_S32 : AV_SAMPLE_FMT_S16;

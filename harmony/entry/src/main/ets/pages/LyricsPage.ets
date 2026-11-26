@@ -5,6 +5,7 @@ import { Db } from '../db/Db';
 import { LyricsService, LyricsResult, LyricLine } from '../lyrics/LyricsService';
 import { T } from '../theme/Tokens';
 import { AppLog } from '../utils/AppLog';
+import { WindowUtil } from '../utils/WindowUtil';
 
 @Entry
 @Component
@@ -115,7 +116,7 @@ struct LyricsPage {
           .border({ width: 1, color: T.LINE_SOFT })
           .borderRadius(8)
           .onClick(() => {
-            router.back();
+            WindowUtil.closeSelf('pages/LyricsPage');
           })
       }
       .width('100%')

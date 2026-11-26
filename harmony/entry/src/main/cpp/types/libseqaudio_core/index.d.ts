@@ -15,3 +15,5 @@ export const isOpen: () => boolean;
 export const analyze: (path: string) => string;
 export const exportSegment: (src: string, startMs: number, durationMs: number,
   format: string, bitDepth: number, dst: string) => number;
+export const exportDsdSegment: (src: string, startMs: number, durationMs: number,
+  dst: string) => number;

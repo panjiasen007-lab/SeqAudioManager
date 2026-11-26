@@ -69,14 +69,9 @@ export class ReportService {
     return `\uFEFF${lines.join('\r\n')}`;
   }
 
-  static async export(ctx: common.UIAbilityContext, tracks: Track[]): Promise<ReportResult> {
+  // 通用文本保存：优先系统保存选择器，失败回退沙箱 Reports
+  static async saveText(ctx: common.UIAbilityContext, name: string, text: string): Promise<ReportResult> {
     const res = new ReportResult();
-    if (tracks.length == 0) {
-      res.message = '曲库为空';
-      return res;
-    }
-    const name = `处理报表_${stamp()}.csv`;
-    const text = ReportService.buildCsv(tracks);
     try {
       const dp = new picker.DocumentViewPicker();
       const opts = new picker.DocumentSaveOptions();
@@ -109,5 +104,17 @@ export class ReportService {
       res.message = err.message ? err.message : `${e}`;
     }
     return res;
+  }
+
+  static async export(ctx: common.UIAbilityContext, tracks: Track[]): Promise<ReportResult> {
+    const res = new ReportResult();
+    if (tracks.length == 0) {
+      res.message = '曲库为空';
+      return res;
+    }
+    const name = `处理报表_${stamp()}.csv`;
+    const text = ReportService.buildCsv(tracks);
+    const out = await ReportService.saveText(ctx, name, text);
+    return out;
   }
 }

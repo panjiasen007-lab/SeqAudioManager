@@ -32,6 +32,8 @@ export class AutoOptions {
   writeTags: boolean = true;
   fetchCover: boolean = true;
   fetchLyrics: boolean = true;
+  // 0 不覆盖已有信息 / 1 强制覆盖 / 2 仅空白才填充
+  conflictMode: number = 2;
 }
 
 class ApplyItem {
@@ -124,8 +126,48 @@ export class AutoRunner {
   static async applyCandidate(ctx: common.UIAbilityContext, track: Track, cand: MatchCandidate,
     options: AutoOptions): Promise<boolean> {
     const patch = AutoRunner.patchOf(cand);
+    if (options.conflictMode == 0) {
+      // 不覆盖已有信息：保留原标签，不写回
+      patch.title = '';
+      patch.artist = '';
+      patch.album = '';
+      patch.albumartist = '';
+      patch.genre = '';
+      patch.year = '';
+      patch.trackNo = 0;
+      patch.discNo = 0;
+    } else if (options.conflictMode == 2) {
+      // 仅空白才填充
+      if (track.title.trim() != '') {
+        patch.title = '';
+      }
+      if (track.artist.trim() != '') {
+        patch.artist = '';
+      }
+      if (track.album.trim() != '') {
+        patch.album = '';
+      }
+      if (track.albumartist.trim() != '') {
+        patch.albumartist = '';
+      }
+      if (track.genre.trim() != '') {
+        patch.genre = '';
+      }
+      if (track.year.trim() != '') {
+        patch.year = '';
+      }
+      if (track.trackNo > 0) {
+        patch.trackNo = 0;
+      }
+      if (track.discNo > 0) {
+        patch.discNo = 0;
+      }
+    }
+    const hasFields = patch.title != '' || patch.artist != '' || patch.album != '' ||
+      patch.albumartist != '' || patch.genre != '' || patch.year != '' ||
+      patch.trackNo > 0 || patch.discNo > 0;
     let writeOk = true;
-    if (options.writeTags) {
+    if (options.writeTags && hasFields) {
       const wr: WriteResult = await TagWriter.write(track.path, patch);
       writeOk = wr.ok;
       if (!wr.ok) {

@@ -42,7 +42,8 @@ export interface Track {
   matchConfidence: number;
 }
 
-export const AUDIO_EXTS: string[] = ['.flac', '.mp3', '.wav', '.m4a', '.ogg', '.aac', '.dsf', '.dff', '.iso'];
+export const AUDIO_EXTS: string[] = ['.flac', '.mp3', '.wav', '.m4a', '.ogg', '.opus', '.aac',
+  '.aiff', '.aif', '.tta', '.wv', '.tak', '.dsf', '.dff', '.ape', '.iso'];
 export const CUE_EXTS: string[] = ['.cue'];
 
 export function emptyTrack(): Track {

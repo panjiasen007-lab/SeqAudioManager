@@ -2,14 +2,18 @@
 // 布局：品牌条 → 操作栏 → 统计卡 → 曲库表格 + 右侧详情/参数 → 播放条 →
 //       日志/歌词/信号路径 → 状态栏；迷你播放器为右下浮层。
 import { router, promptAction } from '@kit.ArkUI';
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
+import { emitter } from '@kit.BasicServicesKit';
 import { BusinessError } from '@ohos.base';
 import fs from '@ohos.file.fs';
 import picker from '@ohos.file.picker';
 import pasteboard from '@ohos.pasteboard';
+import { unifiedDataChannel } from '@kit.ArkData';
+import { fileUri } from '@kit.CoreFileKit';
 import { Track, emptyTrack, refreshSearchBlob } from '../model/Track';
 import { Db, Stats } from '../db/Db';
 import { Scanner, ScanController, ScanRoots } from '../scanner/Scanner';
+import { TagParser, Meta } from '../scanner/TagParser';
 import { ImportManager, ImportReport } from '../import/ImportManager';
 import { CueIndexer } from '../cue/CueIndexer';
 import { PlayerEngine, PlayMode } from '../player/PlayerEngine';
@@ -25,10 +29,10 @@ import { ThemeStore } from '../theme/ThemeStore';
 import { fmtDuration, fmtSize, fmtSpec } from '../utils/Util';
 import {
   ActionBar, BottomDock, BrandBar, FilterBar, Inspector, MiniOverlay, PlayerBar,
-  SignalStage, StatCard, StatusBar, TrackTable, VerdictBar
+  QueuePanel, SignalStage, StatCard, StatusBar, TrackTable, VerdictBar
 } from '../components/DesktopUI';
 import { SettingsPanel } from '../components/SettingsPanel';
-import { AboutDialog, PlaylistDialog, ScanRootsDialog } from '../components/DesktopDialogs';
+import { AboutDialog, CommandPalette, PlaylistDialog, ScanRootsDialog } from '../components/DesktopDialogs';
 import { MatchDialog } from '../components/MatchDialog';
 import { SpectrumDialog } from '../components/SpectrumDialog';
 import { CueSplitDialog } from '../components/CueSplitDialog';
@@ -45,8 +49,11 @@ import { TitleCleaner } from '../library/TitleCleaner';
 import { ReportResult, ReportService } from '../library/ReportService';
 import { TagPatch, TagWriter, WriteResult } from '../tags/TagWriter';
 import { QuarantineDialog } from '../components/QuarantineDialog';
+import { PlaylistStore } from '../playlist/PlaylistStore';
+import { WindowUtil } from '../utils/WindowUtil';
+import { MiniBridge, MiniState } from '../mini/MiniBridge';
 
-const APP_VERSION = '1.3.5';
+const APP_VERSION = '1.3.7';
 const MODE_GLYPHS: string[] = ['→', '①', '↻', '⤨'];
 const MODE_NAMES: string[] = ['顺序播放', '列表循环', '单曲循环', '随机'];
 
@@ -90,6 +97,12 @@ struct Index {
   @State private appSettings: AppSettingsData = new AppSettingsData();
   @State private uiOpacity: number = 95;
   @State private miniOn: boolean = false;
+  @State private mainMaximized: boolean = false;
+  @State private queueVisible: boolean = false;
+  @State private queueTracks: Track[] = [];
+  @State private queueIndex: number = -1;
+  @State private dragActive: boolean = false;
+  @State private muted: boolean = false;
   @State private eqOn: boolean = false;
   @State private windowWidth: number = 1420;
   @State private statusText: string = '就绪';
@@ -119,6 +132,8 @@ struct Index {
   @StorageLink('npPos') npPos: number = 0;
   @StorageLink('npDur') npDur: number = 0;
   @StorageLink('npIdx') npIdx: number = -1;
+  @StorageLink('seqaudio_main_active') @Watch('onMainActive') mainActive: number = 0;
+  @State private miniFallback: boolean = false;
 
   private engine: PlayerEngine = PlayerEngine.get();
   private scanCtrl: ScanController = new ScanController();
@@ -126,6 +141,10 @@ struct Index {
   private lastAnchorId: number = -1;
   private sessionReady: boolean = false;
   private tickCount: number = 0;
+  private queueSig: string = '';
+  private lastVolumePct: number = 80;
+  private opacitySaveTimer: number = -1;
+  private volumeSaveTimer: number = -1;
   private narrowHandled: boolean = false;
   private playlistDlg: CustomDialogController | undefined = undefined;
   private aboutDlg: CustomDialogController | undefined = undefined;
@@ -134,12 +153,22 @@ struct Index {
   private spectrumDlg: CustomDialogController | undefined = undefined;
   private cueSplitDlg: CustomDialogController | undefined = undefined;
   private quarantineDlg: CustomDialogController | undefined = undefined;
+  private commandDlg: CustomDialogController | undefined = undefined;
   private canvasSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private canvasCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.canvasSettings);
+  private miniReady: boolean = false;
+  private miniWatchdog: number = -1;
+  private miniCmdListener = (data: emitter.EventData): void => {
+    this.onMiniCmd(data);
+  };
+  private miniReadyListener = (data: emitter.EventData): void => {
+    this.onMiniReady();
+  };
   private onLogChanged = (): void => {
     this.logs = AppLog.lines.slice();
   };
   private onEngineTick = (): void => {
+    this.syncQueue(false);
     const t = this.engine.current();
     if (t == undefined) {
       if (this.playingPath != '') {
@@ -164,11 +193,16 @@ struct Index {
     if (this.tickCount % 5 == 0) {
       this.updateSignal();
     }
+    if (this.miniOn) {
+      this.publishMiniState();
+    }
   };
 
   // ------------------------------------------------------------ 生命周期
 
   aboutToAppear(): void {
+    emitter.on(MiniBridge.EV_CMD, this.miniCmdListener);
+    emitter.on(MiniBridge.EV_READY, this.miniReadyListener);
     this.initAsync();
   }
 
@@ -179,6 +213,12 @@ struct Index {
     SessionStore.stopAutoSave();
     AppLog.unsubscribe(this.onLogChanged);
     this.engine.removeListener(this.onEngineTick);
+    emitter.off(MiniBridge.EV_CMD, this.miniCmdListener);
+    emitter.off(MiniBridge.EV_READY, this.miniReadyListener);
+    if (this.miniWatchdog >= 0) {
+      clearTimeout(this.miniWatchdog);
+      this.miniWatchdog = -1;
+    }
   }
 
   onPageShow(): void {
@@ -221,12 +261,14 @@ struct Index {
 
     AppLog.subscribe(this.onLogChanged);
     AppLog.info('日志：控制台 + 底部运行日志栏');
-    AppLog.info('联网匹配 / 真假鉴定 / 频谱 / CUE 分轨已启用');
+    AppLog.info('联网匹配 / 真假鉴定 / 频谱 / CUE 与 SACD 分轨已启用');
 
     this.roots = await ScanRoots.load(ctx);
     const session = await SessionStore.load();
     this.engine.setMode(session.playMode as PlayMode);
-    this.engine.setVolume(session.volume);
+    // 会话音量为 0 且设置音量非 0 时（上次是静音状态）按设置音量恢复，避免冷启动无声
+    const sessionVol = session.volume > 0 ? session.volume : this.appSettings.volume / 100;
+    this.engine.setVolume(sessionVol);
     this.engine.onSessionDirty = (force: boolean): void => {
       SessionStore.markDirty(this.engine, force);
     };
@@ -257,16 +299,19 @@ struct Index {
   }
 
   private syncMatchSettings(): void {
-    this.matchSettings.useNetmusic = this.appSettings.useNetmusic;
-    this.matchSettings.useQqmusic = this.appSettings.useQqmusic;
-    this.matchSettings.useMusicBrainz = this.appSettings.useMusicBrainz;
-    this.matchSettings.useItunes = this.appSettings.useItunes;
-    this.matchSettings.useLrclib = this.appSettings.useLrclib;
-    this.matchSettings.useCoverart = this.appSettings.useCoverart;
+    const online = this.appSettings.onlineEnabled;
+    this.matchSettings.useNetmusic = online && this.appSettings.useNetmusic;
+    this.matchSettings.useQqmusic = online && this.appSettings.useQqmusic;
+    this.matchSettings.useMusicBrainz = online && this.appSettings.useMusicBrainz;
+    this.matchSettings.useItunes = online && this.appSettings.useItunes;
+    this.matchSettings.useLrclib = online && this.appSettings.useLrclib;
+    this.matchSettings.useCoverart = online && this.appSettings.useCoverart;
     this.matchSettings.threshold = this.appSettings.threshold / 100;
     this.matchSettings.autoCover = this.appSettings.autoCover;
     this.matchSettings.autoRename = this.appSettings.autoRename;
     this.matchSettings.renameTemplate = this.appSettings.renameTemplate;
+    LyricsService.onlineEnabled = online;
+    Scanner.minDurationSec = this.appSettings.minDurationSec;
   }
 
   private async seedSamplesIfNeeded(ctx: common.UIAbilityContext): Promise<void> {
@@ -358,7 +403,6 @@ struct Index {
     try {
       this.allTracks = await Db.listTracks('');
       this.stats = await Db.stats();
-      let done = 0;
       let warn = 0;
       let bad = 0;
       let lossless = 0;
@@ -374,8 +418,6 @@ struct Index {
           bad++;
         } else if (t.healthStatus == 'warn') {
           warn++;
-        } else {
-          done++;
         }
         if (T.isLossless(t)) {
           lossless++;
@@ -399,7 +441,7 @@ struct Index {
           vUnknown++;
         }
       }
-      this.doneCount = done;
+      this.doneCount = vTrue;
       this.warnCount = warn;
       this.badCount = bad;
       this.trueCount = vTrue;
@@ -412,6 +454,10 @@ struct Index {
         const keep = this.allTracks.find((t: Track) => t.id == this.selectedId);
         if (keep != undefined) {
           this.selectedTrack = keep;
+          // 封面/标签写回后重新读库，详情卡立即显示新封面
+          if (keep.coverBlobPath != '') {
+            this.selectedCover = `file://${keep.coverBlobPath}`;
+          }
         }
       }
     } catch (e) {
@@ -583,6 +629,80 @@ struct Index {
     }
   }
 
+  // 系统文件夹选择器：和 Windows 版一样浏览选择目录，不再手打路径
+  private async pickFolder(): Promise<void> {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    let picked = '';
+    try {
+      const dp = new picker.DocumentViewPicker();
+      const opts = new picker.DocumentSelectOptions();
+      opts.selectMode = picker.DocumentSelectMode.FOLDER;
+      opts.maxSelectNumber = 1;
+      const uris = await dp.select(opts);
+      if (!uris || uris.length == 0) {
+        return;
+      }
+      picked = uris[0];
+    } catch (e) {
+      AppLog.info('添加文件夹：已取消');
+      return;
+    }
+    let path = picked;
+    if (path.startsWith('file://')) {
+      try {
+        path = new fileUri.FileUri(path).path;
+      } catch (e) {
+        path = decodeURIComponent(path.replace(/^file:\/\//, ''));
+      }
+    }
+    path = path.replace(/\\/g, '/').replace(/\/+$/, '');
+    let readable = false;
+    try {
+      fs.listFileSync(path, { recursion: false });
+      readable = true;
+    } catch (e) {
+      readable = false;
+    }
+    if (!readable) {
+      AppLog.warn(`无法读取所选目录：${path}，请改用「添加文件」导入`);
+      promptAction.showToast({ message: '无法读取该目录，请改用「添加文件」导入' });
+      return;
+    }
+    const roots = await ScanRoots.add(ctx, path);
+    this.roots = roots;
+    AppLog.info(`已添加文件夹：${path}`);
+    promptAction.showToast({ message: `已添加文件夹：${path.substring(path.lastIndexOf('/') + 1)}` });
+    this.startScan();
+  }
+
+  private async browseImport(): Promise<void> {
+    AppLog.info('浏览导入：打开文件选择器');
+    try {
+      const dp = new picker.DocumentViewPicker();
+      const opts = new picker.DocumentSelectOptions();
+      opts.maxSelectNumber = 200;
+      const uris = await dp.select(opts);
+      if (!uris || uris.length == 0) {
+        AppLog.info('浏览导入：已取消');
+        return;
+      }
+      const audio: string[] = [];
+      for (const u of uris) {
+        if (this.isAudioUri(u)) {
+          audio.push(u);
+        }
+      }
+      if (audio.length == 0) {
+        promptAction.showToast({ message: '未选择音频文件' });
+        return;
+      }
+      await this.importUris(audio);
+    } catch (e) {
+      const err = e as BusinessError;
+      AppLog.warn(`浏览导入失败：${err.message ? err.message : e}`);
+    }
+  }
+
   private async importUris(uris: string[]): Promise<void> {
     const ctx = getContext(this) as common.UIAbilityContext;
     this.statusText = '导入中';
@@ -726,15 +846,18 @@ struct Index {
   private async updatePlayingCover(t: Track): Promise<void> {
     if (t.coverBlobPath != '') {
       this.playingCover = `file://${t.coverBlobPath}`;
+      AppStorage.setOrCreate('npCover', this.playingCover);
       return;
     }
     this.playingCover = '';
+    AppStorage.setOrCreate('npCover', '');
     try {
       const ctx = getContext(this) as common.UIAbilityContext;
       const p = await CoverService.ensureCover(ctx, t);
       if (p != '' && this.playingTrack.path == t.path) {
         t.coverBlobPath = p;
         this.playingCover = `file://${p}`;
+        AppStorage.setOrCreate('npCover', this.playingCover);
       }
     } catch (e) {
       // 忽略
@@ -745,19 +868,34 @@ struct Index {
     return t.isCueChild == 1 && t.cuePath != '' ? t.cuePath : t.path;
   }
 
+  // SACD 镜像是只读容器：写标签/封面前统一拦下，先分轨导出
+  private rejectSacdWrite(t: Track): boolean {
+    if (this.physicalPath(t).toLowerCase().endsWith('.iso')) {
+      promptAction.showToast({ message: 'SACD ISO 只读：请先分轨导出，再编辑导出的曲目' });
+      return true;
+    }
+    return false;
+  }
+
   private openEditorFor(t: Track): void {
+    if (this.rejectSacdWrite(t)) {
+      return;
+    }
     AppStorage.setOrCreate('seqaudio_edit_paths', JSON.stringify([this.physicalPath(t)]));
-    router.pushUrl({ url: 'pages/TrackEditPage' });
+    WindowUtil.openPage('pages/TrackEditPage', 760, 780);
   }
 
   private openCoverFor(t: Track): void {
+    if (this.rejectSacdWrite(t)) {
+      return;
+    }
     AppStorage.setOrCreate('seqaudio_cover_path', JSON.stringify([this.physicalPath(t)]));
-    router.pushUrl({ url: 'pages/CoverPage' });
+    WindowUtil.openPage('pages/CoverPage', 780, 780);
   }
 
   private openLyricsFor(t: Track): void {
     AppStorage.setOrCreate('seqaudio_lyrics_path', JSON.stringify([this.physicalPath(t)]));
-    router.pushUrl({ url: 'pages/LyricsPage' });
+    WindowUtil.openPage('pages/LyricsPage', 720, 760);
   }
 
   private batchEditFor(t: Track): void {
@@ -771,17 +909,17 @@ struct Index {
     }
     const paths: string[] = [];
     for (const x of list) {
-      if (x.isCueChild == 1) {
+      if (x.isCueChild == 1 || x.ext.toLowerCase() == '.iso') {
         continue;
       }
       paths.push(x.path);
     }
     if (paths.length == 0) {
-      promptAction.showToast({ message: 'CUE 子轨请先分轨或改用单曲编辑' });
+      promptAction.showToast({ message: 'SACD ISO / CUE 子轨请先分轨导出后再批量编辑' });
       return;
     }
     AppStorage.setOrCreate('seqaudio_edit_paths', JSON.stringify(paths));
-    router.pushUrl({ url: 'pages/TrackEditPage' });
+    WindowUtil.openPage('pages/TrackEditPage', 760, 780);
   }
 
   private queueTargets(t: Track): Track[] {
@@ -814,6 +952,129 @@ struct Index {
     }
     AppLog.info(`加入队列：${list.length} 首`);
     promptAction.showToast({ message: `已加入队列：${list.length} 首` });
+  }
+
+  // ------------------------------------------------------------ 播放队列
+
+  private syncQueue(force: boolean): void {
+    const q = this.engine.queue;
+    const sig = `${q.length}|${this.engine.index}|${q.length > 0 ? q[0].path : ''}|` +
+      `${q.length > 0 ? q[q.length - 1].path : ''}`;
+    if (!force && sig == this.queueSig) {
+      return;
+    }
+    this.queueSig = sig;
+    this.queueTracks = q.slice();
+    this.queueIndex = this.engine.index;
+  }
+
+  private toggleQueuePanel(): void {
+    this.queueVisible = !this.queueVisible;
+    if (this.queueVisible) {
+      this.syncQueue(true);
+    }
+  }
+
+  private queueJump(i: number): void {
+    this.engine.playIndex(i);
+    this.syncQueue(true);
+    const t = this.engine.current();
+    if (t) {
+      this.selectTrack(t);
+      this.statusText = '播放中';
+    }
+  }
+
+  private queueRemove(i: number): void {
+    const t = this.queueTracks[i];
+    this.engine.removeAt(i);
+    this.syncQueue(true);
+    if (t) {
+      AppLog.info(`从队列移除：${t.artist} - ${t.title}`);
+    }
+  }
+
+  private queueClear(): void {
+    this.engine.clearQueue();
+    this.syncQueue(true);
+    this.statusText = '队列已清空';
+    AppLog.info('播放队列已清空');
+  }
+
+  private queueSaveAs(name: string): boolean {
+    const paths = this.engine.queue.map((t: Track) => t.path);
+    if (paths.length == 0) {
+      promptAction.showToast({ message: '队列为空，无法保存' });
+      return false;
+    }
+    const clean = name.trim() != '' ? name.trim() : `队列 ${new Date().toLocaleString()}`;
+    const ctx = getContext(this) as common.UIAbilityContext;
+    if (PlaylistStore.create(ctx, clean, paths)) {
+      AppLog.info(`队列已另存为播放列表：${clean}（${paths.length} 首）`);
+      promptAction.showToast({ message: `已保存「${clean}」` });
+      return true;
+    }
+    promptAction.showToast({ message: '保存失败，请检查列表名称' });
+    return false;
+  }
+
+  private openRenameDir(t: Track): void {
+    if (t.id == 0) {
+      promptAction.showToast({ message: '先选择一首曲目' });
+      return;
+    }
+    const path = this.physicalPath(t);
+    const i = path.lastIndexOf('/');
+    const dir = i > 0 ? path.substring(0, i) : path;
+    AppStorage.setOrCreate('seqaudio_rename_dir', dir);
+    WindowUtil.openPage('pages/LibraryToolsPage', 860, 760);
+  }
+
+  private isAudioUri(uri: string): boolean {
+    let name = decodeURIComponent(uri.substring(uri.lastIndexOf('/') + 1)).toLowerCase();
+    const q = name.indexOf('?');
+    if (q >= 0) {
+      name = name.substring(0, q);
+    }
+    const exts: string[] = ['.flac', '.mp3', '.wav', '.m4a', '.ogg', '.opus', '.aac', '.dsf',
+      '.dff', '.iso', '.ape', '.tak', '.tta', '.wv', '.aif', '.aiff'];
+    for (const e of exts) {
+      if (name.endsWith(e)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // 系统文件管理器拖入：URI 具备临时读权限，交给 ImportManager 拷入沙箱
+  private dropUris(event: DragEvent): string[] {
+    const out: string[] = [];
+    const data: unifiedDataChannel.UnifiedData = event.getData();
+    if (!data) {
+      return out;
+    }
+    const records = data.getRecords();
+    for (const r of records) {
+      if (r instanceof unifiedDataChannel.File) {
+        const uri = (r as unifiedDataChannel.File).uri;
+        if (uri != undefined && uri != '' && this.isAudioUri(uri)) {
+          out.push(uri);
+        }
+      }
+    }
+    return out;
+  }
+
+  private onLibraryDrop(event: DragEvent): void {
+    this.dragActive = false;
+    event.setResult(DragResult.DROP_ENABLED);
+    const uris = this.dropUris(event);
+    if (uris.length == 0) {
+      promptAction.showToast({ message: '未识别到音频文件；文件夹请用「添加文件夹」' });
+      return;
+    }
+    AppLog.info(`拖拽导入：${uris.length} 个文件`);
+    this.importUris(uris);
   }
 
   private async copyTrackPath(t: Track): Promise<void> {
@@ -967,6 +1228,260 @@ struct Index {
       return;
     }
     this.engine.toggle();
+    this.statusText = this.engine.playing ? '播放中' : '已暂停';
+  }
+
+  private applyOpacity(v: number): void {
+    this.uiOpacity = Math.max(25, Math.min(100, Math.round(v)));
+    this.appSettings.opacity = this.uiOpacity;
+    if (this.opacitySaveTimer >= 0) {
+      clearTimeout(this.opacitySaveTimer);
+    }
+    this.opacitySaveTimer = setTimeout(() => {
+      this.opacitySaveTimer = -1;
+      Db.setSetting('ui_opacity', `${this.uiOpacity}`);
+    }, 400);
+    if (this.miniOn) {
+      this.publishMiniState();
+    }
+  }
+
+  // 小窗口模式：启动独立的 MiniAbility 窗口，再最小化主窗口；
+  // 主窗口恢复时通知迷你窗自行退出，实现与桌面版一致的双窗口切换。
+  private toggleMini(): void {
+    if (this.miniOn) {
+      MiniBridge.sendCommand('close', 0);
+      this.miniOn = false;
+      this.miniReady = false;
+      this.miniFallback = false;
+      WindowUtil.restoreMain();
+      return;
+    }
+    if (this.playingTrack.id == 0) {
+      promptAction.showToast({ message: '先播放一首曲目再开启小窗口' });
+      return;
+    }
+    const ctx = getContext(this) as common.UIAbilityContext;
+    this.miniOn = true;
+    this.miniReady = false;
+    this.miniFallback = false;
+    const want: Want = {
+      bundleName: 'com.seqaudio.manager',
+      abilityName: 'MiniAbility',
+      parameters: { theme: this.appSettings.theme }
+    };
+    ctx.startAbility(want).then(() => {
+      AppLog.info('迷你播放器：正在启动独立窗口');
+      if (this.miniWatchdog >= 0) {
+        clearTimeout(this.miniWatchdog);
+      }
+      // 兜底：2.5 秒内窗口未就绪则退回应用内浮层，避免主界面已最小化却看不到小窗
+      this.miniWatchdog = setTimeout(() => {
+        this.miniWatchdog = -1;
+        if (this.miniOn && !this.miniReady) {
+          this.miniOn = false;
+          this.miniFallback = true;
+          MiniBridge.sendCommand('close', 0);
+          AppLog.warn('迷你窗口启动超时，改用浮层模式');
+        }
+      }, 2500);
+    }).catch((e: Error) => {
+      this.miniOn = false;
+      this.miniFallback = true;
+      AppLog.warn(`迷你窗口启动失败：${e.message}，改用浮层模式`);
+    });
+  }
+
+  private mainCtx(): common.UIAbilityContext {
+    return getContext(this) as common.UIAbilityContext;
+  }
+
+  private minimizeMainWin(): void {
+    WindowUtil.minimizeMain();
+  }
+
+  private toggleMainMaximize(): void {
+    const stage = WindowUtil.stage();
+    if (stage == undefined) {
+      return;
+    }
+    try {
+      if (this.mainMaximized) {
+        this.mainMaximized = false;
+        AppLog.info('主窗口：还原');
+        WindowUtil.resizeMainToDefault();
+      } else {
+        this.mainMaximized = true;
+        AppLog.info('主窗口：最大化');
+        WindowUtil.resizeMainToMax();
+      }
+    } catch (e) {
+    }
+  }
+
+  private closeMainWin(): void {
+    try {
+      this.mainCtx().terminateSelf();
+    } catch (e) {
+    }
+  }
+
+  private onMiniReady(): void {
+    if (this.miniWatchdog >= 0) {
+      clearTimeout(this.miniWatchdog);
+      this.miniWatchdog = -1;
+    }
+    this.miniOn = true;
+    this.miniReady = true;
+    this.miniFallback = false;
+    this.publishMiniState();
+    WindowUtil.minimizeMain();
+    AppLog.info('迷你播放器已开启（独立窗口）');
+  }
+
+  private onMiniClosed(): void {
+    if (this.miniWatchdog >= 0) {
+      clearTimeout(this.miniWatchdog);
+      this.miniWatchdog = -1;
+    }
+    this.miniOn = false;
+    this.miniReady = false;
+    this.miniFallback = false;
+    WindowUtil.restoreMain();
+    this.refresh();
+    AppLog.info('迷你播放器已关闭');
+  }
+
+  private onMiniCmd(data: emitter.EventData): void {
+    const env = MiniBridge.readEnvelope(data);
+    const cmd = env.cmd;
+    const value = env.value;
+    if (cmd == 'toggle') {
+      this.togglePlay();
+    } else if (cmd == 'prev') {
+      this.engine.prevByUser();
+    } else if (cmd == 'next') {
+      this.engine.nextByUser();
+    } else if (cmd == 'stop') {
+      this.engine.stop();
+      this.statusText = '已停止';
+    } else if (cmd == 'seek') {
+      this.engine.seek(value);
+    } else if (cmd == 'volume') {
+      this.applyVolume(value);
+    } else if (cmd == 'mute') {
+      this.toggleMute();
+    } else if (cmd == 'mode') {
+      this.cycleMode();
+    } else if (cmd == 'opacity') {
+      this.applyOpacity(value);
+    } else if (cmd == 'restore') {
+      WindowUtil.restoreMain();
+      this.refresh();
+      return;
+    } else if (cmd == 'closed') {
+      this.onMiniClosed();
+      return;
+    }
+    if (this.miniOn) {
+      this.publishMiniState();
+    }
+  }
+
+  private publishMiniState(): void {
+    const s = new MiniState();
+    s.playing = this.npPlaying;
+    s.pos = this.npPos;
+    s.dur = this.npDur;
+    s.title = this.playingTrack.id == 0 ? '' : this.playingTrack.title;
+    s.artist = this.playingTrack.id == 0 ? '' : this.playingTrack.artist;
+    s.cover = this.playingCover;
+    const i = this.lyricIndex;
+    if (i >= 0 && i < this.lyrics.length) {
+      // 当前时间点可能落在空行（LRC 段落间隔）：向前回退到最近的非空歌词行
+      let cur = i;
+      if (this.lyrics[cur].text.trim() == '') {
+        let back = cur - 1;
+        while (back >= 0 && this.lyrics[back].text.trim() == '') {
+          back--;
+        }
+        if (back >= 0) {
+          cur = back;
+        }
+      }
+      s.lyricCur = this.lyrics[cur].text.trim();
+      let p = cur - 1;
+      while (p >= 0 && this.lyrics[p].text.trim() == '') {
+        p--;
+      }
+      s.lyricPrev = p >= 0 ? this.lyrics[p].text.trim() : '';
+      let n = cur + 1;
+      while (n < this.lyrics.length && this.lyrics[n].text.trim() == '') {
+        n++;
+      }
+      s.lyricNext = n < this.lyrics.length ? this.lyrics[n].text.trim() : '';
+    }
+    s.volume = this.appSettings.volume;
+    s.muted = this.muted;
+    s.mode = this.engine.mode as number;
+    s.opacity = this.uiOpacity;
+    MiniBridge.emitState(s);
+  }
+
+  private onMainActive(): void {
+    // 切回主窗口：关闭迷你窗、刷新曲库（封面/标签写回后回到主界面即可看到新数据）
+    setTimeout(() => {
+      if (WindowUtil.mainMinimized()) {
+        return;
+      }
+      if (this.miniOn) {
+        MiniBridge.sendCommand('close', 0);
+        this.miniOn = false;
+        this.miniReady = false;
+        WindowUtil.restoreMain();
+        AppLog.info('主窗口已恢复，迷你播放器关闭');
+      }
+      if (this.miniFallback) {
+        this.miniOn = false;
+        this.miniFallback = false;
+      }
+      this.refresh();
+    }, 350);
+  }
+
+  private applyVolume(v: number): void {
+    this.appSettings.volume = Math.round(v);
+    this.muted = this.appSettings.volume == 0;
+    this.engine.setVolume(this.appSettings.volume / 100);
+    if (this.volumeSaveTimer >= 0) {
+      clearTimeout(this.volumeSaveTimer);
+    }
+    this.volumeSaveTimer = setTimeout(() => {
+      this.volumeSaveTimer = -1;
+      Db.setSetting('ui_volume', `${this.appSettings.volume}`);
+    }, 400);
+    if (this.miniOn) {
+      this.publishMiniState();
+    }
+  }
+
+  private toggleMute(): void {
+    if (!this.muted) {
+      this.lastVolumePct = this.appSettings.volume > 0 ? this.appSettings.volume : 80;
+      this.appSettings.volume = 0;
+      this.engine.setVolume(0);
+      this.muted = true;
+      this.statusText = '已静音';
+    } else {
+      const v = this.lastVolumePct > 0 ? this.lastVolumePct : 80;
+      this.appSettings.volume = v;
+      this.engine.setVolume(v / 100);
+      this.muted = false;
+      this.statusText = '就绪';
+    }
+    if (this.miniOn) {
+      this.publishMiniState();
+    }
   }
 
   private cycleMode(): void {
@@ -975,6 +1490,9 @@ struct Index {
     Db.setSetting('play_mode', `${next}`);
     AppLog.info(`播放模式：${MODE_NAMES[next]}`);
     promptAction.showToast({ message: `播放模式：${MODE_NAMES[next]}` });
+    if (this.miniOn) {
+      this.publishMiniState();
+    }
   }
 
   private updateLyricIndex(): void {
@@ -992,6 +1510,8 @@ struct Index {
     }
     if (idx != this.lyricIndex) {
       this.lyricIndex = idx;
+      const line = this.lyrics[idx];
+      AppStorage.setOrCreate('npLyric', line != undefined ? line.text : '');
     }
   }
 
@@ -1095,20 +1615,20 @@ struct Index {
       promptAction.showToast({ message: '列表里的曲目已不在曲库' });
       return;
     }
-    let queue: Track[] = tracks;
-    let index = 0;
     if (append && this.engine.queue.length > 0) {
-      queue = this.engine.queue.concat(tracks);
-      index = this.engine.index >= 0 ? this.engine.index : 0;
+      this.engine.appendQueue(tracks);
+      AppLog.info(`追加播放列表：${tracks.length} 首`);
+      promptAction.showToast({ message: `已追加 ${tracks.length} 首` });
+      return;
     }
-    this.engine.restoreQueue(queue, index, 0);
-    this.playingTrack = queue[index];
-    this.playingPath = queue[index].path;
+    this.engine.restoreQueue(tracks, 0, 0);
+    this.engine.playIndex(0);
     this.selectTrack(tracks[0]);
-    this.updatePlayingCover(queue[index]);
-    this.loadLyricsFor(queue[index], false);
-    AppLog.info(`${append ? '追加' : '载入'}播放列表：${tracks.length} 首`);
-    promptAction.showToast({ message: `${append ? '已追加' : '已载入'} ${tracks.length} 首` });
+    this.statusText = '播放中';
+    this.updatePlayingCover(tracks[0]);
+    this.loadLyricsFor(tracks[0], false);
+    AppLog.info(`载入播放列表：${tracks.length} 首`);
+    promptAction.showToast({ message: `已载入 ${tracks.length} 首` });
   }
 
   private openPlaylistsDialog(): void {
@@ -1152,16 +1672,29 @@ struct Index {
   }
 
   private onMore(key: string): void {
-    if (key == 'rename') {
-      router.pushUrl({ url: 'pages/LibraryToolsPage' });
+    if (key == 'command') {
+      this.openCommandPalette();
+    } else if (key == 'roots') {
+      this.openRootsDialog();
+    } else if (key == 'rename') {      WindowUtil.openPage('pages/LibraryToolsPage', 860, 760);
     } else if (key == 'tools') {
-      router.pushUrl({ url: 'pages/LibraryToolsPage' });
+      WindowUtil.openPage('pages/LibraryToolsPage', 860, 760);
     } else if (key == 'health') {
-      router.pushUrl({ url: 'pages/HealthPage' });
+      WindowUtil.openPage('pages/HealthPage', 860, 760);
     } else if (key == 'batchedit') {
       this.batchEditFor(this.currentTarget());
     } else if (key == 'undoedit') {
       this.undoTagEdits(this.currentTarget());
+    } else if (key == 'revert') {
+      this.revertLocalChanges(this.currentTarget());
+    } else if (key == 'renamedir') {
+      this.openRenameDir(this.currentTarget());
+    } else if (key == 'candidates') {
+      this.viewCandidatesFor(this.currentTarget());
+    } else if (key == 'confirmmatch') {
+      this.confirmBestMatch(this.currentTarget());
+    } else if (key == 'exportlog') {
+      this.exportLog();
     } else if (key == 'stripno') {
       this.stripSelectedTitles();
     } else if (key == 'report') {
@@ -1204,9 +1737,56 @@ struct Index {
         promptAction.showToast({ message: '先选择一首曲目' });
       }
     } else if (key == 'eq') {
-      router.pushUrl({ url: 'pages/EqPage' });
+      WindowUtil.openPage('pages/EqPage', 1000, 700);
+    } else if (key == 'autoselected') {
+      this.startAuto(true);
     } else if (key == 'about') {
       this.openAboutDialog();
+    }
+  }
+
+  private openCommandPalette(): void {
+    const dlg = new CustomDialogController({
+      builder: CommandPalette({
+        onClose: () => {
+          if (this.commandDlg != undefined) {
+            this.commandDlg.close();
+          }
+        },
+        onRun: (key: string) => {
+          this.onCommand(key);
+        }
+      }),
+      autoCancel: true,
+      alignment: DialogAlignment.Center,
+      customStyle: true,
+      maskColor: '#99000000'
+    });
+    this.commandDlg = dlg;
+    dlg.open();
+  }
+
+  private onCommand(key: string): void {
+    if (key == 'scan') {
+      this.startScan();
+    } else if (key == 'import') {
+      this.importFiles();
+    } else if (key == 'browseimport') {
+      this.browseImport();
+    } else if (key == 'auto') {
+      this.startAuto();
+    } else if (key == 'autoselected') {
+      this.startAuto(true);
+    } else if (key == 'auth') {
+      this.startAuth();
+    } else if (key == 'cleanup') {
+      this.cleanupFake();
+    } else if (key == 'queuepanel') {
+      this.toggleQueuePanel();
+    } else if (key == 'mute') {
+      this.toggleMute();
+    } else {
+      this.onMore(key);
     }
   }
 
@@ -1241,18 +1821,12 @@ struct Index {
     o.writeTags = true;
     o.fetchCover = this.appSettings.autoCover;
     o.fetchLyrics = true;
+    o.conflictMode = this.appSettings.conflictMode;
     return o;
   }
 
-  private async openMatchFor(t: Track): Promise<void> {
-    if (t.id == 0 || t.isCueChild == 1) {
-      promptAction.showToast({ message: 'CUE 子轨请先分轨或改用标签编辑' });
-      return;
-    }
-    AppLog.info(`联网匹配：${t.artist} - ${t.title}`);
-    promptAction.showToast({ message: '正在联网检索候选…' });
-    const res: MatchResult = await MetadataMatcher.match(t, this.matchSettings);
-    this.matchCandidates = res.candidates;
+  private showMatchDialog(t: Track, candidates: MatchCandidate[]): void {
+    this.matchCandidates = candidates;
     this.matchTrack = t;
     this.matchTitle = `${t.artist == '' ? '未知歌手' : t.artist} - ${t.title}`;
     const dlg = new CustomDialogController({
@@ -1276,9 +1850,84 @@ struct Index {
     });
     this.matchDlg = dlg;
     dlg.open();
+  }
+
+  private async openMatchFor(t: Track): Promise<void> {
+    if (t.id == 0 || t.isCueChild == 1) {
+      promptAction.showToast({ message: 'CUE 子轨请先分轨或改用标签编辑' });
+      return;
+    }
+    if (t.ext.toLowerCase() == '.iso') {
+      promptAction.showToast({ message: 'SACD ISO 只读：请先分轨导出后再联网匹配' });
+      return;
+    }
+    AppLog.info(`联网匹配：${t.artist} - ${t.title}`);
+    promptAction.showToast({ message: '正在联网检索候选…' });
+    const res: MatchResult = await MetadataMatcher.match(t, this.matchSettings);
+    this.showMatchDialog(t, res.candidates);
     if (res.candidates.length == 0) {
       promptAction.showToast({ message: '未找到候选，可检查网络后重试' });
     }
+  }
+
+  private viewCandidatesFor(t: Track): void {
+    if (t.id == 0) {
+      promptAction.showToast({ message: '先选择一首曲目' });
+      return;
+    }
+    const cached: MatchCandidate[] = [];
+    for (const p of this.pendingMatches) {
+      if (p.trackId == t.id) {
+        cached.push(p.candidate);
+      }
+    }
+    if (cached.length > 0) {
+      this.showMatchDialog(t, cached);
+      return;
+    }
+    this.openMatchFor(t);
+  }
+
+  private async confirmBestMatch(t: Track): Promise<void> {
+    if (t.id == 0) {
+      promptAction.showToast({ message: '先选择一首曲目' });
+      return;
+    }
+    if (t.isCueChild == 1 || t.ext.toLowerCase() == '.iso') {
+      promptAction.showToast({ message: 'CUE 子轨 / SACD ISO 请先分轨再确认匹配' });
+      return;
+    }
+    const cached: MatchCandidate[] = [];
+    for (const p of this.pendingMatches) {
+      if (p.trackId == t.id) {
+        cached.push(p.candidate);
+      }
+    }
+    let cand: MatchCandidate | undefined = cached.length > 0 ? cached[0] : undefined;
+    if (cand == undefined) {
+      promptAction.showToast({ message: '正在检索最佳候选…' });
+      const res: MatchResult = await MetadataMatcher.match(t, this.matchSettings);
+      if (res.candidates.length == 0) {
+        promptAction.showToast({ message: '未找到候选，可检查网络后重试' });
+        return;
+      }
+      cand = res.candidates[0];
+      if (cand.confidence < this.matchSettings.threshold) {
+        this.showMatchDialog(t, res.candidates);
+        promptAction.showToast({
+          message: `最佳候选 ${Math.round(cand.confidence * 100)}% 低于阈值，请手动选择`
+        });
+        return;
+      }
+    } else if (cand.confidence < this.matchSettings.threshold) {
+      this.showMatchDialog(t, cached);
+      promptAction.showToast({
+        message: `待确认候选 ${Math.round(cand.confidence * 100)}%，请手动选择`
+      });
+      return;
+    }
+    await this.applyCandidateFor(t, cand);
+    this.pendingMatches = this.pendingMatches.filter((p: PendingMatch) => p.trackId != t.id);
   }
 
   private async applyCandidateFor(t: Track, cand: MatchCandidate): Promise<void> {
@@ -1294,13 +1943,22 @@ struct Index {
     this.selectTrackById(t.id);
   }
 
-  private async startAuto(): Promise<void> {
+  private async startAuto(selectionOnly: boolean = false): Promise<void> {
     if (this.autoBusy) {
       return;
     }
     const picked = this.pickedTracks();
-    const tracks = picked.length > 1 ? picked :
-      (this.filtered.length > 0 ? this.filtered.slice() : this.allTracks.slice());
+    let tracks: Track[] = [];
+    if (selectionOnly) {
+      tracks = picked.length > 0 ? picked : (this.selectedTrack.id != 0 ? [this.selectedTrack] : []);
+      if (tracks.length == 0) {
+        promptAction.showToast({ message: '先选择要处理的曲目' });
+        return;
+      }
+    } else {
+      tracks = picked.length > 1 ? picked :
+        (this.filtered.length > 0 ? this.filtered.slice() : this.allTracks.slice());
+    }
     if (tracks.length == 0) {
       promptAction.showToast({ message: '曲库为空' });
       return;
@@ -1312,7 +1970,7 @@ struct Index {
     this.autoText = '准备联网匹配…';
     this.statusText = '全自动匹配中';
     const ctx = getContext(this) as common.UIAbilityContext;
-    AppLog.info(`一键全自动：${tracks.length} 首${picked.length > 1 ? '（多选）' : ''}`);
+    AppLog.info(`${selectionOnly ? '仅处理选中项' : '一键全自动'}：${tracks.length} 首`);
     const rep: AutoReport = await AutoRunner.run(ctx, tracks, this.autoOptions(),
       (done: number, total: number, text: string) => {
         this.autoDone = done;
@@ -1549,7 +2207,7 @@ struct Index {
     let failed = 0;
     this.statusText = '去除标题序号';
     for (const t of list) {
-      if (t.isCueChild == 1) {
+      if (t.isCueChild == 1 || t.ext.toLowerCase() == '.iso') {
         continue;
       }
       const title = TitleCleaner.stripNumber(t.title);
@@ -1633,6 +2291,61 @@ struct Index {
     }
   }
 
+  // 撤销本地修改：不写文件，只重新读取磁盘标签覆盖数据库中的显示/匹配结果
+  private async revertLocalChanges(target: Track): Promise<void> {
+    let list = this.pickedTracks();
+    if (target.id != 0 && !list.some((x: Track) => x.id == target.id)) {
+      list = [target];
+    }
+    list = list.filter((x: Track) => x.isCueChild != 1 && x.ext.toLowerCase() != '.iso');
+    if (list.length == 0) {
+      promptAction.showToast({ message: '先选择要撤销的曲目' });
+      return;
+    }
+    this.statusText = '撤销本地修改';
+    let ok = 0;
+    let failed = 0;
+    for (const t of list) {
+      try {
+        const f = fs.openSync(t.path, fs.OpenMode.READ_ONLY);
+        let meta = new Meta();
+        try {
+          meta = TagParser.parse(f, t.ext.toLowerCase(), t.sizeBytes);
+        } finally {
+          fs.closeSync(f);
+        }
+        t.title = meta.title != '' ? meta.title : t.fileName.replace(t.ext, '');
+        t.artist = meta.artist;
+        t.album = meta.album;
+        t.albumartist = meta.albumartist;
+        t.genre = meta.genre;
+        t.year = meta.year;
+        t.trackNo = meta.trackNo;
+        t.discNo = meta.discNo;
+        t.healthStatus = meta.healthHint != '' ? 'warn' : 'ok';
+        t.healthDetail = meta.healthHint;
+        refreshSearchBlob(t);
+        const saved = await Db.updateTrack(t);
+        if (saved) {
+          ok++;
+        } else {
+          failed++;
+        }
+      } catch (e) {
+        failed++;
+      }
+    }
+    this.statusText = '就绪';
+    await this.refresh();
+    if (list.length > 0) {
+      this.selectTrackById(list[0].id);
+    }
+    AppLog.info(`撤销本地修改：重新读取 ${ok} 首${failed > 0 ? ` · 失败 ${failed}` : ''}`);
+    promptAction.showToast({
+      message: ok > 0 ? `已重新读取 ${ok} 首文件标签` : `重新读取失败 ${failed} 首`
+    });
+  }
+
   private async exportReport(): Promise<void> {
     const ctx = getContext(this) as common.UIAbilityContext;
     const res: ReportResult = await ReportService.export(ctx, this.allTracks);
@@ -1642,6 +2355,26 @@ struct Index {
     if (res.ok) {
       AppLog.info(`报表已导出：${res.path}`);
       promptAction.showToast({ message: `报表已导出：${res.path}` });
+    } else {
+      promptAction.showToast({ message: `导出失败：${res.message}` });
+    }
+  }
+
+  private async exportLog(): Promise<void> {
+    const text = AppLog.text();
+    if (text.trim() == '') {
+      promptAction.showToast({ message: '暂无运行日志' });
+      return;
+    }
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const name = `运行日志_${Date.now()}.txt`;
+    const res = await ReportService.saveText(ctx, name, `音序管家 v${APP_VERSION}\r\n${text}`);
+    if (res.canceled) {
+      return;
+    }
+    if (res.ok) {
+      AppLog.info(`运行日志已导出：${res.path}`);
+      promptAction.showToast({ message: `运行日志已导出：${res.path}` });
     } else {
       promptAction.showToast({ message: `导出失败：${res.message}` });
     }
@@ -1694,7 +2427,7 @@ struct Index {
       children = this.allTracks.filter((x: Track) => x.isCueChild == 1);
     }
     if (children.length == 0) {
-      promptAction.showToast({ message: '没有可导出的 CUE 子轨' });
+      promptAction.showToast({ message: '没有可导出的子轨（CUE / SACD）' });
       return;
     }
     const dlg = new CustomDialogController({
@@ -1739,6 +2472,19 @@ struct Index {
     gradient.addColorStop(0.55, T.BASE);
     gradient.addColorStop(1, bottom);
     ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, w, h);
+
+    // 低透明度径向光晕：让深色面板叠出玻璃质感，而不是一整块纯色
+    const glowA = ctx.createRadialGradient(w * 0.16, h * 0.02, 0, w * 0.16, h * 0.02, h * 0.62);
+    glowA.addColorStop(0, T.rgba(T.ACCENT, T.LIGHT ? 0.10 : 0.17));
+    glowA.addColorStop(0.55, T.rgba(T.ACCENT, T.LIGHT ? 0.03 : 0.05));
+    glowA.addColorStop(1, T.rgba(T.ACCENT, 0));
+    ctx.fillStyle = glowA;
+    ctx.fillRect(0, 0, w, h);
+    const glowB = ctx.createRadialGradient(w * 0.92, h * 0.92, 0, w * 0.92, h * 0.92, h * 0.68);
+    glowB.addColorStop(0, T.rgba(T.CYAN, T.LIGHT ? 0.07 : 0.12));
+    glowB.addColorStop(1, T.rgba(T.CYAN, 0));
+    ctx.fillStyle = glowB;
     ctx.fillRect(0, 0, w, h);
 
     if (T.PATTERN == 'grid') {
@@ -1963,13 +2709,13 @@ struct Index {
               this.saveSettings(d);
             },
             onPreviewOpacity: (v: number) => {
-              this.uiOpacity = v;
+              this.uiOpacity = Math.max(25, Math.min(100, Math.round(v)));
             },
             onManageRoots: () => {
               this.openRootsDialog();
             },
             onOpenEq: () => {
-              router.pushUrl({ url: 'pages/EqPage' });
+              WindowUtil.openPage('pages/EqPage', 1000, 700);
             }
           })
         }
@@ -2048,8 +2794,18 @@ struct Index {
           version: APP_VERSION,
           statusText: this.statusText,
           uiOpacity: this.uiOpacity,
+          maximized: this.mainMaximized,
           onOpacityChange: (v: number) => {
-            this.uiOpacity = v;
+            this.applyOpacity(v);
+          },
+          onMinimize: () => {
+            this.minimizeMainWin();
+          },
+          onMaximizeToggle: () => {
+            this.toggleMainMaximize();
+          },
+          onClose: () => {
+            this.closeMainWin();
           }
         })
 
@@ -2063,7 +2819,7 @@ struct Index {
               this.importFiles();
             },
             onAddFolder: () => {
-              this.openRootsDialog();
+              this.pickFolder();
             },
             onRemove: () => {
               this.removeSelection();
@@ -2099,10 +2855,10 @@ struct Index {
               this.openCueSplitFor(this.selectedTrack);
             },
             onHealth: () => {
-              router.pushUrl({ url: 'pages/HealthPage' });
+              WindowUtil.openPage('pages/HealthPage', 860, 760);
             },
             onTools: () => {
-              router.pushUrl({ url: 'pages/LibraryToolsPage' });
+              WindowUtil.openPage('pages/LibraryToolsPage', 860, 760);
             },
             onCover: () => {
               const t = this.currentTarget();
@@ -2117,10 +2873,13 @@ struct Index {
               }
             },
             onEq: () => {
-              router.pushUrl({ url: 'pages/EqPage' });
+              WindowUtil.openPage('pages/EqPage', 1000, 700);
             },
             onTogglePanel: () => {
               this.rightVisible = !this.rightVisible;
+            },
+            onCommand: () => {
+              this.openCommandPalette();
             },
             onMore: (key: string) => {
               this.onMore(key);
@@ -2129,7 +2888,7 @@ struct Index {
 
           Row({ space: 8 }) {
             StatCard({
-              label: '曲目总数', value: this.stats.count, color: T.FG,
+              label: '曲目总数', value: this.allTracks.length, color: T.FG,
               onTap: () => {
                 this.verdictFilter = 'all';
                 this.verdictIndex = 0;
@@ -2158,7 +2917,7 @@ struct Index {
               }
             })
             StatCard({
-              label: '待确认', value: this.pendingMatches.length + this.warnCount, color: T.WARN,
+              label: '待确认', value: this.pendingMatches.length + this.suspectCount, color: T.WARN,
               onTap: () => {
                 this.verdictFilter = 'unknown';
                 this.applyFilter();
@@ -2229,6 +2988,15 @@ struct Index {
                 selectedIds: this.selectedIds,
                 playingPath: this.playingPath,
                 compact: this.windowWidth < 1280,
+                showAlbum: this.appSettings.showAlbum,
+                showFormat: this.appSettings.showFormat,
+                showSpec: this.appSettings.showSpec,
+                showConfidence: this.appSettings.showConfidence,
+                showDuration: this.appSettings.showDuration,
+                showFileName: this.appSettings.showFileName,
+                showYear: this.appSettings.showYear,
+                showKind: this.appSettings.showKind,
+                showSource: this.appSettings.showSource,
                 onSelect: (t: Track, i: number, ctrl: boolean, shift: boolean) => {
                   this.handleRowSelect(t, i, ctrl, shift);
                 },
@@ -2252,6 +3020,18 @@ struct Index {
                 },
                 onUndoEdit: (t: Track) => {
                   this.undoTagEdits(t);
+                },
+                onRevert: (t: Track) => {
+                  this.revertLocalChanges(t);
+                },
+                onRenameDir: (t: Track) => {
+                  this.openRenameDir(t);
+                },
+                onCandidates: (t: Track) => {
+                  this.viewCandidatesFor(t);
+                },
+                onConfirmMatch: (t: Track) => {
+                  this.confirmBestMatch(t);
                 },
                 onQuarantine: (t: Track) => {
                   this.quarantineOne(t);
@@ -2292,6 +3072,28 @@ struct Index {
           .layoutWeight(1)
           .alignItems(VerticalAlign.Top)
 
+          if (this.queueVisible) {
+            QueuePanel({
+              tracks: this.queueTracks,
+              currentIndex: this.queueIndex,
+              onJump: (i: number) => {
+                this.queueJump(i);
+              },
+              onRemove: (i: number) => {
+                this.queueRemove(i);
+              },
+              onClear: () => {
+                this.queueClear();
+              },
+              onSave: (name: string): boolean => {
+                return this.queueSaveAs(name);
+              },
+              onClose: () => {
+                this.queueVisible = false;
+              }
+            })
+          }
+
           PlayerBar({
             track: this.playingTrack,
             coverPath: this.playingCover,
@@ -2303,6 +3105,14 @@ struct Index {
             eqOn: this.eqOn,
             signalOn: this.signalVisible,
             miniOn: this.miniOn,
+            queueOpen: this.queueVisible,
+            muted: this.muted,
+            onQueue: () => {
+              this.toggleQueuePanel();
+            },
+            onMute: () => {
+              this.toggleMute();
+            },
             onToggle: () => {
               this.togglePlay();
             },
@@ -2320,8 +3130,7 @@ struct Index {
               this.engine.seek(ms);
             },
             onVolume: (v: number) => {
-              this.appSettings.volume = v;
-              this.engine.setVolume(v / 100);
+              this.applyVolume(v);
             },
             onMode: () => {
               this.cycleMode();
@@ -2331,10 +3140,10 @@ struct Index {
               this.updateSignal();
             },
             onEq: () => {
-              router.pushUrl({ url: 'pages/EqPage' });
+              WindowUtil.openPage('pages/EqPage', 1000, 700);
             },
             onMini: () => {
-              this.miniOn = !this.miniOn;
+              this.toggleMini();
             }
           })
 
@@ -2364,9 +3173,10 @@ struct Index {
 
         StatusBar({
           hint: this.scanning ? this.scanText :
-            this.selectedTrack.id == 0 ? '拖入音频文件，或点击「添加文件」' :
-              this.selectedIds.length > 1 ? `已选 ${this.selectedIds.length} 首 · ${this.selectedTrack.path}` :
-                `${this.selectedTrack.path}`,
+            this.allTracks.length == 0 ? '拖入音频文件，或点击「添加文件」' :
+              this.selectedTrack.id == 0 ? this.statusText :
+                this.selectedIds.length > 1 ? `已选 ${this.selectedIds.length} 首 · ${this.selectedTrack.path}` :
+                  `${this.selectedTrack.path}`,
           right: `共 ${this.stats.count} 首 · ${fmtDuration(this.stats.totalMs)} · ${fmtSize(this.stats.totalSize)}`,
           kernel: this.kernelLabel(),
           badge: this.eqOn ? 'EQ' : ''
@@ -2374,48 +3184,57 @@ struct Index {
       }
       .width('100%')
       .height('100%')
-      .opacity(this.uiOpacity / 100)
+      .visibility(this.miniFallback ? Visibility.Hidden : Visibility.Visible)
 
-      if (this.miniOn) {
-        Column() {
-          MiniOverlay({
-            track: this.playingTrack,
-            coverPath: this.playingCover,
-            playing: this.npPlaying,
-            playPosition: this.npPos,
-            duration: this.npDur,
-            uiOpacity: this.uiOpacity,
-            lyrics: this.lyrics,
-            lyricIndex: this.lyricIndex,
-            onToggle: () => {
-              this.togglePlay();
-            },
-            onPrev: () => {
-              this.engine.prevByUser();
-            },
-            onNext: () => {
-              this.engine.nextByUser();
-            },
-            onSeek: (ms: number) => {
-              this.engine.seek(ms);
-            },
-            onOpacity: (v: number) => {
-              this.uiOpacity = v;
-            },
-            onExpand: () => {
+      if (this.miniFallback) {
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor('#66000000')
+            .onClick(() => {
+              this.miniFallback = false;
               this.miniOn = false;
-            },
-            onClose: () => {
-              this.miniOn = false;
-            }
-          })
+            })
+          Column() {
+            MiniOverlay({
+              track: this.playingTrack,
+              coverPath: this.playingCover,
+              playing: this.npPlaying,
+              playPosition: this.npPos,
+              duration: this.npDur,
+              uiOpacity: this.uiOpacity,
+              lyrics: this.lyrics,
+              lyricIndex: this.lyricIndex,
+              onToggle: () => {
+                this.togglePlay();
+              },
+              onPrev: () => {
+                this.engine.prevByUser();
+              },
+              onNext: () => {
+                this.engine.nextByUser();
+              },
+              onSeek: (ms: number) => {
+                this.engine.seek(ms);
+              },
+              onOpacity: (v: number) => {
+                this.applyOpacity(v);
+              },
+              onExpand: () => {
+                this.miniOn = false;
+                this.miniFallback = false;
+              },
+              onClose: () => {
+                this.miniOn = false;
+                this.miniFallback = false;
+              }
+            })
+          }
+          .padding(18)
         }
         .width('100%')
         .height('100%')
-        .padding(18)
-        .justifyContent(FlexAlign.End)
-        .alignItems(HorizontalAlign.End)
-        .hitTestBehavior(HitTestMode.Transparent)
       }
 
       if (this.autoBusy || this.authBusy) {
@@ -2483,21 +3302,51 @@ struct Index {
         .alignItems(HorizontalAlign.Center)
         .backgroundColor('#99000000')
       }
+
+      if (this.dragActive) {
+        Column({ space: 8 }) {
+          Text('松开以导入音频')
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(T.ACCENT)
+          Text('文件将拷贝到曲库目录并自动扫描；文件夹请用「添加文件夹」')
+            .fontSize(10)
+            .fontColor(T.FG_DIM)
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(T.alpha(T.BASE, '66'))
+        .border({ width: 2, color: T.ACCENT })
+        .hitTestBehavior(HitTestMode.None)
+      }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(T.BASE)
+    .borderRadius(14)
+    .clip(true)
+    .border({ width: 1, color: T.LINE_SOFT })
+    .backgroundColor(Color.Transparent)
+    .opacity(this.uiOpacity / 100)
+    .animation({ duration: 140, curve: Curve.EaseOut })
+    .onDragEnter((event: DragEvent) => {
+      event.setResult(DragResult.DROP_ENABLED);
+      this.dragActive = true;
+    })
+    .onDragMove((event: DragEvent) => {
+      event.setResult(DragResult.DROP_ENABLED);
+    })
+    .onDragLeave(() => {
+      this.dragActive = false;
+    })
+    .onDrop((event: DragEvent) => {
+      this.onLibraryDrop(event);
+    })
     .onAreaChange((oldArea: Area, newArea: Area) => {
       const width = Number(newArea.width);
       if (!isNaN(width) && width > 0) {
         this.windowWidth = width;
-        if (width < 1180 && !this.narrowHandled) {
-          this.rightVisible = false;
-          this.narrowHandled = true;
-        } else if (width >= 1180 && this.narrowHandled) {
-          this.rightVisible = true;
-          this.narrowHandled = false;
-        }
       }
     })
   }

@@ -67,11 +67,15 @@ export class ThemePalette {
 function dark(name: string, accent: string, base: string, tint: string, accentHover: string,
   cyan: string, onAccent: string, pattern: string, fg: string, fgDim: string, fgMute: string,
   line: string, lineSoft: string, ok: string, warn: string, bad: string, purple: string): ThemePalette {
+  // 现代深色层级：base → panel → card 逐级提亮，输入框回落到 base 与强调色之间，
+  // 悬停/激活用白色微叠，保证面板之间有可读的层次差而不是一片同色。
+  const panel = T.mix(base, tint, 0.72);
+  const card = T.mix(panel, '#FFFFFF', 0.05);
   return new ThemePalette(
     name, false, pattern, base,
-    T.mix(tint, '#000000', 0.08), T.mix(tint, '#FFFFFF', 0.03),
-    T.mix(base, tint, 0.55), T.mix(tint, '#FFFFFF', 0.06), T.mix(tint, '#FFFFFF', 0.11),
-    T.mix(base, tint, 0.50), T.mix(base, '#000000', 0.12),
+    panel, card,
+    T.mix(base, tint, 0.46), T.mix(panel, '#FFFFFF', 0.07), T.mix(panel, '#FFFFFF', 0.13),
+    T.mix(base, panel, 0.55), T.mix(base, '#000000', 0.12),
     line, lineSoft, fg, fgDim, fgMute,
     accent, accentHover, T.alpha(accent, '80'), cyan,
     ok, warn, bad, purple, onAccent, onAccent

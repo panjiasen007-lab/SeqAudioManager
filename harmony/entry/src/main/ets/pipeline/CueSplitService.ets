@@ -207,7 +207,13 @@ export class CueSplitService {
       }
       const no = t.cueTrackNo > 0 ? t.cueTrackNo : t.trackNo;
       const title = titleOnly(t.title, no);
-      const ext = options.format == 'wav' ? '.wav' : '.flac';
+      const isSacd = src.toLowerCase().endsWith('.iso');
+      if (options.format == 'dsf' && !isSacd) {
+        rep.failed++;
+        rep.errors.push(`${t.fileName}：DSF 位完美导出仅支持 SACD 子轨`);
+        continue;
+      }
+      const ext = options.format == 'dsf' ? '.dsf' : (options.format == 'wav' ? '.wav' : '.flac');
       let dst = `${dir}/${pad2(no)} - ${safeName(title)}${ext}`;
       let n = 1;
       while (fileExists(dst)) {
@@ -217,7 +223,7 @@ export class CueSplitService {
       const startMs = t.cueStartMs;
       let endMs = t.cueEndMs > startMs ? t.cueEndMs : startMs + t.durationMs;
       // 预间隙裁剪：本轨在下一轨 INDEX 00 截止；间隙里检测到真实音频则保留
-      if (options.trimPregap && ti + 1 < ordered.length) {
+      if (options.format != 'dsf' && options.trimPregap && ti + 1 < ordered.length) {
         const nxt = ordered[ti + 1];
         if (nxt.cuePath == src && nxt.cuePregapMs > startMs && nxt.cuePregapMs < nxt.cueStartMs) {
           const hasAudio = await CueSplitService.pregapHasAudio(ctx, src,
@@ -240,10 +246,15 @@ export class CueSplitService {
         rep.errors.push(`${t.fileName}：CUE 时长无效`);
         continue;
       }
-      const bitDepth = t.bitDepth >= 24 ? 24 : 16;
+      // SACD 子轨按 24bit 导出（解码输出 176.4kHz PCM）；普通 CUE 沿用源位深
+      const bitDepth = t.ext == '.iso' ? 24 : (t.bitDepth >= 24 ? 24 : 16);
       let code = -1;
       try {
-        code = core.exportSegment(src, startMs, durationMs, options.format, bitDepth, dst);
+        if (options.format == 'dsf') {
+          code = core.exportDsdSegment(src, startMs, durationMs, dst);
+        } else {
+          code = core.exportSegment(src, startMs, durationMs, options.format, bitDepth, dst);
+        }
       } catch (e) {
         code = -1;
       }

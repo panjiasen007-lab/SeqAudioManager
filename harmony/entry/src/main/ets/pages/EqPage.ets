@@ -3,6 +3,7 @@ import { T } from '../theme/Tokens';
 import { EqPreset, EqPresets, EqState } from '../eq/EqPresets';
 import { NativePlayer } from '../player/NativePlayer';
 import { AppLog } from '../utils/AppLog';
+import { WindowUtil } from '../utils/WindowUtil';
 
 const BAR_H = 190;
 
@@ -310,7 +311,7 @@ struct EqPage {
           .borderRadius(8)
           .onClick(() => {
             this.flushTimers();
-            router.back();
+            WindowUtil.closeSelf('pages/EqPage');
           })
       }
       .width('100%')

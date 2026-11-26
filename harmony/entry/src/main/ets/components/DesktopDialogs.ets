@@ -1,5 +1,9 @@
 // 桌面版三个弹层的鸿蒙复刻：播放列表 / 关于 / 扫描根目录。
 import { common } from '@kit.AbilityKit';
+import { fileUri } from '@kit.CoreFileKit';
+import fs from '@ohos.file.fs';
+import picker from '@ohos.file.picker';
+import { promptAction } from '@kit.ArkUI';
 import { T } from '../theme/Tokens';
 import { Playlist, PlaylistStore } from '../playlist/PlaylistStore';
 import { SectionHeader } from './DesktopUI';
@@ -14,6 +18,7 @@ export struct PlaylistDialog {
   };
   @State private items: Playlist[] = [];
   @State private selectedName: string = '';
+  @State private selectedIndex: number = -1;
   @State private nameInput: string = '';
   @State private hint: string = '';
 
@@ -127,6 +132,22 @@ export struct PlaylistDialog {
     const updated = this.selected();
     if (updated) {
       PlaylistStore.create(this.ctx(), updated.name, updated.paths);
+    }
+  }
+
+  private removeTrackAt(index: number): void {
+    const p = this.selected();
+    if (!p || index < 0 || index >= p.paths.length) {
+      return;
+    }
+    const next = p.paths.slice();
+    next.splice(index, 1);
+    if (PlaylistStore.create(this.ctx(), p.name, next)) {
+      this.hint = `已从「${p.name}」移除 1 首`;
+      this.selectedIndex = -1;
+      this.reload();
+    } else {
+      this.hint = '移除失败：文件不可写';
     }
   }
 
@@ -271,6 +292,11 @@ export struct PlaylistDialog {
                   }
                   .width('100%')
                   .height(28)
+                  .backgroundColor(this.selectedIndex == i ? T.CHIP_ON_BG : Color.Transparent)
+                  .borderRadius(5)
+                  .onClick(() => {
+                    this.selectedIndex = i;
+                  })
                 }
               }, (p: string, i: number) => `${p}-${i}`)
             }
@@ -299,6 +325,17 @@ export struct PlaylistDialog {
               .borderRadius(6)
               .onClick(() => {
                 this.move(1);
+              })
+            Button('从列表移除')
+              .height(26)
+              .fontSize(10)
+              .fontColor(T.BAD)
+              .backgroundColor(T.DANGER_SOFT_BG)
+              .borderRadius(6)
+              .enabled(this.selectedIndex >= 0)
+              .opacity(this.selectedIndex >= 0 ? 1 : 0.42)
+              .onClick(() => {
+                this.removeTrackAt(this.selectedIndex);
               })
           }
         }
@@ -369,13 +406,165 @@ export struct PlaylistDialog {
   }
 }
 
+class PaletteItem {
+  key: string = '';
+  label: string = '';
+  group: string = '';
+
+  constructor(key: string, label: string, group: string) {
+    this.key = key;
+    this.label = label;
+    this.group = group;
+  }
+}
+
+@CustomDialog
+export struct CommandPalette {
+  controller: CustomDialogController;
+  onClose: () => void = () => {
+  };
+  onRun: (key: string) => void = () => {
+  };
+  @State private query: string = '';
+  private items: PaletteItem[] = [
+    new PaletteItem('scan', '扫描曲库', '曲库'),
+    new PaletteItem('import', '添加文件…', '曲库'),
+    new PaletteItem('browseimport', '浏览文件导入…', '曲库'),
+    new PaletteItem('playlists', '播放列表…', '曲库'),
+    new PaletteItem('health', '曲库体检…', '曲库'),
+    new PaletteItem('auto', '一键全自动（当前列表）', '处理'),
+    new PaletteItem('autoselected', '仅处理选中项', '处理'),
+    new PaletteItem('candidates', '查看候选匹配…', '处理'),
+    new PaletteItem('confirmmatch', '确认匹配（采纳最佳候选）', '处理'),
+    new PaletteItem('revert', '撤销本地修改', '处理'),
+    new PaletteItem('exportlog', '导出运行日志…', '处理'),
+    new PaletteItem('auth', '真假无损鉴定', '处理'),
+    new PaletteItem('cleanup', '清理假无损', '处理'),
+    new PaletteItem('rename', '重命名预览…', '处理'),
+    new PaletteItem('renamedir', '按标签重命名本目录…', '处理'),
+    new PaletteItem('tools', '批量整理…', '处理'),
+    new PaletteItem('report', '导出处理报表…', '处理'),
+    new PaletteItem('stripno', '去除标题序号', '处理'),
+    new PaletteItem('exportcovers', '批量导出封面…', '处理'),
+    new PaletteItem('foldercovers', '生成文件夹封面', '处理'),
+    new PaletteItem('queuepanel', '播放队列', '播放'),
+    new PaletteItem('mute', '静音 / 取消静音', '播放'),
+    new PaletteItem('eq', '均衡器…', '播放'),
+    new PaletteItem('spectrum', '查看频谱…', '查看'),
+    new PaletteItem('cuesplit', '分轨导出（CUE / SACD）…', '查看'),
+    new PaletteItem('quarantine', '隔离区管理…', '查看'),
+    new PaletteItem('cover', '封面搜索…', '查看'),
+    new PaletteItem('lyrics', '歌词…', '查看'),
+    new PaletteItem('about', '关于音序管家…', '帮助')
+  ];
+
+  private filtered(): PaletteItem[] {
+    const q = this.query.trim().toLowerCase();
+    if (q == '') {
+      return this.items;
+    }
+    return this.items.filter((it: PaletteItem) =>
+      it.label.toLowerCase().indexOf(q) >= 0 || it.key.indexOf(q) >= 0);
+  }
+
+  build() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Text('命令面板')
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(T.FG)
+        Text('输入关键字筛选动作')
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+        Blank()
+        Text('Esc 关闭')
+          .fontSize(9)
+          .fontColor(T.FG_MUTE)
+      }
+      .width('100%')
+
+      TextInput({ text: this.query, placeholder: '搜索动作，例如：队列 / 匹配 / 分轨' })
+        .width('100%')
+        .height(34)
+        .fontSize(12)
+        .fontColor(T.FG)
+        .placeholderColor(T.FG_MUTE)
+        .backgroundColor(T.INPUT)
+        .borderRadius(8)
+        .onChange((v: string) => {
+          this.query = v;
+        })
+
+      List() {
+        ForEach(this.filtered(), (it: PaletteItem) => {
+          ListItem() {
+            Row({ space: 10 }) {
+              Text(it.group)
+                .width(42)
+                .fontSize(9)
+                .fontColor(T.FG_MUTE)
+              Text(it.label)
+                .fontSize(12)
+                .fontColor(T.FG_DIM)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .layoutWeight(1)
+              Text('›')
+                .fontSize(12)
+                .fontColor(T.FG_MUTE)
+            }
+            .width('100%')
+            .height(32)
+            .padding({ left: 10, right: 10 })
+            .borderRadius(6)
+            .onClick(() => {
+              this.onClose();
+              this.onRun(it.key);
+            })
+          }
+        }, (it: PaletteItem) => it.key)
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .scrollBar(BarState.Auto)
+      .backgroundColor(T.INPUT)
+      .borderRadius(8)
+      .padding(4)
+
+      Row() {
+        Text(this.filtered().length == 0 ? '没有匹配的动作' : `${this.filtered().length} 个动作`)
+          .fontSize(9)
+          .fontColor(T.FG_MUTE)
+        Blank()
+        Button('关闭')
+          .height(28)
+          .fontSize(10)
+          .fontColor(T.FG_DIM)
+          .backgroundColor(T.GHOST_BG)
+          .borderRadius(7)
+          .onClick(() => {
+            this.onClose();
+          })
+      }
+      .width('100%')
+    }
+    .width(560)
+    .height(460)
+    .padding(14)
+    .backgroundColor(T.POPUP_BG)
+    .borderRadius(14)
+    .border({ width: 1, color: T.LINE })
+  }
+}
+
 @CustomDialog
 export struct AboutDialog {
   controller: CustomDialogController;
   onClose: () => void = () => {
   };
   @State private tab: number = 0;
-  private version: string = '1.3.0';
+  private version: string = '1.3.7';
 
   @Builder
   tabButton(label: string, index: number) {
@@ -456,7 +645,7 @@ export struct AboutDialog {
             this.paragraph('数据去哪了',
               '全部留在本机。歌词与封面只在用户主动点击时访问 lrclib / iTunes 等公开接口，不上传音频或个人信息；断网可用。')
             this.paragraph('鸿蒙版边界',
-              '鸿蒙版不含联网元数据匹配、真假无损鉴定、频谱、SACD ISO、CUE 分轨导出与 WASAPI/ASIO 独占；这些能力只在 Windows 桌面版提供。')
+              '已实现联网元数据匹配、真假无损鉴定/频谱、CUE 与 SACD 分轨导出、31 段均衡器；WASAPI/ASIO 独占与系统托盘不在鸿蒙版范围。')
           } else if (this.tab == 1) {
             this.paragraph('GNU General Public License v3.0',
               '本软件为自由软件：你可以依据自由软件基金会发布的 GNU GPL v3 条款重新分发或修改它。分发时须提供完整源码并保留同一授权。本软件不提供任何担保。')
@@ -523,20 +712,47 @@ export struct ScanRootsDialog {
   onScan: () => void = () => {
   };
   @State private list: string[] = [];
-  @State private input: string = '';
 
   aboutToAppear(): void {
     this.list = this.roots.slice();
   }
 
-  private add(): void {
-    const cleaned = this.input.trim().replace(/\\/g, '/');
-    if (cleaned == '' || this.list.indexOf(cleaned) >= 0) {
+  // 系统文件夹选择器：与 Windows 版「添加文件夹」一致的浏览体验
+  private async browse(): Promise<void> {
+    let picked = '';
+    try {
+      const dp = new picker.DocumentViewPicker();
+      const opts = new picker.DocumentSelectOptions();
+      opts.selectMode = picker.DocumentSelectMode.FOLDER;
+      opts.maxSelectNumber = 1;
+      const uris = await dp.select(opts);
+      if (!uris || uris.length == 0) {
+        return;
+      }
+      picked = uris[0];
+    } catch (e) {
       return;
     }
-    this.list.push(cleaned);
+    let path = picked;
+    if (path.startsWith('file://')) {
+      try {
+        path = new fileUri.FileUri(path).path;
+      } catch (e) {
+        path = decodeURIComponent(path.replace(/^file:\/\//, ''));
+      }
+    }
+    path = path.replace(/\\/g, '/').replace(/\/+$/, '');
+    try {
+      fs.listFileSync(path, { recursion: false });
+    } catch (e) {
+      promptAction.showToast({ message: '无法读取该目录，请改用「添加文件」导入' });
+      return;
+    }
+    if (this.list.indexOf(path) >= 0) {
+      return;
+    }
+    this.list.push(path);
     this.list = this.list.slice();
-    this.input = '';
   }
 
   private remove(root: string): void {
@@ -557,38 +773,29 @@ export struct ScanRootsDialog {
           .fontWeight(FontWeight.Bold)
           .fontColor(T.FG)
         Blank()
-        Text('沙箱内绝对路径')
+        Text('浏览选择目录')
           .fontSize(10)
           .fontColor(T.FG_MUTE)
       }
       .width('100%')
 
-      Text('鸿蒙第三方应用无法任意读取外部目录；外部音频请用「添加文件」导入到应用沙箱后再扫描。')
+      Text('点击下方按钮浏览并选择音乐文件夹；外部目录若受系统权限限制，可用「添加文件」导入到沙箱。')
         .fontSize(10)
         .fontColor(T.FG_MUTE)
         .lineHeight(16)
         .width('100%')
 
       Row({ space: 8 }) {
-        TextInput({ text: this.input, placeholder: '例如 /data/app/.../files/Music' })
+        Button('＋ 浏览添加文件夹…')
           .layoutWeight(1)
-          .height(32)
-          .fontSize(11)
-          .fontColor(T.FG)
-          .placeholderColor(T.FG_MUTE)
-          .backgroundColor(T.INPUT)
-          .borderRadius(6)
-          .onChange((v: string) => {
-            this.input = v;
-          })
-        Button('添加')
           .height(32)
           .fontSize(11)
           .fontColor(T.ACCENT)
           .backgroundColor(T.GHOST_BG)
-          .borderRadius(6)
+          .border({ width: 1, color: T.LINE_SOFT })
+          .borderRadius(T.R_BTN)
           .onClick(() => {
-            this.add();
+            this.browse();
           })
       }
       .width('100%')

@@ -22,6 +22,21 @@ export class SessionStore {
   private static lastSavedAt: number = 0;
   private static timer: number = -1;
 
+  // 会话音量独立键（0~1）；旧版与设置页共用 volume，需按量纲兼容
+  private static async loadVolume(): Promise<number> {
+    const raw = await Db.getSetting('session_volume', '');
+    let v = NaN;
+    if (raw != '') {
+      v = parseFloat(raw);
+    } else {
+      v = parseFloat(await Db.getSetting('volume', '1'));
+      if (!isNaN(v) && v > 1) {
+        v = v / 100;
+      }
+    }
+    return isNaN(v) ? 1 : Math.max(0, Math.min(1, v));
+  }
+
   static async load(): Promise<SessionSnapshot> {
     const s = new SessionSnapshot();
     const pathsRaw = await Db.getSetting('last_queue_json', '[]');
@@ -40,8 +55,8 @@ export class SessionStore {
     }
     const mode = parseInt(await Db.getSetting('play_mode', `${PlayMode.LOOP}`));
     s.playMode = isNaN(mode) ? PlayMode.LOOP : mode;
-    const vol = parseFloat(await Db.getSetting('volume', '1'));
-    s.volume = isNaN(vol) ? 1 : Math.max(0, Math.min(1, vol));
+    const vol = await SessionStore.loadVolume();
+    s.volume = vol;
     s.eqEnabled = (await Db.getSetting('eq_enabled', '0')) == '1';
     s.eqBandsJson = await Db.getSetting('eq_bands_json', '');
     s.outputMode = await Db.getSetting('output_mode', 'shared');
@@ -73,7 +88,7 @@ export class SessionStore {
     await Db.setSetting('last_track_id', snapshot.lastTrackPath);
     await Db.setSetting('last_position_ms', `${snapshot.lastPositionMs}`);
     await Db.setSetting('play_mode', `${snapshot.playMode}`);
-    await Db.setSetting('volume', `${snapshot.volume}`);
+    await Db.setSetting('session_volume', `${snapshot.volume}`);
     await Db.setSetting('session_saved_at', `${snapshot.savedAtMs}`);
     SessionStore.lastSavedAt = snapshot.savedAtMs;
   }

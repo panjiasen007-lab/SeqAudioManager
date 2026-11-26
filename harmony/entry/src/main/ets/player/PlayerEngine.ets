@@ -75,6 +75,8 @@ export class PlayerEngine {
   // 会话恢复时待定位的进度（首次加载完成后 seek）
   private pendingSeekMs: number = 0;
   private cueEndHandled: boolean = false;
+  // 播放器实际装载的队列下标（-1 表示未装载，队列编辑后据此重新装载）
+  private loadedIndex: number = -1;
 
   // 原生内核（FFmpeg + OH_AudioRenderer）状态
   private nativeMode: boolean = false;
@@ -211,6 +213,7 @@ export class PlayerEngine {
     }
     this.positionMs = begin;
     this.cueEndHandled = false;
+    this.loadedIndex = this.index;
     NativePlayer.start();
     this.playing = true;
     this.emit();
@@ -337,6 +340,7 @@ export class PlayerEngine {
         this.pendingSeekMs = 0;
         this.emit();
       }
+      this.loadedIndex = this.index;
       await av.play();
     } catch (e) {
       const err = e as BusinessError;
@@ -355,6 +359,7 @@ export class PlayerEngine {
   restoreQueue(tracks: Track[], startIndex: number, positionMs: number): void {
     this.queue = tracks.slice();
     this.index = startIndex >= 0 && startIndex < this.queue.length ? startIndex : -1;
+    this.loadedIndex = -1;
     this.pendingSeekMs = Math.max(0, Math.round(positionMs));
     const cur = this.current();
     this.positionMs = cur && cur.isCueChild == 1 ? cur.cueStartMs + this.pendingSeekMs : this.pendingSeekMs;
@@ -380,14 +385,79 @@ export class PlayerEngine {
     this.emit();
   }
 
+  // 批量追加（播放列表「追加」）：不打断当前播放与已装载状态
+  appendQueue(tracks: Track[]): void {
+    if (tracks.length == 0) {
+      return;
+    }
+    this.queue = this.queue.concat(tracks);
+    if (this.index < 0) {
+      this.index = 0;
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
   // 「加入队列」：追加到队尾
-  enqueue(track: Track): void {
-    if (this.queue.length == 0) {
+  enqueue(track: Track): void {    if (this.queue.length == 0) {
       this.queue = [track];
       this.index = 0;
     } else {
       this.queue.push(track);
     }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 队列面板：移除指定项，保持当前曲目/播放状态与索引一致
+  removeAt(i: number): void {
+    if (i < 0 || i >= this.queue.length) {
+      return;
+    }
+    const wasCurrent = i == this.index;
+    const wasPlaying = this.playing;
+    this.queue.splice(i, 1);
+    if (this.queue.length == 0) {
+      this.index = -1;
+      this.loadedIndex = -1;
+      this.positionMs = 0;
+      this.durationMs = 0;
+      this.pendingSeekMs = 0;
+      this.stop();
+    } else if (wasCurrent) {
+      this.index = Math.min(i, this.queue.length - 1);
+      this.loadedIndex = -1;
+      this.positionMs = 0;
+      if (wasPlaying) {
+        this.loadCurrent();
+      } else {
+        this.stop();
+      }
+    } else if (i < this.index) {
+      this.index--;
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 清空队列并停止播放
+  clearQueue(): void {
+    if (this.queue.length == 0) {
+      return;
+    }
+    this.queue = [];
+    this.index = -1;
+    this.loadedIndex = -1;
+    this.positionMs = 0;
+    this.durationMs = 0;
+    this.pendingSeekMs = 0;
+    this.stop();
     if (this.onSessionDirty) {
       this.onSessionDirty(true);
     }
@@ -424,8 +494,8 @@ export class PlayerEngine {
       return;
     }
     const av = this.av;
-    if (!av) {
-      // 恢复的队列尚未加载物理文件：首次点播时加载并在 prepared 后 seek 到断点
+    if (!av || this.loadedIndex != this.index) {
+      // 恢复的队列尚未装载，或队列编辑后当前项已变化：重新加载
       this.loadCurrent();
       return;
     }
@@ -546,6 +616,7 @@ export class PlayerEngine {
       }
     }
     this.closeFd();
+    this.loadedIndex = -1;
     this.playing = false;
     this.emit();
   }

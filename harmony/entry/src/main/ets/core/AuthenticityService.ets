@@ -508,9 +508,11 @@ export class AuthenticityService {
       if (appExt == '.iso') {
         res = new AuthenticityResult();
         res.verdict = VERDICT_UNKNOWN;
-        res.error = 'SACD ISO 为光盘镜像，需先分轨为 DSF/DFF 后鉴定';
+        res.error = 'SACD ISO 为光盘镜像，需先分轨导出为 FLAC/WAV 后鉴定';
         res.reasons.push(res.error);
-      } else if (appExt == '.mp3' || appExt == '.aac' || appExt == '.ogg') {
+      } else if (appExt == '.mp3' || appExt == '.aac' || appExt == '.ogg' || appExt == '.opus' ||
+        (appExt == '.m4a' && t.bitDepth <= 0)) {
+        // M4A 容器可能装 ALAC（无损）或 AAC（有损）：位深为 0 说明是 AAC，跳过鉴定
         res = new AuthenticityResult();
         res.verdict = VERDICT_UNKNOWN;
         res.error = `有损格式（${appExt.substring(1).toUpperCase()}），不做无损鉴定`;

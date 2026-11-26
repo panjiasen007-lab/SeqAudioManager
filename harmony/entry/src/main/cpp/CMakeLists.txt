@@ -25,6 +25,7 @@ add_library(seqaudio_core SHARED
   napi_init.cpp
   audio_engine.cpp
   audio_analysis.cpp
+  dsd_export.cpp
   dsp_chain.cpp)
 
 target_link_libraries(seqaudio_core PUBLIC

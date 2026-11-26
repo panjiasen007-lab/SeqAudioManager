@@ -188,8 +188,15 @@ export class CoverService {
         updated.channels = track.channels;
         updated.bitDepth = track.bitDepth;
         updated.bitrateKbps = track.bitrateKbps;
-        updated.sizeBytes = track.sizeBytes;
-        updated.mtimeMs = track.mtimeMs;
+        // 嵌入封面会改写文件：同步刷新大小/mtime，避免曲库显示旧值
+        try {
+          const st = fs.statSync(track.path);
+          updated.sizeBytes = st.size;
+          updated.mtimeMs = Math.round(st.mtime * 1000);
+        } catch (e) {
+          updated.sizeBytes = track.sizeBytes;
+          updated.mtimeMs = track.mtimeMs;
+        }
         updated.cuePath = track.cuePath;
         updated.isCueChild = track.isCueChild;
         updated.cueTrackNo = track.cueTrackNo;
@@ -205,7 +212,15 @@ export class CoverService {
         updated.metaSource = c.source;
         updated.metaCheckedAt = Date.now();
         await Db.updateTrack(updated);
+        // 同一物理文件的所有记录（含 CUE 子轨）统一刷新大小/mtime/封面
+        await Db.updateFileByPath(track.path, updated.sizeBytes, updated.mtimeMs, path);
         res.cachePath = path;
+        // 同步内存对象，封面页与详情卡立即显示新封面
+        track.coverBlobPath = path;
+        track.sizeBytes = updated.sizeBytes;
+        track.mtimeMs = updated.mtimeMs;
+        track.metaSource = c.source;
+        track.metaCheckedAt = updated.metaCheckedAt;
       }
     } catch (e) {
       const err = e as BusinessError;
@@ -259,8 +274,15 @@ export class CoverService {
         updated.channels = track.channels;
         updated.bitDepth = track.bitDepth;
         updated.bitrateKbps = track.bitrateKbps;
-        updated.sizeBytes = track.sizeBytes;
-        updated.mtimeMs = track.mtimeMs;
+        // 嵌入封面会改写文件：同步刷新大小/mtime，避免曲库显示旧值
+        try {
+          const st = fs.statSync(track.path);
+          updated.sizeBytes = st.size;
+          updated.mtimeMs = Math.round(st.mtime * 1000);
+        } catch (e) {
+          updated.sizeBytes = track.sizeBytes;
+          updated.mtimeMs = track.mtimeMs;
+        }
         updated.cuePath = track.cuePath;
         updated.isCueChild = track.isCueChild;
         updated.cueTrackNo = track.cueTrackNo;
@@ -276,7 +298,15 @@ export class CoverService {
         updated.metaSource = '手动';
         updated.metaCheckedAt = Date.now();
         await Db.updateTrack(updated);
+        // 同一物理文件的所有记录（含 CUE 子轨）统一刷新大小/mtime/封面
+        await Db.updateFileByPath(track.path, updated.sizeBytes, updated.mtimeMs, path);
         res.cachePath = path;
+        // 同步内存对象，封面页与详情卡立即显示新封面
+        track.coverBlobPath = path;
+        track.sizeBytes = updated.sizeBytes;
+        track.mtimeMs = updated.mtimeMs;
+        track.metaSource = c.source;
+        track.metaCheckedAt = updated.metaCheckedAt;
       }
     } catch (e) {
       const err = e as BusinessError;

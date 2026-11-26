@@ -7,6 +7,19 @@ import { fmtDuration, fmtSize, fmtSpec } from '../utils/Util';
 import { LogLine } from '../utils/AppLog';
 import { LyricLine } from '../lyrics/LyricsService';
 import { verdictColor } from '../core/AuthenticityService';
+import { WindowUtil } from '../utils/WindowUtil';
+
+function kindText(t: Track): string {
+  const ext = t.ext.toLowerCase();
+  if (ext == '.flac' || ext == '.wav' || ext == '.dsf' || ext == '.dff' || ext == '.iso' ||
+    ext == '.ape' || ext == '.aif' || ext == '.aiff' || ext == '.tta' || ext == '.wv' || ext == '.tak') {
+    return '无损';
+  }
+  if (ext == '.mp3' || ext == '.ogg' || ext == '.opus' || ext == '.aac') {
+    return '有损';
+  }
+  return '—';
+}
 
 // ---------------------------------------------------------------- 基础块
 
@@ -55,36 +68,29 @@ export struct StatCard {
         .width('100%')
         .height(2)
         .backgroundColor(this.value > 0 ? this.color : T.LINE_SOFT)
-      Column() {
+      Row({ space: 6 }) {
         Text(this.label)
           .fontSize(10)
           .fontColor(T.FG_DIM)
           .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
         Text(`${this.value}${this.suffix}`)
-          .fontSize(22)
+          .fontSize(19)
           .fontWeight(FontWeight.Bold)
           .fontColor(this.value > 0 ? this.color : T.FG_MUTE)
-          .margin({ top: 2 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .padding({ left: 12, right: 10, top: 8 })
-
-      Row({ space: 3 }) {
-        Column().width(3).height(7).borderRadius(2).backgroundColor(this.color).opacity(0.32)
-        Column().width(3).height(13).borderRadius(2).backgroundColor(this.color).opacity(0.38)
-        Column().width(3).height(9).borderRadius(2).backgroundColor(this.color).opacity(0.30)
-        Column().width(3).height(17).borderRadius(2).backgroundColor(this.color).opacity(0.42)
-        Column().width(3).height(11).borderRadius(2).backgroundColor(this.color).opacity(0.34)
       }
       .width('100%')
-      .justifyContent(FlexAlign.End)
-      .padding({ right: 12, bottom: 7 })
+      .layoutWeight(1)
+      .padding({ left: 12, right: 12 })
+      .alignItems(VerticalAlign.Center)
     }
-    .height(70)
+    .height(52)
     .layoutWeight(1)
     .backgroundColor(T.PANEL)
     .borderRadius(T.R_CARD)
     .border({ width: 1, color: T.LINE_SOFT })
+    .shadow({ radius: 8, color: '#22000000', offsetY: 2 })
     .onClick(() => {
       this.onTap();
     })
@@ -96,66 +102,163 @@ export struct BrandBar {
   version: string = '';
   @Prop statusText: string = '就绪';
   @Prop uiOpacity: number = 95;
+  @Prop maximized: boolean = false;
   onOpacityChange: (v: number) => void = () => {
+  };
+  onMinimize: () => void = () => {
+  };
+  onMaximizeToggle: () => void = () => {
+  };
+  onClose: () => void = () => {
   };
 
   build() {
     Row({ space: 11 }) {
-      Image($r('app.media.startIcon'))
-        .width(30)
-        .height(30)
-        .borderRadius(8)
-        .objectFit(ImageFit.Cover)
-      Column({ space: 1 }) {
-        Text('音序管家')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(T.FG)
-        Text(`SEQAUDIO MANAGER  ·  v${this.version}`)
-          .fontSize(8)
-          .letterSpacing(0.6)
-          .fontColor(T.FG_MUTE)
+      // 品牌区（同时作为窗口拖动热区）
+      Row({ space: 11 }) {
+        Image($r('app.media.startIcon'))
+          .width(30)
+          .height(30)
+          .borderRadius(8)
+          .objectFit(ImageFit.Cover)
+        Column({ space: 1 }) {
+          Text('音序管家')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(T.FG)
+          Text(`SEQAUDIO MANAGER  ·  v${this.version}`)
+            .fontSize(9)
+            .letterSpacing(0.6)
+            .fontColor(T.FG_MUTE)
+        }
+        .alignItems(HorizontalAlign.Start)
       }
-      .alignItems(HorizontalAlign.Start)
-      Blank()
-      Row() {
-        Text(this.statusText)
+      .height('100%')
+      .alignItems(VerticalAlign.Center)
+      .gesture(
+        PanGesture({ direction: PanDirection.All, distance: 6 })
+          .onActionStart(() => {
+            WindowUtil.beginDragMain();
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            WindowUtil.dragByMain(event.offsetX, event.offsetY);
+          })
+          .onActionEnd(() => {
+            WindowUtil.endDrag();
+          })
+      )
+
+      // 中间空白也可拖动窗口
+      Row()
+        .layoutWeight(1)
+        .height('100%')
+        .gesture(
+          PanGesture({ direction: PanDirection.All, distance: 6 })
+            .onActionStart(() => {
+              WindowUtil.beginDragMain();
+            })
+            .onActionUpdate((event: GestureEvent) => {
+              WindowUtil.dragByMain(event.offsetX, event.offsetY);
+            })
+            .onActionEnd(() => {
+              WindowUtil.endDrag();
+            })
+        )
+
+      // 状态靠近「界面不透明度」左侧
+      Row({ space: 10 }) {
+        Row() {
+          Text(this.statusText)
+            .fontSize(10)
+            .fontColor(T.FG_DIM)
+        }
+        .height(22)
+        .padding({ left: 10, right: 10 })
+        .backgroundColor(T.BADGE_BG)
+        .borderRadius(9)
+        .border({ width: 1, color: T.BADGE_BORDER })
+
+        Text('界面不透明度')
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+        Slider({
+          value: this.uiOpacity,
+          min: 25,
+          max: 100,
+          step: 1,
+          style: SliderStyle.OutSet
+        })
+          .width(96)
+          .selectedColor(T.ACCENT)
+          .trackColor(T.LINE)
+          .blockColor(T.CYAN)
+          .onChange((v: number) => {
+            this.onOpacityChange(Math.round(v));
+          })
+        Text(`${Math.round(this.uiOpacity)}%`)
+          .width(38)
           .fontSize(10)
           .fontColor(T.FG_DIM)
-      }
-      .height(22)
-      .padding({ left: 10, right: 10 })
-      .backgroundColor(T.BADGE_BG)
-      .borderRadius(9)
-      .border({ width: 1, color: T.BADGE_BORDER })
+          .textAlign(TextAlign.End)
 
-      Blank()
-      Text('界面不透明度')
-        .fontSize(10)
-        .fontColor(T.FG_MUTE)
-      Slider({
-        value: this.uiOpacity,
-        min: 10,
-        max: 100,
-        step: 1,
-        style: SliderStyle.OutSet
-      })
-        .width(96)
-        .selectedColor(T.ACCENT)
-        .trackColor(T.LINE)
-        .blockColor(T.CYAN)
-        .onChange((v: number) => {
-          this.onOpacityChange(Math.round(v));
-        })
-      Text(`${Math.round(this.uiOpacity)}%`)
-        .width(38)
-        .fontSize(10)
-        .fontColor(T.FG_DIM)
-        .textAlign(TextAlign.End)
+        Row()
+          .width(1)
+          .height(16)
+          .backgroundColor(T.LINE_SOFT)
+
+        Row({ space: 2 }) {
+          Button() {
+            Text('—')
+              .fontSize(11)
+              .fontColor(T.FG_DIM)
+          }
+          .width(28)
+          .height(24)
+          .padding(0)
+          .borderRadius(6)
+          .backgroundColor(Color.Transparent)
+          .hoverEffect(HoverEffect.Scale)
+          .onClick(() => {
+            this.onMinimize();
+          })
+
+          Button() {
+            Text(this.maximized ? '▣' : '▢')
+              .fontSize(11)
+              .fontColor(T.FG_DIM)
+          }
+          .width(28)
+          .height(24)
+          .padding(0)
+          .borderRadius(6)
+          .backgroundColor(Color.Transparent)
+          .hoverEffect(HoverEffect.Scale)
+          .onClick(() => {
+            this.onMaximizeToggle();
+          })
+
+          Button() {
+            Text('×')
+              .fontSize(11)
+              .fontColor(T.FG_MUTE)
+          }
+          .width(28)
+          .height(24)
+          .padding(0)
+          .borderRadius(6)
+          .backgroundColor(Color.Transparent)
+          .hoverEffect(HoverEffect.Scale)
+          .onClick(() => {
+            this.onClose();
+          })
+        }
+        .alignItems(VerticalAlign.Center)
+      }
+      .alignItems(VerticalAlign.Center)
     }
     .width('100%')
     .height(56)
-    .padding({ left: 16, right: 16 })
+    .padding({ left: 16, right: 10 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(T.BRAND_BG)
     .border({ width: { bottom: 1 }, color: { bottom: T.LINE_SOFT } })
@@ -206,6 +309,8 @@ export struct ActionBar {
   };
   onTogglePanel: () => void = () => {
   };
+  onCommand: () => void = () => {
+  };
   onMore: (key: string) => void = () => {
   };
   @State private moreOpen: boolean = false;
@@ -231,21 +336,31 @@ export struct ActionBar {
   @Builder
   moreMenu() {
     Column() {
+      this.moreItem('命令面板…', 'command')
+      this.moreItem('扫描目录…', 'roots')
+      Divider().color(T.LINE_SOFT).margin({ top: 3, bottom: 3 })
       this.moreItem('重命名预览…', 'rename')
+      this.moreItem('浏览文件导入…', 'browseimport')
       this.moreItem('曲库体检…', 'health')
       this.moreItem('批量整理…', 'tools')
       this.moreItem('批量编辑标签…', 'batchedit')
       this.moreItem('撤销标签编辑（.bak）', 'undoedit')
+      this.moreItem('撤销本地修改', 'revert')
+      this.moreItem('按标签重命名本目录…', 'renamedir')
+      this.moreItem('查看候选匹配…', 'candidates')
+      this.moreItem('确认匹配（采纳最佳候选）', 'confirmmatch')
       this.moreItem('去除标题序号', 'stripno')
       this.moreItem('导出处理报表…', 'report')
+      this.moreItem('导出运行日志…', 'exportlog')
       this.moreItem('批量导出封面…', 'exportcovers')
       this.moreItem('生成文件夹封面', 'foldercovers')
       this.moreItem('隔离区管理…', 'quarantine')
+      this.moreItem('仅处理选中项', 'autoselected')
       this.moreItem('下一首播放选中', 'playnext')
       this.moreItem('加入队列', 'queue')
       this.moreItem('复制完整路径', 'copypath')
       Divider().color(T.LINE_SOFT).margin({ top: 3, bottom: 3 })
-      this.moreItem('CUE 分轨导出…', 'cuesplit')
+      this.moreItem('分轨导出（CUE / SACD）…', 'cuesplit')
       this.moreItem('查看频谱…', 'spectrum')
       this.moreItem('播放列表…', 'playlists')
       this.moreItem('封面搜索…', 'cover')
@@ -443,56 +558,56 @@ export struct VerdictBar {
   build() {
     Row({ space: 6 }) {
       Button(`全部判定 ${this.countAll}`)
-        .height(26)
+        .height(24)
         .fontSize(10)
         .fontColor(this.filter == 'all' ? T.ACCENT : T.FG_DIM)
-        .backgroundColor(this.filter == 'all' ? T.CHIP_ON_BG : T.CHIP_OFF_BG)
+        .backgroundColor(this.filter == 'all' ? T.CHIP_ON_BG : Color.Transparent)
         .border({ width: 1, color: this.filter == 'all' ? T.ACCENT : T.LINE_SOFT })
-        .borderRadius(13)
+        .borderRadius(12)
         .padding({ left: 10, right: 10 })
         .onClick(() => {
           this.onFilter('all');
         })
-      Button(`真无损 ${this.countTrue}`)
-        .height(26)
+      Button('真无损')
+        .height(24)
         .fontSize(10)
         .fontColor(this.filter == 'true' ? T.OK : T.FG_DIM)
-        .backgroundColor(this.filter == 'true' ? T.CHIP_ON_BG : T.CHIP_OFF_BG)
+        .backgroundColor(this.filter == 'true' ? T.CHIP_ON_BG : Color.Transparent)
         .border({ width: 1, color: this.filter == 'true' ? T.OK : T.LINE_SOFT })
-        .borderRadius(13)
+        .borderRadius(12)
         .padding({ left: 10, right: 10 })
         .onClick(() => {
           this.onFilter('true');
         })
-      Button(`假无损 ${this.countFake}`)
-        .height(26)
+      Button('假无损')
+        .height(24)
         .fontSize(10)
         .fontColor(this.filter == 'fake' ? T.BAD : T.FG_DIM)
-        .backgroundColor(this.filter == 'fake' ? T.CHIP_ON_BG : T.CHIP_OFF_BG)
+        .backgroundColor(this.filter == 'fake' ? T.CHIP_ON_BG : Color.Transparent)
         .border({ width: 1, color: this.filter == 'fake' ? T.BAD : T.LINE_SOFT })
-        .borderRadius(13)
+        .borderRadius(12)
         .padding({ left: 10, right: 10 })
         .onClick(() => {
           this.onFilter('fake');
         })
-      Button(`疑似 ${this.countSuspect}`)
-        .height(26)
+      Button('假无损+可疑')
+        .height(24)
         .fontSize(10)
         .fontColor(this.filter == 'suspect' ? T.WARN : T.FG_DIM)
-        .backgroundColor(this.filter == 'suspect' ? T.CHIP_ON_BG : T.CHIP_OFF_BG)
+        .backgroundColor(this.filter == 'suspect' ? T.CHIP_ON_BG : Color.Transparent)
         .border({ width: 1, color: this.filter == 'suspect' ? T.WARN : T.LINE_SOFT })
-        .borderRadius(13)
+        .borderRadius(12)
         .padding({ left: 10, right: 10 })
         .onClick(() => {
           this.onFilter('suspect');
         })
       Button(`无法判定 ${this.countUnknown}`)
-        .height(26)
+        .height(24)
         .fontSize(10)
         .fontColor(this.filter == 'unknown' ? T.FG_MUTE : T.FG_DIM)
-        .backgroundColor(this.filter == 'unknown' ? T.CHIP_ON_BG : T.CHIP_OFF_BG)
+        .backgroundColor(this.filter == 'unknown' ? T.CHIP_ON_BG : Color.Transparent)
         .border({ width: 1, color: this.filter == 'unknown' ? T.FG_MUTE : T.LINE_SOFT })
-        .borderRadius(13)
+        .borderRadius(12)
         .padding({ left: 10, right: 10 })
         .onClick(() => {
           this.onFilter('unknown');
@@ -524,131 +639,113 @@ export struct FilterBar {
   onVerdict: (index: number) => void = () => {
   };
 
-  private countOf(index: number): number {
-    if (index == 0) {
-      return this.countAll;
-    }
-    if (index == 1) {
-      return this.countLossless;
-    }
-    if (index == 2) {
-      return this.countLossy;
-    }
-    if (index == 3) {
-      return this.countHiRes;
-    }
-    return this.countCue;
-  }
-
-  @Builder
-  chip(label: string, index: number) {
-    Button(`${label} ${this.countOf(index)}`)
-      .height(28)
-      .fontSize(10)
-      .fontColor(this.verdictIndex == index ? T.ACCENT : T.FG_DIM)
-      .backgroundColor(this.verdictIndex == index ? T.CHIP_ON_BG : T.CHIP_OFF_BG)
-      .border({
-        width: 1,
-        color: this.verdictIndex == index ? T.ACCENT_DIM : T.LINE_SOFT
-      })
-      .borderRadius(14)
-      .padding({ left: 11, right: 11 })
-      .onClick(() => {
-        this.onVerdict(index);
-      })
-  }
-
+  // 单行筛选：搜索 + 只看无损 + 只看问题 + 规格；计数已由统计卡展示，不再重复 chips
   build() {
-    Column({ space: 8 }) {
-      Row({ space: 10 }) {
-        Row({ space: 7 }) {
-          Text('⌕')
-            .fontSize(16)
-            .fontColor(T.FG_MUTE)
-          TextInput({ text: this.keyword, placeholder: '搜索歌名、歌手、专辑或文件名…' })
-            .layoutWeight(1)
-            .height(34)
-            .fontSize(12)
-            .fontColor(T.FG)
-            .placeholderColor(T.FG_MUTE)
-            .backgroundColor(Color.Transparent)
-            .padding({ left: 0, right: 0 })
-            .onChange((v: string) => {
-              this.onKeyword(v);
-            })
-        }
-        .layoutWeight(1)
-        .height(34)
-        .padding({ left: 11, right: 10 })
-        .backgroundColor(T.INPUT)
-        .borderRadius(T.R_INPUT)
-        .border({ width: 1, color: T.LINE_SOFT })
-
-        Row({ space: 6 }) {
-          Toggle({ type: ToggleType.Checkbox, isOn: this.losslessOnly })
-            .width(18)
-            .height(18)
-            .selectedColor(T.ACCENT)
-            .onChange(() => {
-              this.onToggle('lossless');
-            })
-          Text('只看无损')
-            .fontSize(11)
-            .fontColor(T.FG_DIM)
-        }
-        .onClick(() => {
-          this.onToggle('lossless');
-        })
-
-        Row({ space: 6 }) {
-          Toggle({ type: ToggleType.Checkbox, isOn: this.problemsOnly })
-            .width(18)
-            .height(18)
-            .selectedColor(T.ACCENT)
-            .onChange(() => {
-              this.onToggle('problems');
-            })
-          Text('只看问题')
-            .fontSize(11)
-            .fontColor(T.FG_DIM)
-        }
-        .onClick(() => {
-          this.onToggle('problems');
-        })
-
-        Select([
-          { value: '全部规格' },
-          { value: '44.1 kHz' },
-          { value: '48 kHz' },
-          { value: '96 kHz' },
-          { value: '176.4k+' },
-          { value: 'DSD' },
-          { value: '16 bit' },
-          { value: '24 bit' }
-        ])
-          .selected(this.specIndex)
-          .value('全部规格')
-          .width(112)
-          .height(34)
-          .font({ size: 11 })
-          .fontColor(T.FG_DIM)
-          .backgroundColor(T.INPUT)
-          .borderRadius(T.R_INPUT)
-          .onSelect((index: number) => {
-            this.onSpec(index);
+    Row({ space: 10 }) {
+      Row({ space: 7 }) {
+        Text('⌕')
+          .fontSize(16)
+          .fontColor(T.FG_MUTE)
+        TextInput({ text: this.keyword, placeholder: '搜索歌名、歌手、专辑或文件名…' })
+          .layoutWeight(1)
+          .height(32)
+          .fontSize(12)
+          .fontColor(T.FG)
+          .placeholderColor(T.FG_MUTE)
+          .backgroundColor(Color.Transparent)
+          .padding({ left: 0, right: 0 })
+          .onChange((v: string) => {
+            this.onKeyword(v);
+          })
+          // 吞掉回车，避免提交事件冒泡去激活「真假鉴定」等其他按钮
+          .onSubmit(() => {
           })
       }
-      .width('100%')
+      .layoutWeight(1)
+      .height(32)
+      .padding({ left: 11, right: 10 })
+      .backgroundColor(T.INPUT)
+      .borderRadius(T.R_INPUT)
+      .border({ width: 1, color: T.LINE_SOFT })
 
       Row({ space: 6 }) {
-        this.chip('全部', 0)
-        this.chip('无损', 1)
-        this.chip('有损', 2)
-        this.chip('高解析', 3)
-        this.chip('CUE', 4)
-        Blank()
+        Column() {
+          if (this.losslessOnly) {
+            Text('✓')
+              .fontSize(9)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(T.ON_ACCENT)
+          }
+        }
+        .width(16)
+        .height(16)
+        .borderRadius(4)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(this.losslessOnly ? T.ACCENT : T.INPUT)
+        .border({ width: 1, color: this.losslessOnly ? T.ACCENT_HOVER : T.LINE })
+        Text('只看无损')
+          .fontSize(11)
+          .fontColor(this.losslessOnly ? T.FG : T.FG_DIM)
+          .maxLines(1)
       }
-      .width('100%')
+      .height(30)
+      .padding({ left: 8, right: 10 })
+      .borderRadius(T.R_BTN)
+      .backgroundColor(this.losslessOnly ? T.CHIP_ON_BG : Color.Transparent)
+      .border({ width: 1, color: this.losslessOnly ? T.ACCENT_DIM : Color.Transparent })
+      .onClick(() => {
+        this.onToggle('lossless');
+      })
+      Row({ space: 6 }) {
+        Column() {
+          if (this.problemsOnly) {
+            Text('✓')
+              .fontSize(9)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(T.ON_ACCENT)
+          }
+        }
+        .width(16)
+        .height(16)
+        .borderRadius(4)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(this.problemsOnly ? T.ACCENT : T.INPUT)
+        .border({ width: 1, color: this.problemsOnly ? T.ACCENT_HOVER : T.LINE })
+        Text('只看问题')
+          .fontSize(11)
+          .fontColor(this.problemsOnly ? T.FG : T.FG_DIM)
+          .maxLines(1)
+      }
+      .height(30)
+      .padding({ left: 8, right: 10 })
+      .borderRadius(T.R_BTN)
+      .backgroundColor(this.problemsOnly ? T.CHIP_ON_BG : Color.Transparent)
+      .border({ width: 1, color: this.problemsOnly ? T.ACCENT_DIM : Color.Transparent })
+      .onClick(() => {
+        this.onToggle('problems');
+      })
+
+      Select([
+        { value: '全部规格' },
+        { value: '44.1 kHz' },
+        { value: '48 kHz' },
+        { value: '96 kHz' },
+        { value: '176.4k+' },
+        { value: 'DSD' },
+        { value: '16 bit' },
+        { value: '24 bit' }
+      ])
+        .selected(this.specIndex)
+        .value('全部规格')
+        .width(108)
+        .height(32)
+        .font({ size: 11 })
+        .fontColor(T.FG_DIM)
+        .backgroundColor(T.INPUT)
+        .borderRadius(T.R_INPUT)
+        .onSelect((index: number) => {
+          this.onSpec(index);
+        })
     }
     .width('100%')
   }
@@ -663,6 +760,15 @@ export struct TrackTable {
   @Prop selectedIds: number[] = [];
   @Prop playingPath: string = '';
   @Prop compact: boolean = false;
+  @Prop showAlbum: boolean = true;
+  @Prop showFormat: boolean = true;
+  @Prop showSpec: boolean = true;
+  @Prop showConfidence: boolean = true;
+  @Prop showDuration: boolean = true;
+  @Prop showFileName: boolean = true;
+  @Prop showYear: boolean = false;
+  @Prop showKind: boolean = false;
+  @Prop showSource: boolean = false;
   onSelect: (t: Track, i: number, ctrl: boolean, shift: boolean) => void = () => {
   };
   onPlay: (t: Track, i: number) => void = () => {
@@ -684,6 +790,14 @@ export struct TrackTable {
   onBatchEdit: (t: Track) => void = () => {
   };
   onUndoEdit: (t: Track) => void = () => {
+  };
+  onRevert: (t: Track) => void = () => {
+  };
+  onRenameDir: (t: Track) => void = () => {
+  };
+  onCandidates: (t: Track) => void = () => {
+  };
+  onConfirmMatch: (t: Track) => void = () => {
   };
   onQuarantine: (t: Track) => void = () => {
   };
@@ -755,6 +869,14 @@ export struct TrackTable {
         this.onBatchEdit(this.menuTrack);
       } else if (key == 'undoedit') {
         this.onUndoEdit(this.menuTrack);
+      } else if (key == 'revert') {
+        this.onRevert(this.menuTrack);
+      } else if (key == 'renamedir') {
+        this.onRenameDir(this.menuTrack);
+      } else if (key == 'candidates') {
+        this.onCandidates(this.menuTrack);
+      } else if (key == 'confirmmatch') {
+        this.onConfirmMatch(this.menuTrack);
       } else if (key == 'quarantine') {
         this.onQuarantine(this.menuTrack);
       } else if (key == 'cover') {
@@ -789,9 +911,13 @@ export struct TrackTable {
       this.popupItem('编辑标签', 'edit')
       this.popupItem('批量编辑标签…', 'batchedit')
       this.popupItem('撤销标签编辑（.bak）', 'undoedit')
+      this.popupItem('撤销本地修改', 'revert')
+      this.popupItem('按标签重命名本目录…', 'renamedir')
+      this.popupItem('查看候选匹配…', 'candidates')
+      this.popupItem('确认匹配（采纳最佳候选）', 'confirmmatch')
       this.popupItem('封面搜索', 'cover')
       this.popupItem('歌词', 'lyrics')
-      this.popupItem('CUE 分轨导出', 'cuesplit')
+      this.popupItem('分轨导出（CUE / SACD）', 'cuesplit')
       this.popupItem('移入隔离区', 'quarantine')
       this.popupItem('复制完整路径', 'copypath')
       Divider().color(T.LINE_SOFT).margin({ top: 3, bottom: 3 })
@@ -824,7 +950,7 @@ export struct TrackTable {
         .backgroundColor(this.isPlaying(t) ? T.ACCENT :
           this.isRowSelected(t) ? T.ACCENT_DIM : Color.Transparent)
       Row({ space: 6 }) {
-        Text(this.isPlaying(t) ? '▶' : '')
+        Text(this.isPlaying(t) ? '▷' : '')
           .width(12)
           .fontSize(9)
           .fontColor(T.ACCENT)
@@ -854,7 +980,7 @@ export struct TrackTable {
         .fontColor(T.FG_DIM)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      if (!this.compact) {
+      if (!this.compact && this.showAlbum) {
         Text(t.album == '' ? '—' : t.album)
           .width(118)
           .fontSize(11)
@@ -862,18 +988,36 @@ export struct TrackTable {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
-      Text(t.ext.replace('.', '').toUpperCase())
-        .width(52)
-        .fontSize(10)
-        .fontColor(T.CYAN)
-        .maxLines(1)
-      Text(fmtSpec(t).replace(`${t.ext.replace('.', '').toUpperCase()} · `, ''))
-        .width(112)
-        .fontSize(10)
-        .fontColor(T.CYAN)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-      if (!this.compact) {
+      if (this.showYear) {
+        Text(t.year == '' ? '—' : t.year)
+          .width(44)
+          .fontSize(9)
+          .fontColor(T.FG_MUTE)
+          .maxLines(1)
+      }
+      if (this.showFormat) {
+        Text(t.ext.replace('.', '').toUpperCase())
+          .width(52)
+          .fontSize(10)
+          .fontColor(T.CYAN)
+          .maxLines(1)
+      }
+      if (this.showSpec) {
+        Text(fmtSpec(t).replace(`${t.ext.replace('.', '').toUpperCase()} · `, ''))
+          .width(112)
+          .fontSize(10)
+          .fontColor(T.CYAN)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      if (this.showKind) {
+        Text(kindText(t))
+          .width(42)
+          .fontSize(9)
+          .fontColor(kindText(t) == '无损' ? T.OK : T.FG_MUTE)
+          .maxLines(1)
+      }
+      if (!this.compact && this.showConfidence) {
         Text(t.matchConfidence > 0 ? `${Math.round(t.matchConfidence * 100)}%` : '—')
           .width(52)
           .fontSize(9)
@@ -887,12 +1031,22 @@ export struct TrackTable {
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .margin({ left: 6 })
-      Text(fmtDuration(t.durationMs))
-        .width(54)
-        .fontSize(10)
-        .fontColor(T.FG_MUTE)
-        .textAlign(TextAlign.End)
-      if (!this.compact) {
+      if (this.showSource) {
+        Text(t.metaSource == '' ? '—' : t.metaSource)
+          .width(72)
+          .fontSize(9)
+          .fontColor(T.FG_MUTE)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      if (this.showDuration) {
+        Text(fmtDuration(t.durationMs))
+          .width(54)
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+          .textAlign(TextAlign.End)
+      }
+      if (!this.compact && this.showFileName) {
         Text(t.fileName)
           .width(150)
           .fontSize(10)
@@ -903,7 +1057,7 @@ export struct TrackTable {
       }
     }
     .width('100%')
-    .height(36)
+    .height(28)
     .padding({ right: 8 })
     .backgroundColor(this.isPlaying(t) ? T.ROW_PLAY_BG :
       this.selectedId == t.id ? T.ROW_SELECT_BG :
@@ -983,12 +1137,22 @@ export struct TrackTable {
           .fontSize(10)
           .fontColor(T.FG_MUTE)
         Text('歌手').width(96).fontSize(10).fontColor(T.FG_MUTE)
-        if (!this.compact) {
+        if (!this.compact && this.showAlbum) {
           Text('专辑').width(118).fontSize(10).fontColor(T.FG_MUTE)
         }
-        Text('格式').width(52).fontSize(10).fontColor(T.FG_MUTE)
-        Text('规格').width(112).fontSize(10).fontColor(T.FG_MUTE)
-        if (!this.compact) {
+        if (this.showYear) {
+          Text('年份').width(44).fontSize(10).fontColor(T.FG_MUTE)
+        }
+        if (this.showFormat) {
+          Text('格式').width(52).fontSize(10).fontColor(T.FG_MUTE)
+        }
+        if (this.showSpec) {
+          Text('规格').width(112).fontSize(10).fontColor(T.FG_MUTE)
+        }
+        if (this.showKind) {
+          Text('无损').width(42).fontSize(10).fontColor(T.FG_MUTE)
+        }
+        if (!this.compact && this.showConfidence) {
           Text('置信度')
             .width(52)
             .fontSize(10)
@@ -1000,12 +1164,17 @@ export struct TrackTable {
           .fontSize(10)
           .fontColor(T.FG_MUTE)
           .margin({ left: 6 })
-        Text('时长')
-          .width(54)
-          .fontSize(10)
-          .fontColor(T.FG_MUTE)
-          .textAlign(TextAlign.End)
-        if (!this.compact) {
+        if (this.showSource) {
+          Text('来源').width(72).fontSize(10).fontColor(T.FG_MUTE)
+        }
+        if (this.showDuration) {
+          Text('时长')
+            .width(54)
+            .fontSize(10)
+            .fontColor(T.FG_MUTE)
+            .textAlign(TextAlign.End)
+        }
+        if (!this.compact && this.showFileName) {
           Text('文件名')
             .width(150)
             .fontSize(10)
@@ -1014,7 +1183,7 @@ export struct TrackTable {
         }
       }
       .width('100%')
-      .height(32)
+      .height(28)
       .padding({ right: 8 })
       .backgroundColor(T.TABLE_HEAD_BG)
       .border({ width: { bottom: 1 }, color: { bottom: T.LINE_SOFT } })
@@ -1027,8 +1196,7 @@ export struct TrackTable {
             ListItem() {
               this.trackRow(t, i)
             }
-          }, (t: Track) => `${t.id}-${t.path}-${t.verdict}-${t.verdictConfidence}-${t.matchConfidence}` +
-            `-${this.selectedId == t.id ? 1 : 0}-${this.selectedIds.indexOf(t.id) >= 0 ? 1 : 0}`)
+          }, (t: Track) => `${t.id}-${t.path}-${t.verdict}-${t.verdictConfidence}-${t.matchConfidence}`)
         }
         .width('100%')
         .layoutWeight(1)
@@ -1196,7 +1364,7 @@ export struct Inspector {
                 .fontSize(11)
                 .fontColor(T.healthColor(this.track.healthStatus))
                 .layoutWeight(1)
-              Text(this.track.isCueChild == 1 ? 'CUE 子轨' : '独立文件')
+              Text(this.track.isCueChild == 1 ? (this.track.ext == '.iso' ? 'SACD 子轨' : 'CUE 子轨') : '独立文件')
                 .fontSize(10)
                 .fontColor(T.FG_MUTE)
             }
@@ -1342,7 +1510,13 @@ export struct PlayerBar {
   @Prop eqOn: boolean = false;
   @Prop signalOn: boolean = false;
   @Prop miniOn: boolean = false;
+  @Prop queueOpen: boolean = false;
+  @Prop muted: boolean = false;
   onToggle: () => void = () => {
+  };
+  onQueue: () => void = () => {
+  };
+  onMute: () => void = () => {
   };
   onPrev: () => void = () => {
   };
@@ -1368,12 +1542,14 @@ export struct PlayerBar {
   @Builder
   iconButton(glyph: string, size: number, color: string, active: boolean, cb: () => void) {
     Button(glyph)
-      .width(size)
-      .height(size)
-      .type(ButtonType.Circle)
-      .fontSize(size <= 26 ? 11 : 14)
+      .width(size + 4)
+      .height(28)
+      .padding(0)
+      .borderRadius(T.R_BTN)
+      .fontSize(11)
       .fontColor(active ? T.ACCENT : color)
-      .backgroundColor(active ? T.CHIP_ON_BG : Color.Transparent)
+      .backgroundColor(active ? T.CHIP_ON_BG : T.GHOST_BG)
+      .border({ width: 1, color: active ? T.ACCENT_DIM : T.LINE_SOFT })
       .onClick(() => {
         cb();
       })
@@ -1420,17 +1596,31 @@ export struct PlayerBar {
       .width(170)
       .alignItems(HorizontalAlign.Start)
 
-      Button('▣')
-        .width(28)
+      Button(this.miniOn ? '▣' : '▢')
+        .width(30)
         .height(28)
-        .type(ButtonType.Circle)
+        .padding(0)
+        .borderRadius(T.R_BTN)
         .fontSize(12)
         .fontColor(this.miniOn ? T.ACCENT : T.FG_DIM)
-        .backgroundColor(this.miniOn ? T.CHIP_ON_BG : Color.Transparent)
+        .backgroundColor(this.miniOn ? T.CHIP_ON_BG : T.GHOST_BG)
+        .border({ width: 1, color: this.miniOn ? T.ACCENT_DIM : T.LINE_SOFT })
         .onClick(() => {
           this.onMini();
         })
-      this.iconButton('◀', 28, T.FG_DIM, false, () => this.onPrev())
+      Button('≡')
+        .width(30)
+        .height(28)
+        .padding(0)
+        .borderRadius(T.R_BTN)
+        .fontSize(12)
+        .fontColor(this.queueOpen ? T.ACCENT : T.FG_DIM)
+        .backgroundColor(this.queueOpen ? T.CHIP_ON_BG : T.GHOST_BG)
+        .border({ width: 1, color: this.queueOpen ? T.ACCENT_DIM : T.LINE_SOFT })
+        .onClick(() => {
+          this.onQueue();
+        })
+      this.iconButton('◁', 28, T.FG_DIM, false, () => this.onPrev())
       Button() {
         if (this.playing) {
           Row({ space: 4 }) {
@@ -1445,15 +1635,16 @@ export struct PlayerBar {
         }
       }
       .width(38)
-      .height(38)
-      .type(ButtonType.Circle)
+      .height(30)
+      .borderRadius(T.R_BTN)
       .backgroundColor(T.ACCENT)
-      .shadow({ radius: 12, color: T.ACCENT_SHADOW, offsetY: 2 })
+      .border({ width: 1, color: T.ACCENT_HOVER })
+      .shadow({ radius: 6, color: '#33000000', offsetY: 1 })
       .onClick(() => {
         this.onToggle();
       })
       this.iconButton('■', 28, T.FG_DIM, false, () => this.onStop())
-      this.iconButton('▶', 28, T.FG_DIM, false, () => this.onNext())
+      this.iconButton('▷', 28, T.FG_DIM, false, () => this.onNext())
 
       Slider({
         value: this.dragging ? this.dragValue : this.playPosition,
@@ -1483,6 +1674,19 @@ export struct PlayerBar {
         .fontColor(T.FG_MUTE)
         .textAlign(TextAlign.End)
 
+      Button(this.muted ? '静' : '音')
+        .width(30)
+        .height(28)
+        .padding(0)
+        .borderRadius(T.R_BTN)
+        .fontSize(9)
+        .fontColor(this.muted ? T.BAD : T.FG_MUTE)
+        .backgroundColor(this.muted ? T.DANGER_SOFT_BG : T.GHOST_BG)
+        .border({ width: 1, color: this.muted ? T.DANGER_BORDER : T.LINE_SOFT })
+        .onClick(() => {
+          this.onMute();
+        })
+
       Slider({
         value: this.volume,
         min: 0,
@@ -1503,47 +1707,214 @@ export struct PlayerBar {
         .fontColor(T.FG_MUTE)
 
       Button(this.modeGlyph)
-        .width(28)
+        .width(30)
         .height(28)
-        .type(ButtonType.Circle)
+        .padding(0)
+        .borderRadius(T.R_BTN)
         .fontSize(11)
         .fontColor(T.FG_DIM)
-        .backgroundColor(Color.Transparent)
+        .backgroundColor(T.GHOST_BG)
+        .border({ width: 1, color: T.LINE_SOFT })
         .onClick(() => {
           this.onMode();
         })
       Button('≈')
-        .width(28)
+        .width(30)
         .height(28)
-        .type(ButtonType.Circle)
+        .padding(0)
+        .borderRadius(T.R_BTN)
         .fontSize(12)
         .fontColor(this.signalOn ? T.ACCENT : T.FG_DIM)
-        .backgroundColor(this.signalOn ? T.CHIP_ON_BG : Color.Transparent)
+        .backgroundColor(this.signalOn ? T.CHIP_ON_BG : T.GHOST_BG)
+        .border({ width: 1, color: this.signalOn ? T.ACCENT_DIM : T.LINE_SOFT })
         .onClick(() => {
           this.onSignal();
         })
       Button('EQ')
-        .width(30)
-        .height(30)
-        .type(ButtonType.Circle)
+        .width(32)
+        .height(28)
+        .padding(0)
+        .borderRadius(T.R_BTN)
         .fontSize(9)
         .fontColor(this.eqOn ? T.ACCENT : T.FG_DIM)
-        .backgroundColor(this.eqOn ? T.CHIP_ON_BG : Color.Transparent)
+        .backgroundColor(this.eqOn ? T.CHIP_ON_BG : T.GHOST_BG)
+        .border({ width: 1, color: this.eqOn ? T.ACCENT_DIM : T.LINE_SOFT })
         .onClick(() => {
           this.onEq();
         })
     }
     .width('100%')
-    .height(56)
-    .padding({ left: 14, right: 14 })
-    .backgroundColor(T.PLAYER_BG)
-    .borderRadius(T.R_BAR)
-    .border({ width: 1, color: T.PLAYER_BORDER })
-    .linearGradient({
-      angle: 90,
-      colors: [[T.PLAYER_GRAD_TOP, 0.0], [T.PLAYER_GRAD_BOTTOM, 1.0]]
-    })
-    .shadow({ radius: 18, color: '#55000000', offsetY: 6 })
+    .height(52)
+    .padding({ left: 12, right: 12 })
+    .backgroundColor(T.PANEL_B3)
+    .borderRadius(T.R_CARD)
+    .border({ width: 1, color: T.LINE_SOFT })
+    .shadow({ radius: 10, color: '#33000000', offsetY: 2 })
+  }
+}
+
+// ---------------------------------------------------------------- 播放队列
+
+@Component
+export struct QueuePanel {
+  @Prop tracks: Track[] = [];
+  @Prop currentIndex: number = -1;
+  onJump: (i: number) => void = () => {
+  };
+  onRemove: (i: number) => void = () => {
+  };
+  onClear: () => void = () => {
+  };
+  onSave: (name: string) => boolean = () => false;
+  onClose: () => void = () => {
+  };
+  @State private nameInput: string = '';
+  @State private saveHint: string = '';
+
+  @Builder
+  queueRow(t: Track, i: number) {
+    Row({ space: 8 }) {
+      Row({ space: 8 }) {
+        Text(`${i + 1}`)
+          .width(24)
+          .fontSize(9)
+          .fontColor(this.currentIndex == i ? T.ACCENT : T.FG_MUTE)
+          .textAlign(TextAlign.End)
+        Text(this.currentIndex == i ? '▷' : '')
+          .width(12)
+          .fontSize(9)
+          .fontColor(T.ACCENT)
+        Text(t.title)
+          .layoutWeight(1)
+          .fontSize(11)
+          .fontColor(this.currentIndex == i ? T.ACCENT : T.FG)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(t.artist == '' ? '—' : t.artist)
+          .width(110)
+          .fontSize(10)
+          .fontColor(T.FG_DIM)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(fmtDuration(t.durationMs))
+          .width(48)
+          .fontSize(9)
+          .fontColor(T.FG_MUTE)
+          .textAlign(TextAlign.End)
+      }
+      .layoutWeight(1)
+      .height('100%')
+      .onClick(() => {
+        this.onJump(i);
+      })
+      Button('✕')
+        .width(22)
+        .height(22)
+        .fontSize(9)
+        .fontColor(T.FG_MUTE)
+        .backgroundColor(Color.Transparent)
+        .onClick(() => {
+          this.onRemove(i);
+        })
+    }
+    .width('100%')
+    .height(30)
+    .padding({ left: 6, right: 6 })
+    .backgroundColor(this.currentIndex == i ? T.ROW_PLAY_BG : Color.Transparent)
+    .borderRadius(6)
+  }
+
+  build() {
+    Column({ space: 6 }) {
+      Row({ space: 8 }) {
+        Text('播放队列')
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(T.FG)
+        Text(`${this.tracks.length} 首`)
+          .fontSize(10)
+          .fontColor(T.FG_MUTE)
+        Blank()
+        TextInput({ text: this.nameInput, placeholder: '另存为播放列表…' })
+          .width(170)
+          .height(26)
+          .fontSize(10)
+          .fontColor(T.FG)
+          .placeholderColor(T.FG_MUTE)
+          .backgroundColor(T.INPUT)
+          .borderRadius(6)
+          .onChange((v: string) => {
+            this.nameInput = v;
+            this.saveHint = '';
+          })
+        Button('保存')
+          .height(26)
+          .fontSize(10)
+          .fontColor(T.ACCENT)
+          .backgroundColor(T.GHOST_BG)
+          .border({ width: 1, color: T.LINE_SOFT })
+          .borderRadius(6)
+          .onClick(() => {
+            const ok = this.onSave(this.nameInput);
+            if (ok) {
+              this.nameInput = '';
+            }
+            this.saveHint = ok ? '队列已保存' : '保存失败';
+          })
+        if (this.saveHint != '') {
+          Text(this.saveHint)
+            .fontSize(9)
+            .fontColor(T.OK)
+        }
+        Button('清空')
+          .height(26)
+          .fontSize(10)
+          .fontColor(T.BAD)
+          .backgroundColor(T.DANGER_SOFT_BG)
+          .borderRadius(6)
+          .onClick(() => {
+            this.onClear();
+          })
+        Button('收起')
+          .height(26)
+          .fontSize(10)
+          .fontColor(T.FG_DIM)
+          .backgroundColor(T.GHOST_BG)
+          .borderRadius(6)
+          .onClick(() => {
+            this.onClose();
+          })
+      }
+      .width('100%')
+
+      if (this.tracks.length == 0) {
+        Column() {
+          Text('队列为空 · 双击曲目或右键「加入队列」')
+            .fontSize(10)
+            .fontColor(T.FG_MUTE)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+      } else {
+        List() {
+          ForEach(this.tracks, (t: Track, i: number) => {
+            ListItem() {
+              this.queueRow(t, i)
+            }
+          }, (t: Track, i: number) => `${t.id}-${t.path}-${i}-${this.currentIndex == i ? 1 : 0}`)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .scrollBar(BarState.Auto)
+      }
+    }
+    .width('100%')
+    .height(210)
+    .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+    .backgroundColor(T.PANEL)
+    .borderRadius(T.R_CARD)
+    .border({ width: 1, color: T.LINE_SOFT })
   }
 }
 
@@ -1617,6 +1988,15 @@ export struct BottomDock {
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%')
                   .textAlign(TextAlign.Center)
+                  .padding({ top: 2, bottom: 2 })
+                  .borderRadius(6)
+                  .backgroundColor(idx == this.lyricIndex ? T.CHIP_ON_BG : Color.Transparent)
+                  .textShadow({
+                    radius: idx == this.lyricIndex ? 10 : 0,
+                    color: T.ACCENT_SHADOW,
+                    offsetX: 0,
+                    offsetY: 0
+                  })
               }
             }, (idx: number) => `${idx}-${this.lyrics.length}`)
           }
@@ -1816,7 +2196,7 @@ export struct MiniOverlay {
   @Prop playing: boolean = false;
   @Prop playPosition: number = 0;
   @Prop duration: number = 0;
-  @Prop uiOpacity: number = 80;
+  @Prop uiOpacity: number = 95;
   @Prop lyrics: LyricLine[] = [];
   @Prop lyricIndex: number = 0;
   onToggle: () => void = () => {
@@ -1886,7 +2266,7 @@ export struct MiniOverlay {
         Column({ space: 5 }) {
           Blank()
           Row({ space: 10 }) {
-            Text('◀')
+            Text('◁')
               .fontSize(13)
               .fontColor(T.FG_DIM)
               .onClick(() => {
@@ -1912,7 +2292,7 @@ export struct MiniOverlay {
             .onClick(() => {
               this.onToggle();
             })
-            Text('▶')
+            Text('▷')
               .fontSize(13)
               .fontColor(T.FG_DIM)
               .onClick(() => {
@@ -1967,7 +2347,7 @@ export struct MiniOverlay {
           .fontColor(T.FG_MUTE)
         Slider({
           value: this.uiOpacity,
-          min: 10,
+          min: 25,
           max: 100,
           step: 1,
           style: SliderStyle.OutSet

@@ -21,6 +21,25 @@ export struct CueSplitDialog {
   @State private doneCount: number = 0;
   @State private total: number = 0;
 
+  aboutToAppear(): void {
+    // SACD 子轨默认位完美 DSF；普通 CUE 保持 FLAC
+    if (this.allSacd()) {
+      this.formatIndex = 2;
+    }
+  }
+
+  private allSacd(): boolean {
+    if (this.tracks.length == 0) {
+      return false;
+    }
+    for (const t of this.tracks) {
+      if (t.ext.toLowerCase() != '.iso') {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private async start(): Promise<void> {
     if (this.busy || this.tracks.length == 0) {
       return;
@@ -32,7 +51,7 @@ export struct CueSplitDialog {
     this.reportText = '';
     this.progressText = '准备导出…';
     const opts = new CueSplitOptions();
-    opts.format = this.formatIndex == 1 ? 'wav' : 'flac';
+    opts.format = this.formatIndex == 2 ? 'dsf' : (this.formatIndex == 1 ? 'wav' : 'flac');
     opts.fetchLyrics = true;
     opts.trimPregap = this.trimPregap;
     const ctx = getContext(this) as common.UIAbilityContext;
@@ -56,7 +75,7 @@ export struct CueSplitDialog {
     Column({ space: 10 }) {
       Row() {
         Column({ space: 2 }) {
-          Text('CUE 分轨导出')
+          Text('分轨导出')
             .fontSize(15)
             .fontWeight(FontWeight.Bold)
             .fontColor(T.FG)
@@ -66,7 +85,7 @@ export struct CueSplitDialog {
         }
         .alignItems(HorizontalAlign.Start)
         Blank()
-        Text('FLAC 体积约 60%，WAV 无压缩')
+        Text(this.formatIndex == 2 ? 'DSF：1bit/2.8224MHz 位完美 DSD' : 'FLAC 体积约 60%，WAV 无压缩')
           .fontSize(9)
           .fontColor(T.FG_MUTE)
       }
@@ -94,8 +113,20 @@ export struct CueSplitDialog {
           .onClick(() => {
             this.formatIndex = 1;
           })
+        Button('DSF')
+          .height(28)
+          .fontSize(10)
+          .fontColor(this.formatIndex == 2 ? T.ACCENT : T.FG_DIM)
+          .backgroundColor(this.formatIndex == 2 ? T.CHIP_ON_BG : T.GHOST_BG)
+          .borderRadius(6)
+          .enabled(this.allSacd())
+          .opacity(this.allSacd() ? 1 : 0.38)
+          .onClick(() => {
+            this.formatIndex = 2;
+          })
         Blank()
-        Text(`预间隙裁剪：${this.trimPregap ? '开' : '关'}（参数 → 写入） · SACD ISO 暂未开放`)
+        Text(this.formatIndex == 2 ? 'DSF 位完美：仅 SACD 子轨可用' :
+          `预间隙裁剪：${this.trimPregap ? '开' : '关'}（参数 → 写入）`)
           .fontSize(9)
           .fontColor(T.FG_MUTE)
       }
@@ -133,7 +164,7 @@ export struct CueSplitDialog {
       .alignItems(HorizontalAlign.Start)
 
       Row({ space: 8 }) {
-        Text('标签直接取自 CUE；同目录 .lrc 与导出歌词会一起写入')
+        Text('标签取自 CUE / SACD TOC；同目录 .lrc 与导出歌词会一起写入')
           .fontSize(9)
           .fontColor(T.FG_MUTE)
           .layoutWeight(1)
