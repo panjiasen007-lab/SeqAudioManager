@@ -103,6 +103,9 @@ java -jar "$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar
 
 版本说明与安装/升级/卸载验证记录见 [`docs/v1.3.7-发布说明.md`](docs/v1.3.7-发布说明.md)。
 
+> **发布渠道**：Release 由个人开发者通过 GitHub 直接分发，仅供测试与学习，**未完成中国大陆 APP 备案**，不代表已上架应用商店；上架 AppGallery 前需先完成备案。
+> 随包 FFmpeg 为 LGPL v2.1+，源码与构建方式见 [`tools/ffmpeg-ohos/README.md`](tools/ffmpeg-ohos/README.md)。
+
 ## 目录
 
 ```
