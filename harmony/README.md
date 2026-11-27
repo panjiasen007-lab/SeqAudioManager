@@ -65,24 +65,41 @@ cd /d/SeqAudioManager/harmony-pc/harmony
 export DEVECO_SDK_HOME="D:\HarmonyOS\DevEcoStudio\sdk"
 # 调试构建
 hvigorw.bat assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
-# 发布构建（自动签名，产物为 entry/build/default/outputs/default/entry-default-signed.hap）
+# 发布构建（未签名，产物 entry/build/default/outputs/default/entry-default-unsigned.hap）
 hvigorw.bat assembleHap --mode module -p product=default -p buildMode=release --no-daemon
-# 安装 / 启动
-hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
+# App Pack（未签名，产物 build/outputs/default/harmony-default-unsigned.app）
+hvigorw.bat assembleApp --mode project -p product=default -p buildMode=release --no-daemon
+# 安装 / 启动（签名后）
+hdc install -r SeqAudioManager-v1.3.7-harmony-arm64.hap
 hdc shell aa start -a EntryAbility -b com.seqaudio.manager
 ```
 
 > 发布 HAP 同时包含 `arm64-v8a` 与 `x86_64` 原生库：arm64 鸿蒙 PC/真机使用 arm64 库，x86_64 模拟器使用 x86_64 库。
+
+**Release 签名**：签名材料放在本机 `C:\Users\JS199\.ohos\release\`（`seqaudio-release.p12 / .cer / .p7b`，由 AGC「证书」上传 CSR 生成发布证书、「Profile」创建发布 Profile）。用 SDK 自带 `hap-sign-tool.jar` 对未签名产物签名：
+
+```bash
+java -jar "$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar" sign-app \
+  -mode localSign -keyAlias seqaudioRelease -signAlg SHA256withECDSA \
+  -appCertFile seqaudio-release.cer -profileFile seqaudio-release.p7b \
+  -keystoreFile seqaudio-release.p12 -keystorePwd ****** -keyPwd ****** \
+  -inFile entry-default-unsigned.hap -outFile SeqAudioManager-v1.3.7-harmony-arm64.hap \
+  -signCode 1 -compatibleVersion 26
+```
+
+`.app` 需先把已签名 HAP 放回包内（重打包 zip），再以 `-inForm zip -signCode 0` 签名。项目内 `.sign/sign-config.json5` 仍是本机调试签名，不影响上述发布签名。
 
 ## 发布包（HarmonyOS arm64）
 
 | 项 | 值 |
 |---|---|
 | 版本 | v1.3.7 |
-| 资产 | `SeqAudioManager-v1.3.7-harmony-arm64.hap` |
-| 安装 | `hdc install -r SeqAudioManager-v1.3.7-harmony-arm64.hap` |
+| 侧载包 | `SeqAudioManager-v1.3.7-harmony-arm64.hap`（可双击 / `hdc install -r` 安装） |
+| 上架包 | `SeqAudioManager-v1.3.7-harmony-arm64.app`（App Pack，可直接上传 AppGallery） |
+| 签名 | AGC 发布证书（`seqaudio-release`，有效期至 2029-11-27）+ Release Profile（`app_gallery` 分发、无设备白名单） |
 | 启动 | `hdc shell aa start -a EntryAbility -b com.seqaudio.manager` |
-| 校验 | 同目录 `.sha256` 文件 |
+| 校验 | 同目录 `.sha256` 文件；Profile 类型 `release` |
+| 升级提示 | 从调试签名包升级会报 `install sign info inconsistent`（9568332），需先卸载再安装 |
 
 版本说明与安装/升级/卸载验证记录见 [`docs/v1.3.7-发布说明.md`](docs/v1.3.7-发布说明.md)。
 
