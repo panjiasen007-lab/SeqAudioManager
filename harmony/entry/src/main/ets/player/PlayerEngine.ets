@@ -1,0 +1,623 @@
+import media from '@ohos.multimedia.media';
+import fs from '@ohos.file.fs';
+import { BusinessError } from '@ohos.base';
+import { Track } from '../model/Track';
+import { NativePlayer } from './NativePlayer';
+
+export enum PlayMode {
+  ORDER = 0,
+  LOOP = 1,
+  SINGLE = 2,
+  RANDOM = 3
+}
+
+export const MODE_NAMES: string[] = ['顺序', '列表循环', '单曲循环', '随机'];
+
+class StateWaiter {
+  target: string = '';
+  resolve: () => void = () => { };
+}
+
+// AVPlayer 封装：队列播放 / 四种模式 / 进度事件 / AppStorage 同步（供迷你条与播放页共享）
+export class PlayerEngine {
+  private static inst?: PlayerEngine;
+
+  static get(): PlayerEngine {
+    if (!PlayerEngine.inst) {
+      PlayerEngine.inst = new PlayerEngine();
+    }
+    return PlayerEngine.inst;
+  }
+
+  private av?: media.AVPlayer;
+  private fd: number = -1;
+  private stateWaiter?: StateWaiter;
+  private errStreak: number = 0;
+
+  private setupStateWaiter(target: string): Promise<void> {
+    return new Promise<void>((resolve: () => void, reject: (e: Error) => void) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          this.stateWaiter = undefined;
+          reject(new Error(`wait state ${target} timeout`));
+        }
+      }, 5000);
+      const w = new StateWaiter();
+      w.target = target;
+      w.resolve = () => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+      this.stateWaiter = w;
+    });
+  }
+
+  private notifyState(state: string): void {
+    const w = this.stateWaiter;
+    if (w && state == w.target) {
+      this.stateWaiter = undefined;
+      w.resolve();
+    }
+  }
+
+  queue: Track[] = [];
+  index: number = -1;
+  mode: PlayMode = PlayMode.LOOP;
+  playing: boolean = false;
+  positionMs: number = 0;
+  durationMs: number = 0;
+  volume: number = 1.0;
+  // 会话恢复时待定位的进度（首次加载完成后 seek）
+  private pendingSeekMs: number = 0;
+  private cueEndHandled: boolean = false;
+  // 播放器实际装载的队列下标（-1 表示未装载，队列编辑后据此重新装载）
+  private loadedIndex: number = -1;
+
+  // 原生内核（FFmpeg + OH_AudioRenderer）状态
+  private nativeMode: boolean = false;
+  private nativeEndMs: number = 0;
+  private tickTimer: number = -1;
+  // 音频焦点被抢占时通知 UI（2=暂停 3=停止）
+  onInterrupt?: (hint: number) => void;
+
+  private listeners: (() => void)[] = [];
+  // 由 Index 注入：关键事件立即持久化会话（避免 PlayerEngine 与 SessionStore 循环依赖）
+  onSessionDirty?: (force: boolean) => void;
+
+  addListener(cb: () => void): void {
+    this.listeners.push(cb);
+  }
+
+  removeListener(cb: () => void): void {
+    const i = this.listeners.indexOf(cb);
+    if (i >= 0) {
+      this.listeners.splice(i, 1);
+    }
+  }
+
+  private emit(): void {
+    for (const l of this.listeners) {
+      try {
+        l();
+      } catch (e) {
+        // ignore
+      }
+    }
+    AppStorage.setOrCreate('npPlaying', this.playing);
+    AppStorage.setOrCreate('npPos', this.logicalPos());
+    AppStorage.setOrCreate('npDur', this.logicalDur());
+    AppStorage.setOrCreate('npIdx', this.index);
+    const t = this.current();
+    AppStorage.setOrCreate('npTitle', t ? t.title : '');
+    AppStorage.setOrCreate('npArtist', t ? t.artist : '');
+  }
+
+  current(): Track | undefined {
+    if (this.index >= 0 && this.index < this.queue.length) {
+      return this.queue[this.index];
+    }
+    return undefined;
+  }
+
+  // CUE 逻辑轨：内部进度用物理文件绝对时间，UI 用逻辑轨相对时间
+  logicalPos(): number {
+    const t = this.current();
+    if (t && t.isCueChild == 1) {
+      return Math.max(0, this.positionMs - t.cueStartMs);
+    }
+    return this.positionMs;
+  }
+
+  private logicalDur(): number {
+    const t = this.current();
+    if (t && t.isCueChild == 1) {
+      const end = t.cueEndMs > t.cueStartMs ? t.cueEndMs : t.durationMs;
+      return Math.max(0, end - t.cueStartMs);
+    }
+    return this.durationMs;
+  }
+
+  private startTick(): void {
+    this.stopTick();
+    const eng = this;
+    this.tickTimer = setInterval(() => {
+      eng.onTick();
+    }, 100);
+  }
+
+  private stopTick(): void {
+    if (this.tickTimer >= 0) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = -1;
+    }
+  }
+
+  private onTick(): void {
+    if (!this.nativeMode) {
+      return;
+    }
+    const hint = NativePlayer.takeInterrupt();
+    if (hint == 2 || hint == 3) {
+      this.playing = false;
+      this.emit();
+      if (this.onInterrupt) {
+        this.onInterrupt(hint);
+      }
+      return;
+    }
+    this.positionMs = NativePlayer.position();
+    AppStorage.setOrCreate('npPos', this.logicalPos());
+    const limit = this.nativeEndMs > 0 ? this.nativeEndMs - 120 : 0;
+    if (limit > 0 && this.positionMs >= limit && !this.cueEndHandled) {
+      this.cueEndHandled = true;
+      this.onTrackEnd();
+      return;
+    }
+    for (const l of this.listeners) {
+      try {
+        l();
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
+
+  // 原生内核对支持的格式优先接管；失败则返回 false 由 AVPlayer 兜底
+  private loadNative(physical: string, t: Track): boolean {
+    this.stopTick();
+    NativePlayer.release();
+    this.nativeMode = false;
+    if (!NativePlayer.supports(physical)) {
+      return false;
+    }
+    if (NativePlayer.open(physical) != 0) {
+      return false;
+    }
+    this.closeFd();
+    this.nativeMode = true;
+    const dur = NativePlayer.duration();
+    this.durationMs = dur > 0 ? dur : t.durationMs;
+    console.info(`native open ${physical} dur=${dur} dbDur=${t.durationMs} info=${JSON.stringify(NativePlayer.info())}`);
+    const startMs = Math.max(0, this.pendingSeekMs);
+    this.pendingSeekMs = 0;
+    const begin = t.isCueChild == 1 ? t.cueStartMs + startMs : startMs;
+    this.nativeEndMs = t.isCueChild == 1 && t.cueEndMs > t.cueStartMs ? t.cueEndMs : this.durationMs;
+    NativePlayer.setVolume(this.volume);
+    if (begin > 0) {
+      NativePlayer.seek(begin);
+    }
+    this.positionMs = begin;
+    this.cueEndHandled = false;
+    this.loadedIndex = this.index;
+    NativePlayer.start();
+    this.playing = true;
+    this.emit();
+    this.startTick();
+    return true;
+  }
+
+  private async ensurePlayer(): Promise<media.AVPlayer> {
+    if (this.av) {
+      return this.av;
+    }
+    const av = await media.createAVPlayer();
+    const eng = this;
+    av.on('stateChange', (state: string) => {
+      eng.notifyState(state);
+      if (state == 'playing') {
+        eng.errStreak = 0;
+        eng.playing = true;
+        eng.emit();
+      } else if (state == 'paused' || state == 'stopped') {
+        eng.playing = false;
+        eng.emit();
+      } else if (state == 'completed') {
+        eng.onTrackEnd();
+      } else if (state == 'error') {
+        eng.playing = false;
+        eng.emit();
+      }
+    });
+    av.on('timeUpdate', (t: number) => {
+      if (eng.nativeMode) {
+        return; // 原生内核接管时忽略残留 AVPlayer 事件
+      }
+      eng.positionMs = t;
+      AppStorage.setOrCreate('npPos', eng.logicalPos());
+      const cur = eng.current();
+      if (cur && cur.isCueChild == 1 && cur.cueEndMs > cur.cueStartMs &&
+        t >= cur.cueEndMs && !eng.cueEndHandled) {
+        eng.cueEndHandled = true;
+        eng.nextByUser();
+      }
+      for (const l of eng.listeners) {
+        try {
+          l();
+        } catch (e) {
+          // ignore
+        }
+      }
+    });
+    av.on('durationUpdate', (d: number) => {
+      if (eng.nativeMode) {
+        return;
+      }
+      eng.durationMs = d;
+      AppStorage.setOrCreate('npDur', d);
+    });
+    av.on('error', (err: BusinessError) => {
+      console.error(`PlayerEngine error: ${err.message}`);
+      eng.playing = false;
+      eng.emit();
+      // 自动跳到下一曲，避免整条队列卡死（连续失败超过队列长度则停下）
+      if (eng.queue.length > 1 && eng.errStreak < eng.queue.length) {
+        eng.errStreak++;
+        eng.nextByUser();
+      }
+    });
+    this.av = av;
+    return av;
+  }
+
+  private closeFd(): void {
+    if (this.fd >= 0) {
+      try {
+        fs.closeSync(this.fd);
+      } catch (e) {
+        // ignore
+      }
+      this.fd = -1;
+    }
+  }
+
+  private async loadCurrent(): Promise<void> {
+    const t = this.current();
+    if (!t) {
+      return;
+    }
+    const physical = t.isCueChild == 1 && t.cuePath != '' ? t.cuePath : t.path;
+    if (this.loadNative(physical, t)) {
+      return;
+    }
+    const av = await this.ensurePlayer();
+    this.closeFd();
+    try {
+      const f = fs.openSync(physical, fs.OpenMode.READ_ONLY);
+      this.fd = f.fd;
+      this.cueEndHandled = false;
+      await av.reset();
+      // 等 reset→initialized（设置 fdSrc 后异步迁移），再 prepare
+      const ready = this.setupStateWaiter('initialized');
+      av.fdSrc = { fd: this.fd };
+      await ready;
+      this.positionMs = 0;
+      this.durationMs = t.durationMs;
+      this.playing = false;
+      this.emit();
+      // prepare 的 Promise 在任务入队时即返回，需等 'prepared' 状态真正到达
+      const prepared = this.setupStateWaiter('prepared');
+      await av.prepare();
+      await prepared;
+      await av.setVolume(this.volume);
+      if (t.isCueChild == 1) {
+        const logical = Math.max(0, this.pendingSeekMs);
+        const logicalMax = this.logicalDur();
+        const target = t.cueStartMs + Math.min(logical, logicalMax > 0 ? logicalMax - 50 : logical);
+        av.seek(Math.max(0, Math.round(target)), media.SeekMode.SEEK_PREV_SYNC);
+        this.positionMs = Math.max(0, Math.round(target));
+        this.pendingSeekMs = 0;
+        this.emit();
+      } else if (this.pendingSeekMs > 0) {
+        const target = Math.min(this.pendingSeekMs,
+          this.durationMs > 0 ? this.durationMs - 50 : this.pendingSeekMs);
+        av.seek(Math.max(0, target), media.SeekMode.SEEK_PREV_SYNC);
+        this.positionMs = Math.max(0, target);
+        this.pendingSeekMs = 0;
+        this.emit();
+      }
+      this.loadedIndex = this.index;
+      await av.play();
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`loadCurrent fail: ${err.message}`);
+      this.playing = false;
+      this.emit();
+    }
+  }
+
+  setQueue(tracks: Track[], startIndex: number): void {
+    this.queue = tracks.slice();
+    this.playIndex(startIndex);
+  }
+
+  // 会话恢复：只装载队列与进度，不自动播放；用户点播时从断点续播
+  restoreQueue(tracks: Track[], startIndex: number, positionMs: number): void {
+    this.queue = tracks.slice();
+    this.index = startIndex >= 0 && startIndex < this.queue.length ? startIndex : -1;
+    this.loadedIndex = -1;
+    this.pendingSeekMs = Math.max(0, Math.round(positionMs));
+    const cur = this.current();
+    this.positionMs = cur && cur.isCueChild == 1 ? cur.cueStartMs + this.pendingSeekMs : this.pendingSeekMs;
+    this.durationMs = cur ? cur.durationMs : 0;
+    this.emit();
+  }
+
+  // 「下一首播放」：插到当前曲目之后；队列为空时视作起播
+  insertNext(track: Track): void {
+    if (this.queue.length == 0) {
+      this.queue = [track];
+      this.index = 0;
+    } else {
+      const at = this.index >= 0 ? this.index + 1 : 0;
+      this.queue.splice(at, 0, track);
+      if (this.index < 0) {
+        this.index = 0;
+      }
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 批量追加（播放列表「追加」）：不打断当前播放与已装载状态
+  appendQueue(tracks: Track[]): void {
+    if (tracks.length == 0) {
+      return;
+    }
+    this.queue = this.queue.concat(tracks);
+    if (this.index < 0) {
+      this.index = 0;
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 「加入队列」：追加到队尾
+  enqueue(track: Track): void {    if (this.queue.length == 0) {
+      this.queue = [track];
+      this.index = 0;
+    } else {
+      this.queue.push(track);
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 队列面板：移除指定项，保持当前曲目/播放状态与索引一致
+  removeAt(i: number): void {
+    if (i < 0 || i >= this.queue.length) {
+      return;
+    }
+    const wasCurrent = i == this.index;
+    const wasPlaying = this.playing;
+    this.queue.splice(i, 1);
+    if (this.queue.length == 0) {
+      this.index = -1;
+      this.loadedIndex = -1;
+      this.positionMs = 0;
+      this.durationMs = 0;
+      this.pendingSeekMs = 0;
+      this.stop();
+    } else if (wasCurrent) {
+      this.index = Math.min(i, this.queue.length - 1);
+      this.loadedIndex = -1;
+      this.positionMs = 0;
+      if (wasPlaying) {
+        this.loadCurrent();
+      } else {
+        this.stop();
+      }
+    } else if (i < this.index) {
+      this.index--;
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  // 清空队列并停止播放
+  clearQueue(): void {
+    if (this.queue.length == 0) {
+      return;
+    }
+    this.queue = [];
+    this.index = -1;
+    this.loadedIndex = -1;
+    this.positionMs = 0;
+    this.durationMs = 0;
+    this.pendingSeekMs = 0;
+    this.stop();
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.emit();
+  }
+
+  playIndex(i: number): void {
+    if (i < 0 || i >= this.queue.length) {
+      return;
+    }
+    this.index = i;
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+    this.loadCurrent();
+  }
+
+  toggle(): void {
+    if (this.index < 0) {
+      if (this.queue.length > 0) {
+        this.playIndex(0);
+      }
+      return;
+    }
+    if (this.nativeMode) {
+      if (this.playing) {
+        NativePlayer.pause();
+        this.playing = false;
+      } else {
+        NativePlayer.start();
+        this.playing = true;
+      }
+      this.emit();
+      return;
+    }
+    const av = this.av;
+    if (!av || this.loadedIndex != this.index) {
+      // 恢复的队列尚未装载，或队列编辑后当前项已变化：重新加载
+      this.loadCurrent();
+      return;
+    }
+    if (this.playing) {
+      av.pause();
+    } else {
+      av.play();
+    }
+  }
+
+  seek(ms: number): void {
+    const cur = this.current();
+    let target = ms;
+    if (cur && cur.isCueChild == 1) {
+      const maxLogical = this.logicalDur();
+      const logical = Math.max(0, Math.min(ms, maxLogical > 0 ? maxLogical - 50 : ms));
+      target = cur.cueStartMs + logical;
+    } else {
+      target = Math.max(0, Math.min(ms, this.durationMs > 0 ? this.durationMs - 50 : ms));
+    }
+    this.positionMs = Math.round(target);
+    if (this.nativeMode) {
+      this.cueEndHandled = false;
+      NativePlayer.seek(target);
+    } else if (this.av) {
+      this.av.seek(Math.round(target), media.SeekMode.SEEK_PREV_SYNC);
+    }
+    this.emit();
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+  }
+
+  setVolume(v: number): void {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.nativeMode) {
+      NativePlayer.setVolume(this.volume);
+    } else if (this.av) {
+      this.av.setVolume(this.volume);
+    }
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+  }
+
+  setMode(m: PlayMode): void {
+    this.mode = m;
+    if (this.onSessionDirty) {
+      this.onSessionDirty(true);
+    }
+  }
+
+  private randomIndex(): number {
+    if (this.queue.length <= 1) {
+      return this.index;
+    }
+    let r = this.index;
+    while (r == this.index) {
+      r = Math.floor(Math.random() * this.queue.length);
+    }
+    return r;
+  }
+
+  nextByUser(): void {
+    if (this.queue.length == 0) {
+      return;
+    }
+    if (this.mode == PlayMode.RANDOM) {
+      this.playIndex(this.randomIndex());
+    } else {
+      this.playIndex((this.index + 1) % this.queue.length);
+    }
+  }
+
+  prevByUser(): void {
+    if (this.queue.length == 0) {
+      return;
+    }
+    if (this.mode == PlayMode.RANDOM) {
+      this.playIndex(this.randomIndex());
+    } else {
+      this.playIndex((this.index - 1 + this.queue.length) % this.queue.length);
+    }
+  }
+
+  private onTrackEnd(): void {
+    if (this.mode == PlayMode.SINGLE) {
+      this.playIndex(this.index);
+    } else if (this.mode == PlayMode.RANDOM) {
+      this.playIndex(this.randomIndex());
+    } else if (this.mode == PlayMode.LOOP) {
+      this.playIndex((this.index + 1) % this.queue.length);
+    } else {
+      // 顺序：播完即止
+      if (this.nativeMode) {
+        NativePlayer.stop();
+        NativePlayer.release();
+        this.nativeMode = false;
+        this.stopTick();
+      }
+      this.playing = false;
+      this.emit();
+    }
+  }
+
+  stop(): void {
+    this.stopTick();
+    if (this.nativeMode) {
+      NativePlayer.stop();
+      NativePlayer.release();
+      this.nativeMode = false;
+    }
+    if (this.av) {
+      try {
+        this.av.stop();
+      } catch (e) {
+        // ignore
+      }
+    }
+    this.closeFd();
+    this.loadedIndex = -1;
+    this.playing = false;
+    this.emit();
+  }
+}

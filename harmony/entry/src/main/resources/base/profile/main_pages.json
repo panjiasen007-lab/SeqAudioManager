@@ -1,0 +1,12 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/TrackEditPage",
+    "pages/HealthPage",
+    "pages/LibraryToolsPage",
+    "pages/CoverPage",
+    "pages/LyricsPage",
+    "pages/EqPage",
+    "pages/MiniPlayer"
+  ]
+}
