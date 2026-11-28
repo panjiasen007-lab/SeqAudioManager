@@ -95,7 +95,7 @@ java -jar "$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar
 |---|---|
 | 版本 | v1.3.7 |
 | 侧载包 | `SeqAudioManager-v1.3.7-harmony-arm64.hap`（可双击 / `hdc install -r` 安装） |
-| 上架包 | `SeqAudioManager-v1.3.7-harmony-arm64.app`（App Pack，可直接上传 AppGallery） |
+| 上架包 | `.app` 仅本地生成（App Pack，不能直接安装，仅用于 AppGallery 上传），不随 GitHub 发布 |
 | 签名 | AGC 发布证书（`seqaudio-release`，有效期至 2029-11-27）+ Release Profile（`app_gallery` 分发、无设备白名单） |
 | 启动 | `hdc shell aa start -a EntryAbility -b com.seqaudio.manager` |
 | 校验 | 同目录 `.sha256` 文件；Profile 类型 `release` |
