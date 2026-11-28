@@ -13,10 +13,14 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-1.8.0-4d7cfe">
+  <img alt="version" src="https://img.shields.io/badge/version-1.8.2-4d7cfe">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--3.0-34d399">
-  <img alt="platform" src="https://img.shields.io/badge/platform-Windows-185fa5">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20HarmonyOS-185fa5">
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
+</p>
+
+<p align="center">
+  Windows 版（根目录）与 HarmonyOS PC 版（<a href="harmony/README.md">harmony/</a>）同仓维护，版本号统一为 v1.8.2。
 </p>
 
 ---
