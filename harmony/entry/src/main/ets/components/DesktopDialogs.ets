@@ -564,7 +564,7 @@ export struct AboutDialog {
   onClose: () => void = () => {
   };
   @State private tab: number = 0;
-  private version: string = '1.3.7';
+  private version: string = '1.8.2';
 
   @Builder
   tabButton(label: string, index: number) {

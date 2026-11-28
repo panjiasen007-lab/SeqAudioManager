@@ -53,7 +53,7 @@ import { PlaylistStore } from '../playlist/PlaylistStore';
 import { WindowUtil } from '../utils/WindowUtil';
 import { MiniBridge, MiniState } from '../mini/MiniBridge';
 
-const APP_VERSION = '1.3.7';
+const APP_VERSION = '1.8.2';
 const MODE_GLYPHS: string[] = ['→', '①', '↻', '⤨'];
 const MODE_NAMES: string[] = ['顺序播放', '列表循环', '单曲循环', '随机'];
 

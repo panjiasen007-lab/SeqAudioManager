@@ -3,7 +3,7 @@
 本目录是鸿蒙 PC（2in1）版，从 `main` 分支的 v1.8.2 起独立演进。
 桌面版（Python + PySide6）与鸿蒙版是两套技术栈，**不是移植，是重写**。
 
-## 当前状态（v1.3.7 · 窗口化桌面工作台 + 独立迷你播放器 + 核心算法 + SACD ISO）
+## 当前状态（v1.8.2 · 与 Windows 版版本号对齐 · 窗口化桌面工作台 + 独立迷你播放器 + 核心算法 + SACD ISO）
 
 M1（v1.1 曲库管理基线，T01–T05）已交付；M2（v1.2 音质与体验）已完成 T06–T10；v1.3 起按
 [`docs/v1.3-UI-REPLICATION-PLAN.md`](docs/v1.3-UI-REPLICATION-PLAN.md) 把界面重做为与桌面版 v1.8.2 同构的桌面工作台。
@@ -70,7 +70,7 @@ hvigorw.bat assembleHap --mode module -p product=default -p buildMode=release --
 # App Pack（未签名，产物 build/outputs/default/harmony-default-unsigned.app）
 hvigorw.bat assembleApp --mode project -p product=default -p buildMode=release --no-daemon
 # 安装 / 启动（签名后）
-hdc install -r SeqAudioManager-v1.3.7-harmony-arm64.hap
+hdc install -r SeqAudioManager-v1.8.2-harmony-arm64.hap
 hdc shell aa start -a EntryAbility -b com.seqaudio.manager
 ```
 
@@ -83,7 +83,7 @@ java -jar "$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar
   -mode localSign -keyAlias seqaudioRelease -signAlg SHA256withECDSA \
   -appCertFile seqaudio-release.cer -profileFile seqaudio-release.p7b \
   -keystoreFile seqaudio-release.p12 -keystorePwd ****** -keyPwd ****** \
-  -inFile entry-default-unsigned.hap -outFile SeqAudioManager-v1.3.7-harmony-arm64.hap \
+  -inFile entry-default-unsigned.hap -outFile SeqAudioManager-v1.8.2-harmony-arm64.hap \
   -signCode 1 -compatibleVersion 26
 ```
 
@@ -93,15 +93,15 @@ java -jar "$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.3.7 |
-| 侧载包 | `SeqAudioManager-v1.3.7-harmony-arm64.hap`（可双击 / `hdc install -r` 安装） |
+| 版本 | v1.8.2（与 Windows 版对齐） |
+| 侧载包 | `SeqAudioManager-v1.8.2-harmony-arm64.hap`（可双击 / `hdc install -r` 安装） |
 | 上架包 | `.app` 仅本地生成（App Pack，不能直接安装，仅用于 AppGallery 上传），不随 GitHub 发布 |
 | 签名 | AGC 发布证书（`seqaudio-release`，有效期至 2029-11-27）+ Release Profile（`app_gallery` 分发、无设备白名单） |
 | 启动 | `hdc shell aa start -a EntryAbility -b com.seqaudio.manager` |
 | 校验 | 同目录 `.sha256` 文件；Profile 类型 `release` |
 | 升级提示 | 从调试签名包升级会报 `install sign info inconsistent`（9568332），需先卸载再安装 |
 
-版本说明与安装/升级/卸载验证记录见 [`docs/v1.3.7-发布说明.md`](docs/v1.3.7-发布说明.md)。
+版本说明与安装/升级/卸载验证记录见 [`docs/v1.8.2-发布说明.md`](docs/v1.8.2-发布说明.md)。
 
 > **发布渠道**：Release 由个人开发者通过 GitHub 直接分发，仅供测试与学习，**未完成中国大陆 APP 备案**，不代表已上架应用商店；上架 AppGallery 前需先完成备案。
 > 随包 FFmpeg 为 LGPL v2.1+，源码与构建方式见 [`tools/ffmpeg-ohos/README.md`](tools/ffmpeg-ohos/README.md)。
